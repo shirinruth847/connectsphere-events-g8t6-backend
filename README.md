@@ -67,6 +67,8 @@ Please refer to the `COMMIT_MESSAGES.md` file in the root directory for details.
 
 ```bash
 connectsphere-events-g8t6-backend/
+├── config/               # External service configurations (Supabase)
+│   └── supabase.js 
 ├── controller/           # Route handler logic and controllers
 │   └── authController.js
 ├── middleware/           # Request/response middleware functions
