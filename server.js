@@ -17,6 +17,7 @@ app.get('/', (req, res) => {
 
 // Use your routes under "/api"
 app.use("/api", routes);
+app.use('/api/events', require('./routes/eventRoutes'));
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
