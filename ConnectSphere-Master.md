@@ -2,8 +2,8 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 0.5 |
-| Updated | 22 September 2026 |
+| Version | 0.6 |
+| Updated | 23 September 2026 |
 | Status | Architecture and implementation baseline; repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
@@ -302,9 +302,18 @@ Route groups organize code and do not change URLs. Dynamic App Router segments u
 - `public` contains immutable public assets. Do not place secrets or private documents there.
 - Core business endpoints belong to the Express backend, not `src/app/api`.
 
-### 2.7 Local development commands
+### 2.7 Local environment setup and startup verification
 
-Backend:
+Both applications must start and pass the checks in this section before any ticket work begins. This applies to developers and coding agents alike. Work started on an environment that does not boot cannot be verified, and setup failures are easily misreported as defects in the new work.
+
+#### 2.7.1 Prerequisites
+
+- Node.js (current LTS release) and npm.
+- Access to the Supabase development project `rvwiflsedoujspmzfrbq` (section 10.1) to copy its URL and API key.
+- Both repositories cloned and checked out on the branch you will work from.
+- Ports 8000 (backend) and 3000 (frontend) free, or changed together as described below.
+
+#### 2.7.2 Backend setup
 
 ```bash
 git clone [backend-clone-url]
@@ -312,13 +321,22 @@ cd connectsphere-events-g8t6-backend
 npm install
 ```
 
-Create `.env` in the backend root. The README-confirmed minimum is:
+Create a file named exactly `.env` in the backend root (on Windows, confirm the editor did not save it as `.env.txt`):
 
 ```dotenv
 PORT=8000
+SUPABASE_URL=https://rvwiflsedoujspmzfrbq.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service role key from the Supabase dashboard: Project Settings → API Keys>
 ```
 
-Add Supabase and other server-only values under the exact names used by `config/supabase.js`; update the backend README and `.env.example` when those names are implemented. Never commit `.env`.
+| Variable | Required | Read by | Notes |
+| --- | --- | --- | --- |
+| `PORT` | No | `server.js` | Defaults to `8000`. If changed, change the frontend `BACKEND_URL` to match. |
+| `SUPABASE_URL` | Yes | `config/supabase.js` | Development project URL. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes, unless `SUPABASE_ANON_KEY` is set | `config/supabase.js` | Bypasses row-level security. Server-only: never place it in the frontend, a commit, Jira or chat. |
+| `SUPABASE_ANON_KEY` | Fallback only | `config/supabase.js` | Used only when the service role key is absent. RLS then applies to backend queries, so behavior can differ from the service-role setup. |
+
+`config/supabase.js` throws `Missing Supabase environment variables in .env` during startup when `SUPABASE_URL` or both keys are missing. `.env` is ignored by `.gitignore`; never commit it. When a work item introduces a new backend variable, add it to this table and the backend README in the same work item.
 
 Start the backend:
 
@@ -326,19 +344,85 @@ Start the backend:
 npm run dev
 ```
 
-The current backend smoke check is `GET http://localhost:8000/api/healthcheck`, which returns a successful application-health message. This health check is an operational baseline, not a complete API specification.
+`npm run dev` runs `nodemon server.js`, which restarts on file changes but does not reload `.env`; restart it manually after editing `.env`.
 
-Frontend:
+#### 2.7.3 Backend startup check
+
+All three must pass:
+
+1. The terminal prints `Server is running on http://localhost:8000` with no stack trace.
+2. `GET http://localhost:8000/` returns `Server is working!`. This confirms Express only.
+3. `GET http://localhost:8000/api/healthcheck` returns HTTP 200 with `{"message":"App is working well"}`. This confirms the Supabase URL and key are accepted.
+
+```bash
+curl http://localhost:8000/api/healthcheck
+```
+
+In Windows PowerShell 5.1, use `curl.exe` (plain `curl` is an alias for `Invoke-WebRequest`) or open the URL in a browser.
+
+The health check deliberately queries a table that does not exist. Supabase's table-not-found response (`PGRST205`) counts as success because it proves the request was authenticated and reached the database. Any other Supabase error returns HTTP 500 `{"error":"Internal Server Error"}`, and the real cause is logged in the backend terminal. The health check is an operational baseline, not a complete API specification.
+
+#### 2.7.4 Frontend setup
 
 ```bash
 cd connectsphere-g8t6
 npm install
+```
+
+Create `.env.local` in the frontend root (`connectsphere-g8t6/`):
+
+```dotenv
+BACKEND_URL=http://localhost:8000
+```
+
+| Variable | Required | Read by | Notes |
+| --- | --- | --- | --- |
+| `BACKEND_URL` | Yes | `api/events.tsx` | Base URL of the running backend, without a trailing slash. Read on the server by `app/page.tsx` (a server component), so it has no `NEXT_PUBLIC_` prefix. |
+
+A variable that must reach browser code needs the Next.js `NEXT_PUBLIC_` prefix and is then visible to every user. It must never contain a service-role key, database password or private MCP credential. `.env*` files are ignored by `.gitignore`; never commit them. Next.js reads `.env.local` at startup, so restart the dev server after editing it. When a work item introduces a new frontend variable, add it to this table and the frontend README in the same work item.
+
+With the backend already running, start the frontend:
+
+```bash
 npm run dev
 ```
 
-Open `http://localhost:3000`. Use `.env.local` for frontend configuration. Any browser-exposed variable must use the repository's established Next.js public-variable convention and must never contain a service-role key, database password or private MCP credential.
+#### 2.7.5 Frontend startup check
 
-Before claiming a task is verified, inspect `package.json` in the relevant repository and run its actual lint, test and build scripts. Do not invent missing scripts or infer success from the development server alone.
+1. Open `http://localhost:3000`.
+2. The page displays the pretty-printed `{"message": "App is working well"}` response. `app/page.tsx` fetches it from the backend health check through `api/events.tsx`, so this confirms frontend → backend → Supabase end to end.
+3. The frontend terminal logs `http://localhost:8000/api/healthcheck`. If it logs `undefined/api/healthcheck`, `BACKEND_URL` was not loaded.
+
+If a work item removes the health check from the landing page (for example the `src` migration in section 2.5), it must provide an equivalent end-to-end check and update this section in the same work item.
+
+#### 2.7.6 Startup gate
+
+Before starting any ticket:
+
+1. Pull the latest changes on the working branch in both repositories and run `npm install` in each, because dependencies may have changed.
+2. Start the backend and pass section 2.7.3.
+3. Start the frontend and pass section 2.7.5.
+4. If any check fails, **stop**. Do not begin the ticket and do not change feature code to work around the failure.
+   - Setup problems (missing or wrong environment values, ports, dependencies): fix them using section 2.7.7, then repeat the checks.
+   - Code problems on the branch (for example `Cannot find module`): report the exact error, branch and commit to the team and resolve it as its own work item before starting the ticket.
+5. Record in the ticket report that the gate passed, with the branch and commit of each repository.
+
+A coding agent must run these checks itself by starting both servers and requesting the check URLs; it must not assume they pass. If the environment files are missing, the agent asks the developer to create them and never asks for keys to be pasted into the conversation.
+
+#### 2.7.7 Troubleshooting
+
+| Symptom | Likely cause | Action |
+| --- | --- | --- |
+| Backend exits with `Missing Supabase environment variables in .env` | `.env` missing, misnamed, outside the backend root or missing values | Create it as in section 2.7.2 and restart |
+| Backend exits with `Cannot find module '…'` | A file on the branch requires a module that is not committed | Code problem: stop and report as in section 2.7.6 |
+| Backend exits with `EADDRINUSE` | Port already in use | Stop the other process, or change `PORT` and `BACKEND_URL` together |
+| Health check returns 500; backend log shows `Invalid API key` | Wrong key or key from another project | Copy the key again from project `rvwiflsedoujspmzfrbq` |
+| Health check returns 500; backend log shows `fetch failed` or `ENOTFOUND` | Wrong `SUPABASE_URL` or no network access | Check the URL and connectivity |
+| Frontend logs `undefined/api/healthcheck` | `.env.local` missing, misnamed or not loaded | Create it as in section 2.7.4 and restart the frontend |
+| Frontend page shows `fetch failed` / `ECONNREFUSED` | Backend not running or on a different port | Start the backend; make `BACKEND_URL` match `PORT` |
+| Frontend page shows `Failed to fetch data` | Backend returned a non-2xx response | Pass section 2.7.3 first |
+
+Passing the startup gate is a precondition, not verification of the task. Before claiming a task is verified, inspect `package.json` in the relevant repository and run its actual lint, test and build scripts. Do not invent missing scripts or infer success from the development server alone.
 
 ### 2.8 Commit and branch conventions
 
@@ -671,14 +755,15 @@ The frontend must not duplicate lifecycle or allocation truth. It may use types 
 ### 9.2 Ticket workflow
 
 1. Read the repository's `AGENTS.md` or equivalent instructions, README, this master, relevant source files and current git status.
-2. Read the Jira ticket, acceptance criteria, linked test cases, dependencies and relevant comments.
-3. Identify the owning repository and whether coordinated work is needed in the other repository.
-4. Verify current package versions, scripts, schema/migrations and existing implementation before designing the change.
-5. Implement within the file-placement rules in section 2. Keep business decisions in the backend.
-6. Add or update migrations before applying schema changes. Use namespaced synthetic fixtures.
-7. Run the real repository's lint/test/build commands and the relevant role journeys.
-8. Update the README if setup, scripts or actual structure changed. Update this master if an enduring architecture or business rule changed.
-9. Report what changed, commands/results, database mutations, unresolved gaps and counterpart work still required.
+2. Pass the startup gate in section 2.7.6 for both repositories. Do not continue until it passes.
+3. Read the Jira ticket, acceptance criteria, linked test cases, dependencies and relevant comments.
+4. Identify the owning repository and whether coordinated work is needed in the other repository.
+5. Verify current package versions, scripts, schema/migrations and existing implementation before designing the change.
+6. Implement within the file-placement rules in section 2. Keep business decisions in the backend.
+7. Add or update migrations before applying schema changes. Use namespaced synthetic fixtures.
+8. Run the real repository's lint/test/build commands and the relevant role journeys.
+9. Update the README if setup, scripts, environment variables or actual structure changed. Update this master if an enduring architecture or business rule changed.
+10. Report the startup gate result, what changed, commands/results, database mutations, unresolved gaps and counterpart work still required.
 
 If Jira acceptance criteria or linked tests are inaccessible, report the exact gap. Do not invent them and do not mark the ticket complete based only on assumptions in this document.
 
@@ -789,6 +874,7 @@ If this master, Jira, a repository README and implemented code disagree, surface
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 0.6 | 2026-09-23 | Startup gate added | Rewrote section 2.7 with the actual backend (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_ANON_KEY`, `PORT`) and frontend (`BACKEND_URL`) environment variables, backend and end-to-end startup checks, a mandatory startup gate before ticket work and troubleshooting; added the gate to the section 9.2 ticket workflow |
 | 0.5 | 2026-09-22 | Backend coding convention added | Established the supplied backend examples as the default CommonJS, Express route → controller → model structure and writing-style reference, with safeguards against copying placeholder names or error-swallowing behavior |
 | 0.4 | 2026-09-22 | Repository-aligned redesign | Rebased architecture on the backend and frontend READMEs; confirmed Next.js App Router and JavaScript/Express structures; replaced invented source trees; added current/target layouts and setup conventions; removed the API contract and runtime architecture/deployment sections |
 | 0.3 | 2026-09-22 | Development access policy | Enabled project-scoped database writes for every developer and added migration, fixture and Auth-account controls |
