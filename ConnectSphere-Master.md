@@ -2,8 +2,8 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 0.6 |
-| Updated | 23 September 2026 |
+| Version | 0.7 |
+| Updated | 30 September 2026 |
 | Status | Architecture and implementation baseline; repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
@@ -754,16 +754,17 @@ The frontend must not duplicate lifecycle or allocation truth. It may use types 
 
 ### 9.2 Ticket workflow
 
-1. Read the repository's `AGENTS.md` or equivalent instructions, README, this master, relevant source files and current git status.
-2. Pass the startup gate in section 2.7.6 for both repositories. Do not continue until it passes.
-3. Read the Jira ticket, acceptance criteria, linked test cases, dependencies and relevant comments.
-4. Identify the owning repository and whether coordinated work is needed in the other repository.
-5. Verify current package versions, scripts, schema/migrations and existing implementation before designing the change.
-6. Implement within the file-placement rules in section 2. Keep business decisions in the backend.
-7. Add or update migrations before applying schema changes. Use namespaced synthetic fixtures.
-8. Run the real repository's lint/test/build commands and the relevant role journeys.
-9. Update the README if setup, scripts, environment variables or actual structure changed. Update this master if an enduring architecture or business rule changed.
-10. Report the startup gate result, what changed, commands/results, database mutations, unresolved gaps and counterpart work still required.
+1. Run the design reference gate in section 10.5 as soon as the prompt is received. For a task that creates or changes UI, do not plan, start servers or edit files until the gate is satisfied.
+2. Read the repository's `AGENTS.md` or equivalent instructions, README, this master, relevant source files and current git status.
+3. Pass the startup gate in section 2.7.6 for both repositories. Do not continue until it passes.
+4. Read the Jira ticket, acceptance criteria, linked test cases, dependencies and relevant comments.
+5. Identify the owning repository and whether coordinated work is needed in the other repository.
+6. Verify current package versions, scripts, schema/migrations and existing implementation before designing the change.
+7. Implement within the file-placement rules in section 2. Keep business decisions in the backend.
+8. Add or update migrations before applying schema changes. Use namespaced synthetic fixtures.
+9. Run the real repository's lint/test/build commands and the relevant role journeys.
+10. Update the README if setup, scripts, environment variables or actual structure changed. Update this master if an enduring architecture or business rule changed.
+11. Report the startup gate result, the design reference used (Figma frame and frame-to-URL mapping, existing reference page, or developer override and reason) or that the design gate did not apply, what changed, commands/results, database mutations, unresolved gaps and counterpart work still required.
 
 If Jira acceptance criteria or linked tests are inaccessible, report the exact gap. Do not invent them and do not mark the ticket complete based only on assumptions in this document.
 
@@ -784,6 +785,7 @@ MCP connections assist development; they are not runtime dependencies of Connect
 | Context7 | `https://mcp.context7.com/mcp` | Retrieve version-aware documentation for installed libraries |
 | Sequential Thinking | `@modelcontextprotocol/server-sequential-thinking` | Optional planning aid for complex cross-domain work |
 | Supabase | `https://mcp.supabase.com/mcp?project_ref=rvwiflsedoujspmzfrbq&features=database,docs` | Project-scoped, write-enabled shared development database |
+| Figma | `https://mcp.figma.com/mcp` | Read team designs (frame screenshots and design context) for UI tasks under section 10.5 |
 
 ### 10.2 Usage rules
 
@@ -794,6 +796,7 @@ MCP connections assist development; they are not runtime dependencies of Connect
 | Context7 | Inspect lockfiles first, then query documentation for the installed version. If only a nearby version is indexed, state the mismatch and confirm material differences with official documentation. |
 | Sequential Thinking | Use for decomposition and edge-case review when useful. It does not verify facts, source code, acceptance criteria or test results. Do not expose private chain-of-thought; record concise decisions and checks. |
 | Supabase | Inspect schema/migrations, apply reviewed versioned migrations and create/clean task-related synthetic data. Preserve project scope, migration history and team coordination. |
+| Figma | Read designs for UI tasks as required by section 10.5, using frame-specific links for screenshots and design context. Load the agent's Figma design-to-code instructions or skill first when one is available. Never request metadata for a whole Figma page. Figma writes (editing or creating files, Code Connect mappings) require explicit developer authorization. |
 
 Store credentials only in private developer agent configuration. Never commit or paste tokens. A saved configuration, completed authentication and successful tool call are three different states; verify all relevant stages. Reuse working connections rather than reinstalling them.
 
@@ -820,6 +823,66 @@ Use synthetic organiser, coordinator, venue staff, technical support and attende
 Auth account creation and database seeding are separate capabilities and are not one SQL transaction. Create login-capable accounts through supported signup or Auth Admin mechanisms, then create matching profile/role/membership data through trusted setup. Never insert, update or delete Auth-managed records directly with raw SQL.
 
 Maintain repeatable backend seed/fixture files plus a manifest of created IDs. Make setup idempotent and record partial progress. Cleanup only records and Auth accounts owned by the current test run, in dependency-safe order. Never use a shared-database reset as routine cleanup and never send test invitations to real users.
+
+### 10.5 Design reference gate
+
+UI work is built from a team design reference, preferably a Figma frame. Every agent runs this gate when it receives a prompt, before planning, starting servers or editing files. Reading files, the ticket and the design is permitted while the gate runs.
+
+#### 10.5.1 Scope
+
+The gate applies only to tasks that create or change UI: a new page, a new component, or a change to layout, styling or visible content. It does not apply to backend work, or to integration work that connects the frontend to the backend without changing how existing UI looks. If integration work adds new visible UI, such as a new error banner component, the gate applies to that part. State in the plan whether the gate applies and why.
+
+#### 10.5.2 Figma link in the prompt
+
+A Figma link is any `figma.com` or `*.figma.com` URL, including `/design/`, `/file/`, `/proto/`, `/board/`, `/slides/`, `/make/` and `embed.figma.com` links, also when it appears inside pasted text.
+
+When the prompt contains a Figma link:
+
+1. The link must identify a frame through its `node-id`. If it identifies only a file, ask the developer for the frame link. Never request metadata for a whole Figma page; the team file is too large for an agent to read that way.
+2. Retrieve the frame screenshot and design context through the Figma MCP before planning.
+3. If the link cannot be opened (Figma MCP not authenticated, no file access, wrong file or node), stop and report the exact problem. Do not continue without the design.
+4. If the file contains several versions of the same screen and it is unclear which one applies, ask the developer.
+
+#### 10.5.3 No Figma link
+
+- **Changing an existing page or component:** the existing page or component is the reference.
+- **Creating a new page:** a Figma frame link pasted by the developer is the standard. Without one, use an existing ConnectSphere page with the same kind of layout (for example another list, form, detail or dashboard page), state which page will be used, and continue. If no such page exists, stop, do not edit files, and ask the developer for a Figma frame link.
+
+The `create-next-app` starter content is not a valid reference: the template `app/page.tsx`, `next.svg`, `vercel.svg` and the default `--background`/`--foreground` tokens. Generic Tailwind or component-library defaults and the agent's own preferences are not references either.
+
+If no design exists for the screen, the developer may explicitly instruct the agent to proceed without one. Record the override and the developer's reason in the ticket report, follow existing project conventions, and list the visual decisions the agent made so they can be reviewed.
+
+#### 10.5.4 Page URLs from Figma frames
+
+The URL of a page built from a Figma frame is named after the page's purpose, not copied from the frame name.
+
+1. Determine the purpose from the frame name, the screen's contents and the ticket.
+2. If the purpose matches a URL in section 3.4, use that URL exactly. For example, the "Event Discovery" frame becomes `localhost:3000/events`, "Create & Draft Event Request Form" becomes `/events/new` and a sign-in frame becomes `/login`.
+3. If no listed URL fits, propose one in the same style: lowercase, hyphen-separated words, plural resource nouns and App Router dynamic segments such as `[eventId]`. Confirm it with the developer, then add it to section 3.4 in the same work item.
+4. Frames that share a name: separate screens each receive their own purpose-based URL; versions of the same screen share one URL, and the developer chooses which version to build. If it is unclear which case applies, ask.
+5. Visible text follows the design wording; the URL follows this section. For example, a navigation link may read "My Events" while the page remains `/my-registrations`.
+6. List each frame-to-URL mapping in the ticket report, for example `5:7673 "Event Discovery" → /events`.
+
+#### 10.5.5 Authority of the design
+
+A design reference controls visual presentation only. Jira acceptance criteria, the business rules in this master and backend authorization still apply, and every page still needs the states required by section 3.4. In particular:
+
+- Notes and questions written on the Figma canvas are open design discussion, not requirements.
+- Design elements outside the baseline or the ticket (for example preferences, live-update indicators or footer links to unbuilt pages) are raised with the developer, not built silently.
+- Names, dates and figures shown in designs are placeholder content, not data.
+- Conflicts between a design and this master or Jira are surfaced to the developer as described in section 12.2.
+
+#### 10.5.6 Follow-up prompts
+
+Run the gate once per task. Follow-up prompts in the same task reuse the reference already confirmed. If it is unclear whether that reference still covers a follow-up request, for example a new page or component the design does not show, ask the developer.
+
+#### 10.5.7 Design reference list
+
+| Design | Link | Notes |
+| --- | --- | --- |
+| ConnectSphere screens (Figma file "SPM") | `https://www.figma.com/design/4yEqzlF2xryGHF7f9a5s7d/SPM` | One page ("Page 1") with screens grouped under attendee, organiser, coordinator, venue staff and technical support headings. Use it for context; build from frame-specific links. |
+
+Add a row when the team creates another design file or library. Screenshot URLs returned by the Figma MCP are short-lived and private; do not paste them into Jira or committed files.
 
 ## 11. Verification Requirements
 
@@ -868,12 +931,13 @@ For an accepted customer change:
 4. Update implementation, migrations, READMEs and tests together where applicable.
 5. State whether the change is proposed, accepted or implemented. Implemented changes require code/database identifiers and actual verification evidence.
 
-If this master, Jira, a repository README and implemented code disagree, surface the conflict. Jira controls the ticket's accepted behavior; this master controls enduring architecture/business intent; the code and migrations show current implementation; the README controls runnable repository setup. Do not silently select whichever source is easiest.
+If this master, Jira, a repository README and implemented code disagree, surface the conflict. Jira controls the ticket's accepted behavior; this master controls enduring architecture/business intent; the code and migrations show current implementation; the README controls runnable repository setup. A design reference (section 10.5) controls visual presentation only. Do not silently select whichever source is easiest.
 
 ### 12.3 Changelog
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 0.7 | 2026-09-30 | Design reference gate added | Added section 10.5: a design reference gate for UI tasks covering Figma frame links, fallback to existing pages, developer override, purpose-based page URLs, design authority, follow-up prompts and the team design reference list. Added Figma to sections 10.1 and 10.2, made the gate step 1 of the section 9.2 ticket workflow and added design precedence to section 12.2. Jira request: none (direct developer request). Compatibility: documentation only; no code or database change |
 | 0.6 | 2026-09-23 | Startup gate added | Rewrote section 2.7 with the actual backend (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_ANON_KEY`, `PORT`) and frontend (`BACKEND_URL`) environment variables, backend and end-to-end startup checks, a mandatory startup gate before ticket work and troubleshooting; added the gate to the section 9.2 ticket workflow |
 | 0.5 | 2026-09-22 | Backend coding convention added | Established the supplied backend examples as the default CommonJS, Express route → controller → model structure and writing-style reference, with safeguards against copying placeholder names or error-swallowing behavior |
 | 0.4 | 2026-09-22 | Repository-aligned redesign | Rebased architecture on the backend and frontend READMEs; confirmed Next.js App Router and JavaScript/Express structures; replaced invented source trees; added current/target layouts and setup conventions; removed the API contract and runtime architecture/deployment sections |
