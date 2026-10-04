@@ -2,8 +2,8 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 0.7 |
-| Updated | 30 September 2026 |
+| Version | 0.8 |
+| Updated | 4 October 2026 |
 | Status | Architecture and implementation baseline; repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
@@ -498,11 +498,12 @@ Every page must handle loading, empty, validation, forbidden, conflict, retry an
 
 ### 4.1 Authentication sequence
 
-1. The frontend signs the user in through Supabase Auth.
-2. The frontend sends the access token to the Express backend with authenticated business requests.
-3. `middleware/auth.js` verifies the token's signature, issuer, expiry and audience using the supported Supabase verification mechanism.
+1. The frontend posts the email and password to `POST /api/auth/login`. The backend validates the fields, signs in through Supabase Auth, rejects Auth accounts without an active application profile, and returns the Supabase session. Every rejected login gets the same generic `401` response.
+2. The frontend stores that session with the Supabase browser client, which refreshes it directly with Supabase Auth, and sends the access token to the Express backend with authenticated business requests.
+3. `middleware/auth.js` verifies the token with Supabase Auth (`auth.getUser`). This checks signature, expiry and audience, and also rejects a token whose session was revoked. Local-only JWT verification would accept a logged-out token until it expires.
 4. The backend loads the active application profile, trusted roles and organization memberships.
 5. The controller/model operation checks role, relationship, allowed fields and lifecycle state.
+6. `POST /api/auth/logout` revokes the current device's session (access and refresh token) server-side, so protected requests fail immediately after logout.
 
 Do not trust a decoded-only token, a body-supplied actor ID, an `X-User-ID` header or user-editable metadata for permissions. Role switching in the UI changes presentation only; it cannot expand server permissions.
 
@@ -530,6 +531,7 @@ Same-organization visibility begins after submission and does not grant edit rig
 - Database credentials, service-role keys and private MCP tokens must not enter frontend code, committed files, logs, Jira or chat output.
 - Use parameterized queries, explicit allowed origins, bounded request sizes and redacted errors/logs.
 - Audit records are append-only for the application runtime.
+- The backend connects as `service_role`, which holds explicit table grants (`SELECT/INSERT/UPDATE/DELETE`; `SELECT/INSERT` only on `activity_log`). The project sets no default privileges, so a migration that creates a table must grant `service_role` its access in the same migration. `anon` and `authenticated` hold no table DML.
 
 If the project temporarily exposes tables through a Supabase Data API, row-level security and grants must prevent the browser from bypassing backend workflow rules. The preferred application boundary remains the Express backend.
 
@@ -648,9 +650,9 @@ Retain events, bookings, requests, registrations and activity after closure. Res
 
 | Table | Ownership and key constraints |
 | --- | --- |
-| `profiles` | Auth-linked user ID, name, phone, active state and timestamps; no password |
-| `user_roles` | Unique user/role pairs for the five application roles; staff assignment is trusted only |
-| `organisations`, `organisation_memberships` | Verified memberships; never infer membership from editable email/domain text |
+| `profiles` (implemented as `user`) | Integer `user_id`, unique `auth_user_id` linking the Auth user (`ON DELETE SET NULL`), email, name, phone, `role`, `is_active` and timestamps; no password. Identity is resolved by `auth_user_id`, never by email |
+| `user_roles` | Unique user/role pairs for the five application roles; staff assignment is trusted only. **Not yet implemented:** `user.role` currently holds exactly one role per user, so multi-role users are an open gap |
+| `organisations`, `organisation_memberships` (implemented as `organisation`, `organisation_membership`; `event.organisation_id` is nullable) | Verified memberships; never infer membership from editable email/domain text |
 | `staff_assignment_cursors` | Transaction-locked cursor for deterministic coordinator rotation |
 | `events` | Owner, optional organization, coordinator, lifecycle, requirements, timing, attendance, registration policy, publication, versions and confirmation history |
 | `clarifications` | Preserved question/response rounds with state and timestamps |
@@ -937,6 +939,7 @@ If this master, Jira, a repository README and implemented code disagree, surface
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 0.8 | 2026-10-04 | Implemented (SPM-32) | Section 4.1: login goes through `POST /api/auth/login`, token verification is revocation-aware (`auth.getUser`), and logout revokes the session server-side. Section 4.3: explicit `service_role` table grants with no default privileges. Section 6.2: implemented names `user` (with `auth_user_id`, `is_active`), `organisation` and `organisation_membership`; `user_roles` recorded as not implemented. Jira request: SPM-32 (developer decision resolving the conflict between the Master and subtask SPM-104). Compatibility: additive endpoints and nullable/defaulted columns. Database: migrations `20261004033928_spm32_auth_link_and_organisations` and `20261004034842_spm32_grant_backend_service_role`, verified by `npm test` and `npm run test:integration` |
 | 0.7 | 2026-09-30 | Design reference gate added | Added section 10.5: a design reference gate for UI tasks covering Figma frame links, fallback to existing pages, developer override, purpose-based page URLs, design authority, follow-up prompts and the team design reference list. Added Figma to sections 10.1 and 10.2, made the gate step 1 of the section 9.2 ticket workflow and added design precedence to section 12.2. Jira request: none (direct developer request). Compatibility: documentation only; no code or database change |
 | 0.6 | 2026-09-23 | Startup gate added | Rewrote section 2.7 with the actual backend (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_ANON_KEY`, `PORT`) and frontend (`BACKEND_URL`) environment variables, backend and end-to-end startup checks, a mandatory startup gate before ticket work and troubleshooting; added the gate to the section 9.2 ticket workflow |
 | 0.5 | 2026-09-22 | Backend coding convention added | Established the supplied backend examples as the default CommonJS, Express route → controller → model structure and writing-style reference, with safeguards against copying placeholder names or error-swallowing behavior |
