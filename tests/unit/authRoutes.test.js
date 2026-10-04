@@ -43,7 +43,7 @@ describe("POST /api/auth/login", () => {
     ["TECH_SUPPORT", "/dashboard"],
     ["ORGANISER", "/dashboard"],
     ["ATTENDEE", "/my-registrations"],
-  ])("signs in a %s and returns their home path", async (role, homePath) => {
+  ])("[TC-LOGIN-001..005] should_return_home_path_when_%s_signs_in", async (role, homePath) => {
     userModel.authenticateWithPassword.mockResolvedValue(session);
     userModel.findUserByAuthId.mockResolvedValue(profileFor(role));
 
@@ -58,8 +58,7 @@ describe("POST /api/auth/login", () => {
     expect(userModel.authenticateWithPassword).toHaveBeenCalledWith(`${role.toLowerCase()}@connectsphere.test`, "pw");
   });
 
-  // TC-LOGIN-006 and TC-LOGIN-007 must be indistinguishable.
-  test("returns the same generic error for any rejected credential", async () => {
+  test("[TC-LOGIN-006/007] should_return_identical_401_when_email_is_unknown_or_password_is_wrong", async () => {
     userModel.authenticateWithPassword.mockResolvedValue(null);
 
     const unknownAccount = await request(app).post("/api/auth/login").send({ email: "nobody@connectsphere.test", password: "pw" });
@@ -71,7 +70,7 @@ describe("POST /api/auth/login", () => {
     expect(wrongPassword.body).toEqual(unknownAccount.body);
   });
 
-  test("revokes the session and answers generically when no active profile exists", async () => {
+  test("[TC-AUTH-001/002] should_revoke_new_session_and_return_generic_401_when_no_active_profile_exists", async () => {
     userModel.authenticateWithPassword.mockResolvedValue(session);
     userModel.findUserByAuthId.mockResolvedValue(null);
 
@@ -83,7 +82,7 @@ describe("POST /api/auth/login", () => {
     expect(userModel.revokeSession).toHaveBeenCalledWith("access-token");
   });
 
-  test("rejects blank fields before contacting Supabase", async () => {
+  test("[TC-LOGIN-010] should_not_contact_supabase_when_fields_are_blank", async () => {
     const res = await request(app).post("/api/auth/login").send({ email: "", password: "" });
 
     expect(res.status).toBe(400);
@@ -91,7 +90,7 @@ describe("POST /api/auth/login", () => {
     expect(userModel.authenticateWithPassword).not.toHaveBeenCalled();
   });
 
-  test("maps the Supabase rate limit to 429", async () => {
+  test("[TC-AUTH-019] should_return_429_when_supabase_rate_limits_sign_in", async () => {
     const rateLimited = new Error("rate limited");
     rateLimited.code = "AUTH_RATE_LIMITED";
     userModel.authenticateWithPassword.mockRejectedValue(rateLimited);
@@ -101,7 +100,7 @@ describe("POST /api/auth/login", () => {
     expect(res.body.code).toBe("RATE_LIMITED");
   });
 
-  test("hides unexpected failures", async () => {
+  test("[TC-AUTH-018] should_hide_internal_detail_when_login_fails_unexpectedly", async () => {
     userModel.authenticateWithPassword.mockRejectedValue(new Error("[Supabase Auth Error] 500 secret detail"));
 
     const res = await request(app).post("/api/auth/login").send({ email: "a@connectsphere.test", password: "pw" });
@@ -109,7 +108,7 @@ describe("POST /api/auth/login", () => {
     expect(JSON.stringify(res.body)).not.toContain("secret detail");
   });
 
-  test("rejects malformed JSON safely", async () => {
+  test("[TC-AUTH-018] should_return_400_when_json_is_malformed", async () => {
     const res = await request(app)
       .post("/api/auth/login")
       .set("Content-Type", "application/json")
@@ -120,28 +119,27 @@ describe("POST /api/auth/login", () => {
 });
 
 describe("GET /api/auth/me", () => {
-  // TC-LOGIN-011: the frontend redirects to /login on 401.
-  test("returns 401 without a token", async () => {
+  test("[TC-LOGIN-011] should_return_401_with_no_store_when_token_is_missing", async () => {
     const res = await request(app).get("/api/auth/me");
     expect(res.status).toBe(401);
     expect(res.body.code).toBe("UNAUTHENTICATED");
     expect(res.headers["cache-control"]).toBe("no-store");
   });
 
-  test("returns 401 for a rejected or revoked token", async () => {
+  test("[TC-LOGIN-013] should_return_401_when_token_is_rejected_or_revoked", async () => {
     userModel.verifyAccessToken.mockResolvedValue(null);
     const res = await request(app).get("/api/auth/me").set("Authorization", "Bearer revoked");
     expect(res.status).toBe(401);
   });
 
-  test("returns 401 when the Auth user has no active profile", async () => {
+  test("[TC-AUTH-009] should_return_401_when_auth_user_has_no_active_profile", async () => {
     userModel.verifyAccessToken.mockResolvedValue("auth-uuid");
     userModel.findUserByAuthId.mockResolvedValue(null);
     const res = await request(app).get("/api/auth/me").set("Authorization", "Bearer token");
     expect(res.status).toBe(401);
   });
 
-  test("returns the profile loaded from the database", async () => {
+  test("[TC-AUTH-007] should_return_database_profile_when_token_is_valid", async () => {
     signedInAs("VENUE_STAFF");
     const res = await request(app).get("/api/auth/me").set("Authorization", "Bearer token");
     expect(res.status).toBe(200);
@@ -149,7 +147,7 @@ describe("GET /api/auth/me", () => {
     expect(userModel.verifyAccessToken).toHaveBeenCalledWith("token");
   });
 
-  test("passes Auth outages to the error handler as 500", async () => {
+  test("[TC-AUTH-018] should_return_500_when_supabase_auth_is_unavailable", async () => {
     userModel.verifyAccessToken.mockRejectedValue(new Error("[Supabase Auth Error] 503"));
     const res = await request(app).get("/api/auth/me").set("Authorization", "Bearer token");
     expect(res.status).toBe(500);
@@ -158,13 +156,13 @@ describe("GET /api/auth/me", () => {
 });
 
 describe("POST /api/auth/logout", () => {
-  test("revokes the presented session", async () => {
+  test("[TC-LOGIN-013] should_revoke_presented_session_when_logging_out", async () => {
     const res = await request(app).post("/api/auth/logout").set("Authorization", "Bearer token");
     expect(res.status).toBe(204);
     expect(userModel.revokeSession).toHaveBeenCalledWith("token");
   });
 
-  test("succeeds without a token", async () => {
+  test("[TC-AUTH-010] should_return_204_when_logout_has_no_token", async () => {
     const res = await request(app).post("/api/auth/logout");
     expect(res.status).toBe(204);
     expect(userModel.revokeSession).not.toHaveBeenCalled();
@@ -172,7 +170,7 @@ describe("POST /api/auth/logout", () => {
 });
 
 describe("role-scoped routes", () => {
-  test("GET /api/events returns the organiser's scoped requests", async () => {
+  test("[TC-LOGIN-005] should_return_scoped_requests_when_organiser_lists_events", async () => {
     signedInAs("ORGANISER");
     findOrganiserEventRequests.mockResolvedValue([{ event_id: 1, is_owner: true }]);
 
@@ -182,9 +180,8 @@ describe("role-scoped routes", () => {
     expect(findOrganiserEventRequests).toHaveBeenCalledWith(expect.objectContaining({ user_id: 11 }));
   });
 
-  // TC-LOGIN-004: attendees cannot reach organiser/staff planning data.
   test.each(["ATTENDEE", "COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT"])(
-    "GET /api/events forbids %s",
+    "[TC-LOGIN-004] should_return_403_when_%s_lists_events",
     async (role) => {
       signedInAs(role);
       const res = await request(app).get("/api/events").set("Authorization", "Bearer token");
@@ -193,7 +190,7 @@ describe("role-scoped routes", () => {
     },
   );
 
-  test("GET /api/registrations/mine uses the authenticated attendee's ID", async () => {
+  test("[TC-AUTH-016] should_use_authenticated_attendee_id_when_query_supplies_another_id", async () => {
     signedInAs("ATTENDEE");
     findAttendeeRegistrations.mockResolvedValue([]);
 
@@ -204,9 +201,40 @@ describe("role-scoped routes", () => {
     expect(findAttendeeRegistrations).toHaveBeenCalledWith(11);
   });
 
-  test("GET /api/registrations/mine forbids an organiser", async () => {
+  test("[TC-AUTH-017] should_return_403_when_organiser_lists_attendee_registrations", async () => {
     signedInAs("ORGANISER");
     const res = await request(app).get("/api/registrations/mine").set("Authorization", "Bearer token");
     expect(res.status).toBe(403);
+  });
+});
+
+describe("[TC-AUTH-018] safe failures", () => {
+  test("should_return_generic_500_when_organiser_event_query_fails", async () => {
+    signedInAs("ORGANISER");
+    findOrganiserEventRequests.mockRejectedValue(new Error("[Supabase Error] relation detail"));
+
+    const res = await request(app).get("/api/events").set("Authorization", "Bearer token");
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: "Internal Server Error", code: "INTERNAL_ERROR" });
+  });
+
+  test("should_return_generic_500_when_attendee_registration_query_fails", async () => {
+    signedInAs("ATTENDEE");
+    findAttendeeRegistrations.mockRejectedValue(new Error("[Supabase Error] relation detail"));
+
+    const res = await request(app).get("/api/registrations/mine").set("Authorization", "Bearer token");
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: "Internal Server Error", code: "INTERNAL_ERROR" });
+  });
+
+  test("should_return_generic_500_when_session_revocation_fails", async () => {
+    userModel.revokeSession.mockRejectedValue(new Error("[Supabase Auth Error] 500"));
+
+    const res = await request(app).post("/api/auth/logout").set("Authorization", "Bearer token");
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("INTERNAL_ERROR");
   });
 });

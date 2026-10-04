@@ -76,7 +76,11 @@ npm run test:integration  # live tests against the Supabase development project 
 npm run test:cleanup      # removes fixtures left by an interrupted integration run
 ```
 
-Integration tests create namespaced synthetic Auth accounts (`spm32-<run>-…@connectsphere.test`) through the Auth Admin API. Each created ID is recorded in `tests/fixtures/manifests/` (git-ignored), and the run removes exactly those records afterwards.
+Integration tests create namespaced synthetic Auth accounts (`spm32-<run>-…@connectsphere.test`) through the Auth Admin API. Each created ID is recorded in `tests/fixtures/manifests/` (git-ignored), and the run removes exactly those records afterwards. Cleanup then verifies that nothing it created remains.
+
+Supabase Auth rate-limits password sign-ins per IP. The suite reuses one session per role and makes about 20 sign-ins, so wait about 5 minutes between consecutive integration runs. A run started too soon fails with `Sign-in for <role> failed with 429`.
+
+Test names follow `[<Jira test case or domain ID>] should_<behaviour>_when_<condition>`, e.g. `[TC-LOGIN-007] should_return_the_same_generic_401_when_password_is_wrong`.
 
 ---
 
