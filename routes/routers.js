@@ -3,10 +3,10 @@ const router = express.Router();
 
 const test = require("../controller/authController");
 const authRoutes = require("./authRoutes");
-const eventRoutes = require("./eventRoutes");
-const venueRoutes = require("./venueRoutes");
-const resourceRoutes = require("./resourceRoutes");
-const registrationRoutes = require("./registrationRoutes");
+// const eventRoutes = require("./eventRoutes");
+// const venueRoutes = require("./venueRoutes");
+// const resourceRoutes = require("./resourceRoutes");
+// const registrationRoutes = require("./registrationRoutes");
 
 router.get("/healthcheck", test);
 
