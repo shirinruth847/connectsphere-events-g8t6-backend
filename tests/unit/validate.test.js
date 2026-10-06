@@ -1,60 +1,55 @@
-const { validateLogin } = require("../../middleware/validate");
+const { validatePagination } = require("../../middleware/validate");
 
-const runValidateLogin = (body) => {
-  const req = { body };
+const runValidatePagination = (query) => {
+  const req = { query };
   const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
   const next = jest.fn();
-  validateLogin(req, res, next);
+  validatePagination(req, res, next);
   return { req, res, next };
 };
 
-describe("[TC-LOGIN-008..010] validateLogin", () => {
-  test("should_accept_and_trim_only_email_when_both_fields_are_present", () => {
-    const { req, next } = runValidateLogin({ email: "  ec@connectsphere.test ", password: " secret " });
+describe("[TC-AUTH-021] validatePagination", () => {
+  test("should_apply_defaults_when_no_paging_parameters_are_sent", () => {
+    const { req, next } = runValidatePagination({});
+
     expect(next).toHaveBeenCalled();
-    expect(req.body).toEqual({ email: "ec@connectsphere.test", password: " secret " });
+    expect(req.pagination).toEqual({ limit: 50, offset: 0 });
   });
 
-  test("[TC-LOGIN-008] should_return_email_field_error_when_email_is_blank", () => {
-    const { res, next } = runValidateLogin({ email: "   ", password: "secret" });
+  test.each([
+    [{ limit: "1", offset: "0" }, { limit: 1, offset: 0 }],
+    [{ limit: "100", offset: "10000" }, { limit: 100, offset: 10000 }],
+  ])("should_accept_boundary_values_when_query_is_%j", (query, expected) => {
+    const { req, next } = runValidatePagination(query);
+
+    expect(next).toHaveBeenCalled();
+    expect(req.pagination).toEqual(expected);
+  });
+
+  test.each([
+    ["0"], ["101"], ["-1"], ["2.5"], ["ten"], [""], [["10", "20"]],
+  ])("should_return_400_when_limit_is_%j", (limit) => {
+    const { res, next } = runValidatePagination({ limit });
+
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+    expect(res.json.mock.calls[0][0]).toEqual({
+      error: "Please correct the highlighted fields.",
       code: "VALIDATION_FAILED",
-      fields: { email: "Email is required." },
-    }));
-  });
-
-  test("[TC-LOGIN-009] should_return_password_field_error_when_password_is_blank", () => {
-    const { res } = runValidateLogin({ email: "ec@connectsphere.test", password: "" });
-    expect(res.json.mock.calls[0][0].fields).toEqual({ password: "Password is required." });
-  });
-
-  test("[TC-LOGIN-010] should_return_both_field_errors_when_both_fields_are_missing", () => {
-    const { res } = runValidateLogin({});
-    expect(res.json.mock.calls[0][0].fields).toEqual({
-      email: "Email is required.",
-      password: "Password is required.",
+      fields: { limit: "Limit must be a whole number from 1 to 100." },
     });
   });
 
-  test("[TC-AUTH-003] should_reject_unknown_fields_when_client_supplies_a_role", () => {
-    const { res, next } = runValidateLogin({ email: "a@b.test", password: "x", role: "COORDINATOR" });
-    expect(next).not.toHaveBeenCalled();
+  test.each([["-1"], ["10001"], ["1e3"]])("should_return_400_when_offset_is_%j", (offset) => {
+    const { res } = runValidatePagination({ offset });
+
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json.mock.calls[0][0].code).toBe("UNKNOWN_FIELDS");
+    expect(res.json.mock.calls[0][0].fields).toEqual({ offset: "Offset must be a whole number from 0 to 10000." });
   });
 
-  test("should_reject_values_when_they_are_not_text_or_exceed_max_length", () => {
-    const { res } = runValidateLogin({ email: ["a@b.test"], password: "x".repeat(129) });
-    expect(res.json.mock.calls[0][0].fields).toEqual({
-      email: "Email must be text.",
-      password: "Password must be at most 128 characters.",
-    });
-  });
+  test("should_report_both_fields_when_limit_and_offset_are_invalid", () => {
+    const { res } = runValidatePagination({ limit: "0", offset: "-5" });
 
-  test("should_return_400_when_body_is_not_an_object", () => {
-    const { res } = runValidateLogin(undefined);
-    expect(res.status).toHaveBeenCalledWith(400);
+    expect(Object.keys(res.json.mock.calls[0][0].fields)).toEqual(["limit", "offset"]);
   });
 });

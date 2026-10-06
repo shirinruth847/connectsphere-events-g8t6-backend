@@ -1,15 +1,10 @@
 // Unit tests for the identity model. Only the Supabase client (an external
 // dependency) is mocked; the model's own error classification is under test.
 const mockClient = { from: jest.fn(), auth: { getUser: jest.fn(), admin: { signOut: jest.fn() } } };
-const mockSessionClient = { auth: { signInWithPassword: jest.fn() } };
 
-jest.mock("../../config/supabase", () => {
-  mockClient.createSessionClient = jest.fn(() => mockSessionClient);
-  return mockClient;
-});
+jest.mock("../../config/supabase", () => mockClient);
 
 const {
-  authenticateWithPassword,
   verifyAccessToken,
   revokeSession,
   findUserByAuthId,
@@ -29,47 +24,6 @@ const mockProfileQuery = (result) => {
 
 beforeEach(() => {
   jest.clearAllMocks();
-});
-
-describe("[TC-LOGIN-006/007] authenticateWithPassword", () => {
-  test("should_return_the_session_when_supabase_accepts_the_credentials", async () => {
-    const session = { access_token: "a", user: { id: "u" } };
-    mockSessionClient.auth.signInWithPassword.mockResolvedValue({ data: { session }, error: null });
-
-    await expect(authenticateWithPassword("a@b.test", "pw")).resolves.toBe(session);
-    expect(mockSessionClient.auth.signInWithPassword).toHaveBeenCalledWith({ email: "a@b.test", password: "pw" });
-  });
-
-  test.each([
-    [400, "invalid_credentials"],
-    [400, "email_not_confirmed"],
-    [422, "validation_failed"],
-  ])("should_return_null_when_supabase_rejects_with_%s_%s", async (status, code) => {
-    mockSessionClient.auth.signInWithPassword.mockResolvedValue({ data: {}, error: authError(status, code) });
-
-    await expect(authenticateWithPassword("a@b.test", "pw")).resolves.toBeNull();
-  });
-
-  test("should_throw_a_rate_limit_error_when_supabase_returns_429", async () => {
-    mockSessionClient.auth.signInWithPassword.mockResolvedValue({ data: {}, error: authError(429, "over_request_rate_limit") });
-
-    await expect(authenticateWithPassword("a@b.test", "pw")).rejects.toMatchObject({ code: "AUTH_RATE_LIMITED" });
-  });
-
-  test("should_throw_when_supabase_auth_is_unavailable", async () => {
-    mockSessionClient.auth.signInWithPassword.mockResolvedValue({ data: {}, error: authError(503, "unavailable") });
-
-    await expect(authenticateWithPassword("a@b.test", "pw")).rejects.toThrow("[Supabase Auth Error] 503");
-  });
-
-  test("should_use_a_fresh_session_client_when_each_login_runs", async () => {
-    mockSessionClient.auth.signInWithPassword.mockResolvedValue({ data: { session: {} }, error: null });
-
-    await authenticateWithPassword("a@b.test", "pw");
-    await authenticateWithPassword("c@d.test", "pw");
-
-    expect(mockClient.createSessionClient).toHaveBeenCalledTimes(2);
-  });
 });
 
 describe("[TC-LOGIN-011/013] verifyAccessToken", () => {

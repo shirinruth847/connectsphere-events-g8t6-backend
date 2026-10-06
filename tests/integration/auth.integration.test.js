@@ -1,9 +1,11 @@
 // SPM-32 live integration tests: real Express routes, middleware, Supabase
 // Auth and the shared development database from .env. Nothing is mocked.
-// Fixtures are synthetic, namespaced by run ID and removed afterwards.
+// Users sign in directly with Supabase Auth, as the browser does, and the
+// resulting token is sent to the backend. Fixtures are synthetic, namespaced
+// by run ID and removed afterwards.
 const request = require("supertest");
 const app = require("../../server");
-const { createSessionClient } = require("../../config/supabase");
+const { createBrowserAuthClient, signInWithPassword } = require("../fixtures/browserAuthClient");
 const {
   newRunId,
   createAuthFixtures,
@@ -14,41 +16,40 @@ const {
 
 jest.setTimeout(120000);
 
-const GENERIC_LOGIN_ERROR = { error: "Invalid email or password.", code: "INVALID_CREDENTIALS" };
-const ATTENDEE_EVENT_KEYS = ["description", "end_datetime", "event_id", "start_datetime", "status", "title", "venue"];
+const ATTENDEE_EVENT_KEYS = ["attendee_status", "description", "end_datetime", "event_id", "start_datetime", "title", "venue"];
 
 const runId = newRunId();
 let fixtures;
 
-const login = (account, password = account.password) =>
-  request(app).post("/api/auth/login").send({ email: account.email, password });
-
 // Supabase Auth rate-limits password sign-ins per IP, so read-only checks
-// share one login per role. Tests that revoke or alter a session use
+// share one sign-in per role. Tests that revoke or alter a session use
 // freshSignIn so they never invalidate a shared session.
-const loginResponses = new Map();
+const sharedSignIns = new Map();
 
-const loginResponseFor = async (key) => {
-  if (!loginResponses.has(key)) {
-    loginResponses.set(key, login(fixtures.accounts[key]));
+const assertSignedIn = (key, { session, error }) => {
+  if (error || !session) {
+    throw new Error(`Sign-in for ${key} failed: ${error ? `${error.status} ${error.code}` : "no session"}`);
   }
-  return loginResponses.get(key);
+  return session;
 };
 
-const assertSignedIn = (key, res) => {
-  if (res.status !== 200) {
-    throw new Error(`Sign-in for ${key} failed with ${res.status} ${JSON.stringify(res.body)}`);
-  }
-  return res.body.session;
+const freshSignIn = async (key) => {
+  const account = fixtures.accounts[key];
+  return assertSignedIn(key, await signInWithPassword(account.email, account.password));
 };
 
-const signIn = async (key) => assertSignedIn(key, await loginResponseFor(key));
-
-const freshSignIn = async (key) => assertSignedIn(key, await login(fixtures.accounts[key]));
+const signIn = async (key) => {
+  if (!sharedSignIns.has(key)) {
+    sharedSignIns.set(key, freshSignIn(key));
+  }
+  return sharedSignIns.get(key);
+};
 
 const bearer = (session) => `Bearer ${session.access_token}`;
 
 const getAs = (path, session) => request(app).get(path).set("Authorization", bearer(session));
+
+const logoutAs = (session) => request(app).post("/api/auth/logout").set("Authorization", bearer(session));
 
 // Same header and signature, but a payload claiming a different identity/role.
 const tamperPayload = (accessToken) => {
@@ -67,17 +68,18 @@ afterAll(async () => {
   await cleanupAuthFixtures(runId);
 });
 
-describe("POST /api/auth/login", () => {
+describe("Sign-in with Supabase Auth, then GET /api/auth/me", () => {
   test.each([
     ["TC-LOGIN-001", "coordinator", "COORDINATOR", "/dashboard"],
     ["TC-LOGIN-002", "venueStaff", "VENUE_STAFF", "/dashboard"],
     ["TC-LOGIN-003", "techSupport", "TECH_SUPPORT", "/dashboard"],
     ["TC-LOGIN-004", "attendee", "ATTENDEE", "/my-registrations"],
     ["TC-LOGIN-005", "organiserA", "ORGANISER", "/dashboard"],
-  ])("[%s] should_return_session_and_role_home_path_when_%s_signs_in_with_valid_credentials", async (_id, key, role, homePath) => {
+  ])("[%s] should_return_database_role_and_home_path_when_%s_signs_in_with_valid_credentials", async (_id, key, role, homePath) => {
     const account = fixtures.accounts[key];
+    const session = await signIn(key);
 
-    const res = await loginResponseFor(key);
+    const res = await getAs("/api/auth/me", session);
 
     expect(res.status).toBe(200);
     expect(res.headers["cache-control"]).toBe("no-store");
@@ -86,96 +88,60 @@ describe("POST /api/auth/login", () => {
       email: account.email,
       name: `spm32 ${key}`,
       role,
+      roles: [role],
       home_path: homePath,
     });
-    expect(res.body.session).toEqual(expect.objectContaining({
-      access_token: expect.any(String),
-      refresh_token: expect.any(String),
-      token_type: "bearer",
-    }));
   });
 
-  test("[TC-LOGIN-001..005] should_issue_a_token_accepted_by_protected_routes_when_login_succeeds", async () => {
-    const session = await signIn("coordinator");
+  test("[TC-LOGIN-006/007] should_return_identical_supabase_errors_when_email_is_unknown_or_password_is_wrong", async () => {
+    const unknownEmail = await signInWithPassword(`spm32-${runId}-nobody@connectsphere.test`, "Any-password-123");
+    const wrongPassword = await signInWithPassword(fixtures.accounts.coordinator.email, "Wrong-password-123");
+
+    expect(unknownEmail.session).toBeNull();
+    expect(wrongPassword.session).toBeNull();
+    expect({ status: wrongPassword.error.status, code: wrongPassword.error.code, message: wrongPassword.error.message })
+      .toEqual({ status: unknownEmail.error.status, code: unknownEmail.error.code, message: unknownEmail.error.message });
+    expect(unknownEmail.error.code).toBe("invalid_credentials");
+  });
+
+  test("[TC-AUTH-001] should_return_401_from_me_when_profile_is_inactive", async () => {
+    const session = await freshSignIn("inactive");
 
     const res = await getAs("/api/auth/me", session);
 
-    expect(res.status).toBe(200);
-    expect(res.body.user.user_id).toBe(fixtures.accounts.coordinator.userId);
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "Please log in to continue.", code: "UNAUTHENTICATED" });
   });
 
-  test("[TC-LOGIN-006] should_return_generic_401_when_email_is_not_registered", async () => {
-    const res = await login({ email: `spm32-${runId}-nobody@connectsphere.test`, password: "Any-password-123" });
+  test("[TC-AUTH-002] should_return_401_from_me_when_auth_account_has_no_linked_profile", async () => {
+    const session = await freshSignIn("unlinked");
+
+    const res = await getAs("/api/auth/me", session);
 
     expect(res.status).toBe(401);
-    expect(res.body).toEqual(GENERIC_LOGIN_ERROR);
-    expect(res.body.session).toBeUndefined();
+    expect(res.body.code).toBe("UNAUTHENTICATED");
   });
 
-  test("[TC-LOGIN-007] should_return_the_same_generic_401_when_password_is_wrong", async () => {
-    const res = await login(fixtures.accounts.coordinator, "Wrong-password-123");
-
-    expect(res.status).toBe(401);
-    expect(res.body).toEqual(GENERIC_LOGIN_ERROR);
-  });
-
-  test("[TC-AUTH-001] should_return_the_same_generic_401_when_profile_is_inactive", async () => {
-    const res = await login(fixtures.accounts.inactive);
-
-    expect(res.status).toBe(401);
-    expect(res.body).toEqual(GENERIC_LOGIN_ERROR);
-  });
-
-  test("[TC-AUTH-002] should_return_the_same_generic_401_when_auth_account_has_no_linked_profile", async () => {
-    const res = await login(fixtures.accounts.unlinked);
-
-    expect(res.status).toBe(401);
-    expect(res.body).toEqual(GENERIC_LOGIN_ERROR);
-  });
-
-  test("[TC-LOGIN-008] should_return_400_with_email_field_error_when_email_is_blank", async () => {
-    const res = await request(app).post("/api/auth/login").send({ email: "   ", password: "Any-password-123" });
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe("VALIDATION_FAILED");
-    expect(res.body.fields).toEqual({ email: "Email is required." });
-  });
-
-  test("[TC-LOGIN-009] should_return_400_with_password_field_error_when_password_is_blank", async () => {
-    const res = await request(app).post("/api/auth/login").send({ email: fixtures.accounts.coordinator.email, password: "" });
-
-    expect(res.status).toBe(400);
-    expect(res.body.fields).toEqual({ password: "Password is required." });
-  });
-
-  test("[TC-LOGIN-010] should_return_400_with_both_field_errors_when_both_fields_are_missing", async () => {
-    const res = await request(app).post("/api/auth/login").send({});
-
-    expect(res.status).toBe(400);
-    expect(res.body.fields).toEqual({ email: "Email is required.", password: "Password is required." });
-  });
-
-  test("[TC-AUTH-003] should_reject_login_when_client_supplies_a_role", async () => {
-    const res = await request(app)
-      .post("/api/auth/login")
-      .send({ email: fixtures.accounts.attendee.email, password: fixtures.accounts.attendee.password, role: "COORDINATOR" });
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe("UNKNOWN_FIELDS");
-    expect(res.body.session).toBeUndefined();
-  });
-
-  test("[TC-AUTH-004] should_not_write_activity_records_when_users_log_in", async () => {
+  test("[TC-AUTH-004] should_not_write_activity_records_when_users_load_their_profile_and_log_out", async () => {
     const before = await countFixtureActivity(fixtures);
+    const session = await freshSignIn("organiserB");
 
-    await freshSignIn("organiserB");
-    await login(fixtures.accounts.organiserB, "Wrong-password-123");
+    await getAs("/api/auth/me", session);
+    await logoutAs(session);
 
     expect(await countFixtureActivity(fixtures)).toBe(before);
   });
+
+  test("[TC-AUTH-022] should_return_404_when_backend_login_is_requested", async () => {
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ email: fixtures.accounts.coordinator.email, password: fixtures.accounts.coordinator.password });
+
+    expect(res.status).toBe(404);
+  });
 });
 
-describe("GET /api/auth/me", () => {
+describe("GET /api/auth/me token checks", () => {
   test("[TC-LOGIN-011] should_return_401_when_no_token_is_sent", async () => {
     const res = await request(app).get("/api/auth/me");
 
@@ -203,16 +169,6 @@ describe("GET /api/auth/me", () => {
     expect(res.status).toBe(401);
   });
 
-  test("[TC-AUTH-007] should_return_profile_from_database_with_no_store_when_token_is_valid", async () => {
-    const session = await signIn("venueStaff");
-
-    const res = await getAs("/api/auth/me", session);
-
-    expect(res.status).toBe(200);
-    expect(res.headers["cache-control"]).toBe("no-store");
-    expect(res.body.user).toEqual(expect.objectContaining({ role: "VENUE_STAFF", home_path: "/dashboard" }));
-  });
-
   test("[TC-AUTH-008] should_ignore_identity_headers_and_use_the_token_owner_when_x_user_id_is_sent", async () => {
     const session = await signIn("attendee");
 
@@ -222,10 +178,10 @@ describe("GET /api/auth/me", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.user.user_id).toBe(fixtures.accounts.attendee.userId);
-    expect(res.body.user.role).toBe("ATTENDEE");
+    expect(res.body.user.roles).toEqual(["ATTENDEE"]);
   });
 
-  test("[TC-AUTH-009] should_return_401_when_profile_is_deactivated_after_login", async () => {
+  test("[TC-AUTH-009] should_return_401_when_profile_is_deactivated_after_sign_in", async () => {
     const session = await signIn("deactivatable");
     expect((await getAs("/api/auth/me", session)).status).toBe(200);
 
@@ -244,7 +200,7 @@ describe("POST /api/auth/logout", () => {
     const session = await freshSignIn("venueStaff");
     expect((await getAs("/api/auth/me", session)).status).toBe(200);
 
-    const logout = await request(app).post("/api/auth/logout").set("Authorization", bearer(session));
+    const logout = await logoutAs(session);
     const after = await getAs("/api/auth/me", session);
 
     expect(logout.status).toBe(204);
@@ -255,8 +211,8 @@ describe("POST /api/auth/logout", () => {
   test("[TC-LOGIN-013] should_reject_the_refresh_token_when_user_logs_out", async () => {
     const session = await freshSignIn("venueStaff");
 
-    await request(app).post("/api/auth/logout").set("Authorization", bearer(session));
-    const { data, error } = await createSessionClient().auth.refreshSession({ refresh_token: session.refresh_token });
+    await logoutAs(session);
+    const { data, error } = await createBrowserAuthClient().auth.refreshSession({ refresh_token: session.refresh_token });
 
     expect(error).toBeTruthy();
     expect(data.session).toBeNull();
@@ -264,9 +220,9 @@ describe("POST /api/auth/logout", () => {
 
   test("[TC-LOGIN-013] should_return_204_when_logout_is_repeated_with_a_revoked_token", async () => {
     const session = await freshSignIn("venueStaff");
-    await request(app).post("/api/auth/logout").set("Authorization", bearer(session));
+    await logoutAs(session);
 
-    const repeat = await request(app).post("/api/auth/logout").set("Authorization", bearer(session));
+    const repeat = await logoutAs(session);
 
     expect(repeat.status).toBe(204);
   });
@@ -281,7 +237,7 @@ describe("POST /api/auth/logout", () => {
     const first = await freshSignIn("techSupport");
     const second = await signIn("techSupport");
 
-    await request(app).post("/api/auth/logout").set("Authorization", bearer(first));
+    await logoutAs(first);
 
     expect((await getAs("/api/auth/me", first)).status).toBe(401);
     expect((await getAs("/api/auth/me", second)).status).toBe(200);
@@ -291,20 +247,19 @@ describe("POST /api/auth/logout", () => {
     const sessions = await Promise.all([1, 2, 3].map(() => freshSignIn("organiserSolo")));
     const [kept, ...revoked] = sessions;
 
-    const logouts = await Promise.all(
-      revoked.map((session) => request(app).post("/api/auth/logout").set("Authorization", bearer(session))),
-    );
+    const logouts = await Promise.all(revoked.map(logoutAs));
     const checks = await Promise.all(sessions.map((session) => getAs("/api/auth/me", session)));
 
     expect(logouts.map((res) => res.status)).toEqual([204, 204]);
     expect(checks.map((res) => res.status)).toEqual([200, 401, 401]);
     expect(new Set(sessions.map((session) => session.access_token)).size).toBe(3);
+    expect(kept.access_token).toEqual(expect.any(String));
   });
 });
 
-describe("GET /api/events (organiser data scoping)", () => {
-  const listEventsAs = async (key) => {
-    const res = await getAs("/api/events", await signIn(key));
+describe("GET /api/events/mine (organiser data scoping)", () => {
+  const listEventsAs = async (key, query = "") => {
+    const res = await getAs(`/api/events/mine${query}`, await signIn(key));
     return { res, byId: new Map((res.body.events || []).map((event) => [event.event_id, event])) };
   };
 
@@ -368,18 +323,45 @@ describe("GET /api/events (organiser data scoping)", () => {
     expect(colleagueEvent).not.toHaveProperty("purpose");
   });
 
-  test.each(["attendee", "coordinator", "venueStaff", "techSupport"])(
-    "[TC-LOGIN-004] should_return_403_when_%s_requests_organiser_event_list",
+  test("[TC-AUTH-021] should_return_disjoint_stable_pages_when_organiser_pages_through_requests", async () => {
+    const all = await listEventsAs("organiserA");
+    const first = await listEventsAs("organiserA", "?limit=1&offset=0");
+    const second = await listEventsAs("organiserA", "?limit=1&offset=1");
+    const allIds = all.res.body.events.map((event) => event.event_id);
+
+    expect(allIds).toHaveLength(3);
+    expect(first.res.body.page).toEqual({ limit: 1, offset: 0, next_offset: 1 });
+    expect(first.res.body.events.map((event) => event.event_id)).toEqual(allIds.slice(0, 1));
+    expect(second.res.body.events.map((event) => event.event_id)).toEqual(allIds.slice(1, 2));
+    expect(all.res.body.page.next_offset).toBeNull();
+  });
+
+  test("[TC-AUTH-021] should_return_400_when_page_limit_is_out_of_range", async () => {
+    const { res } = await listEventsAs("organiserA", "?limit=0");
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("VALIDATION_FAILED");
+  });
+
+  test("[TC-LOGIN-004] should_return_403_when_attendee_requests_organiser_event_list", async () => {
+    const res = await getAs("/api/events/mine", await signIn("attendee"));
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "You do not have permission to access this resource.", code: "FORBIDDEN" });
+  });
+
+  test.each(["coordinator", "venueStaff", "techSupport"])(
+    "[TC-AUTH-020] should_return_403_when_%s_requests_organiser_event_list",
     async (key) => {
-      const res = await getAs("/api/events", await signIn(key));
+      const res = await getAs("/api/events/mine", await signIn(key));
 
       expect(res.status).toBe(403);
-      expect(res.body).toEqual({ error: "You do not have permission to access this resource.", code: "FORBIDDEN" });
+      expect(res.body.code).toBe("FORBIDDEN");
     },
   );
 
   test("[TC-LOGIN-011] should_return_401_when_event_list_is_requested_without_a_token", async () => {
-    const res = await request(app).get("/api/events");
+    const res = await request(app).get("/api/events/mine");
 
     expect(res.status).toBe(401);
   });
@@ -419,7 +401,7 @@ describe("GET /api/registrations/mine (attendee data scoping)", () => {
     const { byEvent } = await listRegistrationsAs("attendee");
     const { event } = byEvent.get(fixtures.events.registeredConfirmed);
 
-    expect(event.status).toBe("CONFIRMED");
+    expect(event.attendee_status).toBe("CONFIRMED");
     expect(event.venue).toEqual({ name: `spm32-${runId} Hall`, address: `spm32-${runId} 1 Test Road` });
   });
 
@@ -427,7 +409,8 @@ describe("GET /api/registrations/mine (attendee data scoping)", () => {
     const { byEvent } = await listRegistrationsAs("attendee");
     const { event } = byEvent.get(fixtures.events.registeredPlanning);
 
-    expect(event.status).toBe("PENDING_CONFIRMATION");
+    expect(event.attendee_status).toBe("PENDING_CONFIRMATION");
+    expect(event).not.toHaveProperty("status");
     expect(event.venue).toBeNull();
   });
 
@@ -439,6 +422,13 @@ describe("GET /api/registrations/mine (attendee data scoping)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.registrations).toEqual([]);
+  });
+
+  test("[TC-AUTH-021] should_page_registrations_when_attendee_sets_limit", async () => {
+    const { res } = await listRegistrationsAs("attendee", "/api/registrations/mine?limit=1");
+
+    expect(res.body.registrations).toHaveLength(1);
+    expect(res.body.page).toEqual({ limit: 1, offset: 0, next_offset: 1 });
   });
 
   test.each(["organiserA", "coordinator", "venueStaff", "techSupport"])(
