@@ -6,6 +6,8 @@
     "test": "jest tests/unit",
     "test:integration": "jest tests/integration --runInBand",
     "test:cleanup": "node tests/fixtures/cleanupManifests.js",
+    "seed:accounts": "node supabase/seed/provisionAccounts.js",
+    "seed:accounts:cleanup": "node supabase/seed/provisionAccounts.js cleanup",
     "dev": "nodemon server.js"
   },
   "author": "",
