@@ -10,11 +10,4 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Password sign-in stores the resulting session on the client, so each sign-in
-// gets a throwaway client instead of mutating the shared one.
-const createSessionClient = () => createClient(supabaseUrl, supabaseKey, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-});
-
 module.exports = supabase;
-module.exports.createSessionClient = createSessionClient;

@@ -1,59 +1,40 @@
-// Allowlists and validates a JSON body against field rules, then replaces
-// req.body with only the accepted, normalised fields.
-const validateBody = (rules) => (req, res, next) => {
-  const body = req.body;
+const PAGE_LIMIT_DEFAULT = 50;
+const PAGE_LIMIT_MAX = 100;
+const PAGE_OFFSET_MAX = 10000;
 
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return res.status(400).json({ error: "Request body must be a JSON object.", code: "VALIDATION_FAILED" });
-  }
+const parseWholeNumber = (value) => (typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN);
 
-  const unknownFields = Object.keys(body).filter((name) => !Object.hasOwn(rules, name));
-  if (unknownFields.length > 0) {
-    return res.status(400).json({
-      error: `Unknown fields: ${unknownFields.join(", ")}.`,
-      code: "UNKNOWN_FIELDS",
-    });
-  }
-
+// Bounds list queries. The parsed values go on req.pagination because
+// req.query is read-only in Express 5.
+const validatePagination = (req, res, next) => {
+  const { limit, offset } = req.query;
+  const pagination = { limit: PAGE_LIMIT_DEFAULT, offset: 0 };
   const fields = {};
-  const accepted = {};
 
-  for (const [name, rule] of Object.entries(rules)) {
-    let value = body[name];
-    if (typeof value === "string" && rule.trim) {
-      value = value.trim();
+  if (limit !== undefined) {
+    const value = parseWholeNumber(limit);
+    if (value >= 1 && value <= PAGE_LIMIT_MAX) {
+      pagination.limit = value;
+    } else {
+      fields.limit = `Limit must be a whole number from 1 to ${PAGE_LIMIT_MAX}.`;
     }
+  }
 
-    if (value === undefined || value === null || value === "") {
-      if (rule.required) {
-        fields[name] = `${rule.label} is required.`;
-      }
-      continue;
+  if (offset !== undefined) {
+    const value = parseWholeNumber(offset);
+    if (value >= 0 && value <= PAGE_OFFSET_MAX) {
+      pagination.offset = value;
+    } else {
+      fields.offset = `Offset must be a whole number from 0 to ${PAGE_OFFSET_MAX}.`;
     }
-    if (typeof value !== "string") {
-      fields[name] = `${rule.label} must be text.`;
-      continue;
-    }
-    if (rule.maxLength && value.length > rule.maxLength) {
-      fields[name] = `${rule.label} must be at most ${rule.maxLength} characters.`;
-      continue;
-    }
-
-    accepted[name] = value;
   }
 
   if (Object.keys(fields).length > 0) {
     return res.status(400).json({ error: "Please correct the highlighted fields.", code: "VALIDATION_FAILED", fields });
   }
 
-  req.body = accepted;
+  req.pagination = pagination;
   return next();
 };
 
-// The password is not trimmed: surrounding spaces may be part of it.
-const validateLogin = validateBody({
-  email: { label: "Email", required: true, trim: true, maxLength: 254 },
-  password: { label: "Password", required: true, maxLength: 128 },
-});
-
-module.exports = { validateBody, validateLogin };
+module.exports = { validatePagination, PAGE_LIMIT_DEFAULT, PAGE_LIMIT_MAX, PAGE_OFFSET_MAX };

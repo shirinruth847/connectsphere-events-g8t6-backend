@@ -5,10 +5,12 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 8000;
+// Only the ConnectSphere frontend may call the API from a browser (Master 4.3).
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 const routes = require("./routes/routers");
 const errorHandler = require("./middleware/errorHandler");
 
-app.use(cors());
+app.use(cors({ origin: FRONTEND_ORIGIN }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 

@@ -1,5 +1,4 @@
 const supabase = require("../config/supabase");
-const { createSessionClient } = require("../config/supabase");
 
 const PROFILE_COLUMNS = "user_id, email, name, role, is_active, organisation_membership(organisation_id)";
 
@@ -28,25 +27,6 @@ const findUserByAuthId = async (authUserId) => {
   };
 };
 
-// Resolves to null for every rejected credential so callers cannot tell an
-// unknown account from a wrong password.
-const authenticateWithPassword = async (email, password) => {
-  const { data, error } = await createSessionClient().auth.signInWithPassword({ email, password });
-
-  if (!error) {
-    return data.session;
-  }
-  if (error.status === 429) {
-    const rateLimited = new Error("Supabase Auth rate limit reached");
-    rateLimited.code = "AUTH_RATE_LIMITED";
-    throw rateLimited;
-  }
-  if (isClientAuthError(error)) {
-    return null;
-  }
-  throw new Error(`[Supabase Auth Error] ${error.status} ${error.code || error.name}`);
-};
-
 // Asks Supabase Auth rather than checking the JWT locally, so a token whose
 // session was revoked at logout is rejected before it expires.
 const verifyAccessToken = async (accessToken) => {
@@ -73,7 +53,6 @@ const revokeSession = async (accessToken) => {
 
 module.exports = {
   findUserByAuthId,
-  authenticateWithPassword,
   verifyAccessToken,
   revokeSession,
 };

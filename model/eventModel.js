@@ -16,22 +16,28 @@ const buildOrganiserVisibilityFilter = (user) => {
   return `${ownRequests},and(organisation_id.in.(${organisationIds.join(",")}),status.neq.DRAFT)`;
 };
 
-const findOrganiserEventRequests = async (user) => {
+// Fetches one extra row to tell whether another page exists. event_id breaks
+// ties between equal timestamps so pages stay stable.
+const findOrganiserEventRequests = async (user, { limit, offset }) => {
   const { data, error } = await supabase
     .from("event")
     .select(EVENT_REQUEST_COLUMNS)
     .or(buildOrganiserVisibilityFilter(user))
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .order("event_id", { ascending: false })
+    .range(offset, offset + limit);
 
   if (error) {
     throw new Error(`[Supabase Error] ${error.message}`);
   }
 
   // organiser_id identifies another person, so only ownership is exposed.
-  return data.map(({ organiser_id, ...event }) => ({
+  const events = data.slice(0, limit).map(({ organiser_id, ...event }) => ({
     ...event,
     is_owner: organiser_id === user.user_id,
   }));
+
+  return { events, nextOffset: data.length > limit ? offset + limit : null };
 };
 
 module.exports = { findOrganiserEventRequests, buildOrganiserVisibilityFilter };
