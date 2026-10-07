@@ -40,6 +40,29 @@ Returns:
 }
 ```
 
+### Unassigned Event Queue
+
+`GET /api/events/unassigned`
+
+Returns submitted event requests that do not yet have a coordinator assigned.
+This endpoint requires an authenticated `COORDINATOR_LEAD` profile and returns
+the event summary fields used for assignment.
+
+```json
+{
+  "events": [
+    {
+      "eventId": 42,
+      "requestId": "REQ-000042",
+      "status": "SUBMITTED",
+      "title": "Example event",
+      "startDatetime": "2026-10-20T09:00:00.000Z",
+      "endDatetime": "2026-10-20T12:00:00.000Z"
+    }
+  ]
+}
+```
+
 ---
 
 ## 🧪 Example `.env` File

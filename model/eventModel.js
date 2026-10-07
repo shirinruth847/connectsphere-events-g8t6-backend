@@ -1,7 +1,7 @@
 // All database access for the event table, plus conversion between
 // API field names (camelCase) and database column names (snake_case).
 const supabase = require('../config/supabase');
-const { NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require('../config/eventConstants');
+const { EVENT_STATUS, NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require('../config/eventConstants');
 
 // Whitelist: the ONLY fields a client may set. status, organiser_id, coordinator_id etc.
 // are set by the server, so a user cannot send { status: 'CONFIRMED' } themselves.
@@ -114,6 +114,18 @@ async function findEventsByOrganiser(organiserId, status) {
   return data;
 }
 
+async function findUnassignedSubmittedEvents() {
+  const { data, error } = await supabase
+    .from('event')
+    .select('*')
+    .eq('status', EVENT_STATUS.SUBMITTED)
+    .is('coordinator_id', null)
+    .order('start_datetime', { ascending: true })
+    .order('event_id', { ascending: true });
+  if (error) throw error;
+  return data;
+}
+
 // Allowed layout options come from the rooms that actually exist, plus "no preference".
 async function getAllowedLayouts() {
   const { data, error } = await supabase.from('room').select('layout_type');
@@ -130,5 +142,6 @@ module.exports = {
   updateEvent,
   findEventById,
   findEventsByOrganiser,
+  findUnassignedSubmittedEvents,
   getAllowedLayouts,
 };

@@ -214,6 +214,16 @@ async function getMyEvents(req, res, next) {
   }
 }
 
+// GET /api/events/unassigned — coordinator lead assignment queue.
+async function getUnassignedEvents(req, res, next) {
+  try {
+    const rows = await eventModel.findUnassignedSubmittedEvents();
+    return res.status(200).json({ events: rows.map(eventModel.toApi) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // GET /api/events/:id  — load one request (e.g. to prefill "Edit Draft")
 async function getEventById(req, res, next) {
   try {
@@ -231,5 +241,6 @@ module.exports = {
   updateDraft,
   submitDraft,
   getMyEvents,
+  getUnassignedEvents,
   getEventById,
 };

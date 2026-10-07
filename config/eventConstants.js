@@ -7,6 +7,7 @@ const EVENT_STATUS = Object.freeze({
 const USER_ROLES = Object.freeze({
   ORGANISER: 'ORGANISER',
   COORDINATOR: 'COORDINATOR',
+  COORDINATOR_LEAD: 'COORDINATOR_LEAD',
 });
 
 const NOTIFICATION_TYPES = Object.freeze({
