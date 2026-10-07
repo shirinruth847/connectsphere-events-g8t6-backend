@@ -260,7 +260,7 @@ describe("POST /api/auth/logout", () => {
 describe("GET /api/events/mine (organiser data scoping)", () => {
   const listEventsAs = async (key, query = "") => {
     const res = await getAs(`/api/events/mine${query}`, await signIn(key));
-    return { res, byId: new Map((res.body.events || []).map((event) => [event.event_id, event])) };
+    return { res, byId: new Map((res.body.events || []).map((event) => [event.eventId, event])) };
   };
 
   test("[TC-LOGIN-005] should_list_own_requests_in_any_state_when_organiser_views_dashboard", async () => {
@@ -268,16 +268,20 @@ describe("GET /api/events/mine (organiser data scoping)", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers["cache-control"]).toBe("no-store");
-    expect(byId.get(fixtures.events.ownSubmitted)).toEqual(expect.objectContaining({ status: "SUBMITTED", is_owner: true }));
-    expect(byId.get(fixtures.events.ownDraft)).toEqual(expect.objectContaining({ status: "DRAFT", is_owner: true }));
+    expect(byId.get(fixtures.events.ownSubmitted)).toEqual(expect.objectContaining({
+      status: "SUBMITTED",
+      statusLabel: "Pending Approval",
+      isOwner: true,
+    }));
+    expect(byId.get(fixtures.events.ownDraft)).toEqual(expect.objectContaining({ status: "DRAFT", statusLabel: "Draft", isOwner: true }));
   });
 
   test("[TC-LOGIN-005] should_list_submitted_same_organisation_requests_when_organiser_belongs_to_the_organisation", async () => {
     const { byId } = await listEventsAs("organiserA");
 
     expect(byId.get(fixtures.events.colleagueSubmitted)).toEqual(expect.objectContaining({
-      is_owner: false,
-      organisation: { organisation_id: fixtures.organisations.A, name: `spm32-${runId} Organisation A` },
+      isOwner: false,
+      organisation: { organisationId: fixtures.organisations.A, name: `spm32-${runId} Organisation A` },
     }));
   });
 
@@ -318,22 +322,26 @@ describe("GET /api/events/mine (organiser data scoping)", () => {
     const { byId } = await listEventsAs("organiserA");
     const colleagueEvent = byId.get(fixtures.events.colleagueSubmitted);
 
-    expect(colleagueEvent).not.toHaveProperty("organiser_id");
-    expect(colleagueEvent).not.toHaveProperty("coordinator_id");
-    expect(colleagueEvent).not.toHaveProperty("purpose");
+    for (const key of ["organiser_id", "organiserId", "coordinator_id", "coordinatorId", "purpose", "accessibilityNeeds"]) {
+      expect(colleagueEvent).not.toHaveProperty(key);
+    }
   });
 
   test("[TC-AUTH-021] should_return_disjoint_stable_pages_when_organiser_pages_through_requests", async () => {
     const all = await listEventsAs("organiserA");
-    const first = await listEventsAs("organiserA", "?limit=1&offset=0");
-    const second = await listEventsAs("organiserA", "?limit=1&offset=1");
-    const allIds = all.res.body.events.map((event) => event.event_id);
+    const allIds = all.res.body.events.map((event) => event.eventId);
+    const pagedIds = [];
+    let cursor = null;
+    do {
+      const page = await listEventsAs("organiserA", `?limit=1${cursor ? `&cursor=${cursor}` : ""}`);
+      expect(page.res.status).toBe(200);
+      pagedIds.push(...page.res.body.events.map((event) => event.eventId));
+      cursor = page.res.body.nextCursor;
+    } while (cursor && pagedIds.length <= allIds.length);
 
     expect(allIds).toHaveLength(3);
-    expect(first.res.body.page).toEqual({ limit: 1, offset: 0, next_offset: 1 });
-    expect(first.res.body.events.map((event) => event.event_id)).toEqual(allIds.slice(0, 1));
-    expect(second.res.body.events.map((event) => event.event_id)).toEqual(allIds.slice(1, 2));
-    expect(all.res.body.page.next_offset).toBeNull();
+    expect(pagedIds).toEqual(allIds);
+    expect(all.res.body.nextCursor).toBeNull();
   });
 
   test("[TC-AUTH-021] should_return_400_when_page_limit_is_out_of_range", async () => {

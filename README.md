@@ -40,17 +40,25 @@ Returns:
 }
 ```
 
-### Event Requests
+### Event Requests (SPM-35, SPM-37)
 
-All event routes require an authenticated organiser and a bearer access token.
+All event routes require an `ORGANISER` bearer token and use the error shape described under Authentication below. Request and response fields are camelCase.
 
-- `POST /api/events` creates and submits a request.
-- `POST /api/events/drafts` creates a draft; `PUT /api/events/:id/draft` saves changes.
-- `PUT /api/events/:id/submit` submits a saved draft.
-- `GET /api/events/:id` loads a request visible to the organiser.
-- `GET /api/events/mine` lists owned requests and submitted requests from verified organisations. Optional `status`, `limit` (1-50, default 20), and opaque `cursor` parameters provide bounded pagination.
+| Method & path | Input | Success | Errors |
+| --- | --- | --- | --- |
+| `POST /api/events` | Event fields; `Idempotency-Key` header | `201 { message, event }`, status `SUBMITTED` | `400 VALIDATION_FAILED`, `409 NO_ELIGIBLE_COORDINATOR`, `409 IDEMPOTENCY_KEY_REUSED` |
+| `POST /api/events/drafts` | Any event fields, `title` required; `Idempotency-Key` header | `201 { message, event, savedAt }`, status `DRAFT` | `400`, `409 IDEMPOTENCY_KEY_REUSED` |
+| `PUT /api/events/:id/draft` | Changed fields, plus `"isAutoSave": true` from the idle timer | `200 { message, event, savedAt }`; auto-saves skip the activity log | `400`, `404 EVENT_NOT_FOUND`, `409 EVENT_NOT_DRAFT` |
+| `PUT /api/events/:id/submit` | Final edits or `{}` | `200 { message, event }`, status `SUBMITTED` | `400` (draft unchanged), `404`, `409 EVENT_NOT_DRAFT`, `409 NO_ELIGIBLE_COORDINATOR` |
+| `GET /api/events/:id` | — | `200 { event }` with `isOwner` | `404 EVENT_NOT_FOUND` (missing, another organiser's, or a colleague's draft) |
+| `GET /api/events/mine` | `?status=<event status>`, `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { events: [{ eventId, requestId, status, statusLabel, title, startDatetime, endDatetime, expectedAttendance, organisation, isOwner, createdAt, updatedAt }], nextCursor }`, newest edit first | `400 VALIDATION_FAILED` (including `offset`, which this list does not accept) |
 
-Submissions assign an active coordinator and write the event, activity record, notification, and recipients in one database transaction. Optional `venuePreferences` is an ordered array of venue IDs; `equipmentRequirements` is an array of `{ "equipmentId": number, "quantity": number }` objects.
+- **Event fields:** `title` (≤ 200 chars), `purpose` (≤ 2000), `description` (≤ 5000), `startDatetime` and `endDatetime` (ISO 8601 **with** a timezone offset, e.g. `2026-10-08T09:00:00+08:00`), `expectedAttendance` (positive whole number), `preferredLayoutType` (an existing room layout or `NO_PREFERENCE`), `accessibilityNeeds` (up to 20 short strings), `isRegistrationEnabled`, `registrationCapacity`, `venuePreferences` (ordered venue IDs) and `equipmentRequirements` (`[{ "equipmentId": number, "quantity": number }]`). Numeric strings are accepted for numbers.
+- **Server-controlled fields** (`status`, `organiserId`, `requestId`, …) are rejected with `400`, never silently ignored.
+- **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
+- **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
+- **Submission** assigns an active coordinator by round robin and writes the event, activity record and two notifications (one to the organiser, one to the coordinator) in one database transaction (`submit_event_request`). If the database rejects a submission, the `400` still carries field-level `fields`.
+- **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
 
@@ -64,13 +72,13 @@ Errors use one shape: `{ "error": "<safe message>", "code": "<MACHINE_CODE>" }`,
 | --- | --- | --- | --- | --- |
 | `GET /api/auth/me` | Any signed-in user | — | `200 { user: { user_id, email, name, role, roles, home_path } }` | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
 | `POST /api/auth/logout` | Bearer token, if any | — | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })` | — (idempotent) |
-| `GET /api/events/mine` | `ORGANISER` | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { events: [{ event_id, title, status, start_datetime, end_datetime, expected_attendance, organisation, is_owner, created_at, updated_at }], page: { limit, offset, next_offset } }`: own requests plus submitted requests from the organiser's organisations, newest first | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN` |
-| `GET /api/registrations/mine` | `ATTENDEE` | `?limit`, `?offset` as above | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN` |
+| `GET /api/events/mine` | `ORGANISER` | See Event Requests above | Own requests plus submitted requests from the organiser's organisations; colleagues' drafts are never listed | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN` |
+| `GET /api/registrations/mine` | `ATTENDEE` | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN` |
 
 - `home_path` is `/dashboard` for organisers and staff and `/my-registrations` for attendees.
 - `roles` is a list so the contract survives multi-role users; the schema currently stores one role per user.
 - `attendee_status` is a display value: `CONFIRMED`, `COMPLETED`, `CANCELLED`, or `PENDING_CONFIRMATION` for any internal planning state. It is not an event state.
-- `next_offset` is `null` on the last page.
+- `next_offset` is `null` on the last page of registrations.
 - Roles and organisation memberships always come from the database, never from the request or token metadata.
 
 ---
@@ -123,7 +131,7 @@ Supabase Auth rate-limits password sign-ins per IP. The suite reuses one session
 
 Test names follow `[<Jira test case or domain ID>] should_<behaviour>_when_<condition>`, e.g. `[TC-LOGIN-013] should_reject_the_access_token_immediately_when_user_logs_out`.
 
-The default `npm test` also runs the event unit and startup smoke tests.
+`tests/integration/events.integration.test.js` exercises the event request RPCs end to end, including parallel submissions and idempotent replays. It needs migration `20261007075542_event_request_review_fixes` applied to the development project.
 
 ---
 
@@ -157,7 +165,7 @@ connectsphere-events-g8t6-backend/
 │   ├── auth.js           # Verifies the Supabase access token and loads the profile
 │   ├── authorize.js      # Role checks
 │   ├── errorHandler.js   # Safe responses for unhandled errors
-│   └── validate.js       # Body allowlisting and field validation
+│   └── validate.js       # Offset and cursor pagination bounds
 ├── model/                # Data models and logic
 │   ├── eventModel.js
 │   ├── healthModel.js
@@ -173,13 +181,10 @@ connectsphere-events-g8t6-backend/
 │   └── seed/             # Development account provisioning
 ├── tests/
 │   ├── fixtures/         # Synthetic data setup and cleanup
-│   ├── integration/
-│   └── unit/
-│   ├── startup.test.js
-│   ├── eventController.test.js
-│   ├── eventModel.test.js
-│   └── eventValidator.test.js
-├── validators/           # Request validation rules
+│   ├── integration/      # Live tests against the development project
+│   └── unit/             # Mocked Supabase; run by npm test
+├── validators/           # Pure request validation rules
+│   └── eventValidator.js
 ├── COMMIT_MESSAGES.md    # Commit message SOP standards
 ├── README.md             # Backend documentation
 └── server.js             # Main server entry point

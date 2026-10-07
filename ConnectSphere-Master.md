@@ -2,8 +2,8 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 0.7 |
-| Updated | 30 September 2026 |
+| Version | 0.8 |
+| Updated | 7 October 2026 |
 | Status | Architecture and implementation baseline; repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
@@ -699,6 +699,8 @@ Index event owner/organization/coordinator and status; venue-booking intervals; 
 
 Use one checked-out database client for `BEGIN`, every related query, `COMMIT` and `ROLLBACK`. Separate client/pool calls do not form one transaction. Cross-domain work stays in the single monolith and shares the same transaction context.
 
+The backend reaches PostgreSQL through the Supabase client, which cannot hold a transaction open across calls. An atomic workflow may therefore be one versioned `SECURITY DEFINER` PL/pgSQL function called once through `supabase.rpc`, as event submission does (`submit_event_request`). Such a function must set a fixed `search_path`, take the acting user ID only from the verified token, be executable by `service_role` alone, and raise stable error codes that the model maps to domain errors.
+
 Use an explicit lock order: event IDs, then venue IDs, then equipment IDs, each in stable order. Scarce-resource operations should use appropriate isolation and bounded retry for serialization/deadlock failures. A retry must re-run every validation; a genuine resource conflict returns a business conflict instead of being retried blindly.
 
 ### 7.1 Atomic operations
@@ -939,6 +941,7 @@ If this master, Jira, a repository README and implemented code disagree, surface
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 0.8 | 2026-10-07 | Implemented in code; database migration pending | Event request creation and drafts (Jira SPM-35, SPM-37). Section 5.2 save-draft precondition (nonblank title) and 6.1 draft storage; 6.2 `event_venue_preference` and `event_equipment_requirement`; section 7 permits a single `SECURITY DEFINER` RPC as the transaction for an atomic workflow. Idempotency records now exist for event creation. Compatibility: `GET /api/events/mine` changes from snake_case offset paging to camelCase cursor paging, and event endpoints use the shared `{ error, code, fields }` error shape. Database: `20261007024516_atomic_event_submission` applied; `20261007075542_event_request_review_fixes` not yet applied to the development project |
 | 0.7 | 2026-09-30 | Design reference gate added | Added section 10.5: a design reference gate for UI tasks covering Figma frame links, fallback to existing pages, developer override, purpose-based page URLs, design authority, follow-up prompts and the team design reference list. Added Figma to sections 10.1 and 10.2, made the gate step 1 of the section 9.2 ticket workflow and added design precedence to section 12.2. Jira request: none (direct developer request). Compatibility: documentation only; no code or database change |
 | 0.6 | 2026-09-23 | Startup gate added | Rewrote section 2.7 with the actual backend (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_ANON_KEY`, `PORT`) and frontend (`BACKEND_URL`) environment variables, backend and end-to-end startup checks, a mandatory startup gate before ticket work and troubleshooting; added the gate to the section 9.2 ticket workflow |
 | 0.5 | 2026-09-22 | Backend coding convention added | Established the supplied backend examples as the default CommonJS, Express route → controller → model structure and writing-style reference, with safeguards against copying placeholder names or error-swallowing behavior |

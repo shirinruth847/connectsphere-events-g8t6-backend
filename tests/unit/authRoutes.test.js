@@ -129,18 +129,18 @@ describe("POST /api/auth/logout", () => {
 describe("GET /api/events/mine", () => {
   test("[TC-LOGIN-005] should_return_scoped_requests_and_page_info_when_organiser_lists_requests", async () => {
     signedInAs("ORGANISER");
-    findOrganiserEventRequests.mockResolvedValue({ events: [{ event_id: 1, is_owner: true }], nextOffset: 20 });
+    findOrganiserEventRequests.mockResolvedValue({ events: [{ eventId: 1, isOwner: true }], nextCursor: "next" });
 
-    const res = await getWithToken("/api/events/mine?limit=20&offset=0");
+    const res = await getWithToken("/api/events/mine?limit=20");
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      events: [{ event_id: 1, is_owner: true }],
-      page: { limit: 20, offset: 0, next_offset: 20 },
+      events: [{ eventId: 1, isOwner: true }],
+      nextCursor: "next",
     });
     expect(findOrganiserEventRequests).toHaveBeenCalledWith(
       expect.objectContaining({ user_id: 11 }),
-      { limit: 20, offset: 0 },
+      { limit: 20, cursor: null, status: null },
     );
   });
 
@@ -150,7 +150,7 @@ describe("GET /api/events/mine", () => {
     const res = await getWithToken("/api/events/mine?limit=500");
 
     expect(res.status).toBe(400);
-    expect(res.body.fields).toEqual({ limit: "Limit must be a whole number from 1 to 50." });
+    expect(res.body.fields).toEqual({ limit: "Limit must be a whole number from 1 to 100." });
     expect(findOrganiserEventRequests).not.toHaveBeenCalled();
   });
 

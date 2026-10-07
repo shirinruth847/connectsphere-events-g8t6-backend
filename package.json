@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "jest tests/unit tests/eventController.test.js tests/eventModel.test.js tests/eventValidator.test.js tests/startup.test.js",
+    "test": "jest tests/unit",
     "test:integration": "jest tests/integration --runInBand",
     "test:cleanup": "node tests/fixtures/cleanupManifests.js",
     "seed:accounts": "node supabase/seed/provisionAccounts.js",
