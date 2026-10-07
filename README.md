@@ -103,7 +103,7 @@ All event routes require an `ORGANISER` bearer token and use the error shape des
 - **Server-controlled fields** (`status`, `organiserId`, `requestId`, …) are rejected with `400`, never silently ignored.
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
-- **Submission** assigns an active coordinator by round robin and writes the event, activity record and two notifications (one to the organiser, one to the coordinator) in one database transaction (`submit_event_request`). If the database rejects a submission, the `400` still carries field-level `fields`.
+- **Submission** creates a `SUBMITTED` event with no coordinator, writes the event and activity record, and notifies the organiser in one database transaction (`submit_event_request`). A Coordinator Lead assigns the event separately. If the database rejects a submission, the `400` still carries field-level `fields`.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
@@ -259,3 +259,18 @@ Format: `<type>/<ticket-id>-<short-description>` or `<type>/<short-description>`
    git checkout main
    git pull origin main
    ```
+### SPM-174 development fixture
+
+After applying the Supabase migrations and provisioning the namespaced accounts, create a
+synthetic submitted request with no coordinator:
+
+```bash
+npm run seed:unassigned
+```
+
+The fixture is recorded in `supabase/seed/manifests/` (ignored by git) and can be removed
+without affecting other data:
+
+```bash
+npm run seed:unassigned:cleanup
+```

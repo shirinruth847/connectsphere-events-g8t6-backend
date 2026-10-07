@@ -9,6 +9,8 @@ const {
   listMyEventRequests,
   getEventRequest,
   getUnassignedEvents,
+  getCoordinatorAvailability,
+  assignCoordinator,
 } = require("../controller/eventController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole } = require("../middleware/authorize");
@@ -17,7 +19,7 @@ const { USER_ROLES } = require("../config/roles");
 
 // Applied per route (not router-wide) so coordinator routes can be added here later.
 const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
-const coordinatorLeadOnly = [
+const coordinatorOperations = [
   requireAuth,
   requireRole(USER_ROLES.COORDINATOR_LEAD),
 ];
@@ -33,8 +35,18 @@ router.get(
 ); // must stay above "/:id"
 router.get(
   "/unassigned",
-  coordinatorLeadOnly,
+  coordinatorOperations,
   getUnassignedEvents,
+);
+router.get(
+  "/coordinator-availability",
+  coordinatorOperations,
+  getCoordinatorAvailability,
+);
+router.patch(
+  "/:id/coordinator",
+  coordinatorOperations,
+  assignCoordinator,
 );
 router.get("/:id", organiserOnly, getEventRequest);
 router.put("/:id/draft", organiserOnly, updateDraft);

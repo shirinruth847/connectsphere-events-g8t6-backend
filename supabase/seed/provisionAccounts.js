@@ -21,6 +21,7 @@ const ORGANISATIONS = ["A", "B"];
 const ACCOUNTS = [
   { key: "organiser-a", name: "Seed Organiser A", role: "ORGANISER", organisation: "A" },
   { key: "organiser-b", name: "Seed Organiser B", role: "ORGANISER", organisation: "B" },
+  { key: "coordinator-lead", name: "Seed Coordinator Lead", role: "COORDINATOR_LEAD" },
   { key: "coordinator", name: "Seed Coordinator", role: "COORDINATOR" },
   { key: "venue-staff", name: "Seed Venue Staff", role: "VENUE_STAFF" },
   { key: "tech-support", name: "Seed Tech Support", role: "TECH_SUPPORT" },

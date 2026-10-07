@@ -28,6 +28,11 @@ const DOMAIN_ERRORS = Object.freeze({
     409,
     "This request is still being processed. Try again shortly.",
   ],
+  COORDINATOR_CONFLICT: [
+    409,
+    "The selected coordinator is unavailable during this event.",
+  ],
+  INVALID_COORDINATOR: [400, "Select an active Event Coordinator."],
 });
 
 // ---------- helpers ----------
@@ -59,7 +64,7 @@ const handleError = (error, res, next) => {
     if (error.code === "IDEMPOTENCY_KEY_REQUIRED")
       return validationFailed(res, { idempotencyKey: IDEMPOTENCY_KEY_MESSAGE });
     const mapped = DOMAIN_ERRORS[error.code];
-    if (mapped) return sendError(res, mapped[0], error.code, mapped[1]);
+    if (mapped) return sendError(res, mapped[0], error.code, mapped[1], error.fields);
   }
   return next(error);
 };
@@ -285,9 +290,45 @@ const listMyEventRequests = async (req, res, next) => {
 async function getUnassignedEvents(req, res, next) {
   try {
     const rows = await eventModel.findUnassignedSubmittedEvents();
-    return res.status(200).json({ events: rows.map(eventModel.toApi) });
+    return res.status(200).json({ events: rows.map((row) => eventModel.toApi(row)) });
   } catch (err) {
     return next(err);
+  }
+}
+
+async function getCoordinatorAvailability(req, res, next) {
+  try {
+    const coordinators = await eventModel.findCoordinatorAvailability();
+    return res.status(200).json({ coordinators });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function assignCoordinator(req, res, next) {
+  try {
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return eventNotFound(res);
+    if (
+      !req.body ||
+      !Number.isInteger(req.body.coordinatorId) ||
+      req.body.coordinatorId < 1
+    ) {
+      return sendError(
+        res,
+        DOMAIN_ERRORS.INVALID_COORDINATOR[0],
+        "INVALID_COORDINATOR",
+        DOMAIN_ERRORS.INVALID_COORDINATOR[1],
+      );
+    }
+
+    const event = await eventModel.assignCoordinator({
+      eventId,
+      coordinatorId: req.body.coordinatorId,
+    });
+    return res.status(200).json({ event: eventModel.toApi(event) });
+  } catch (error) {
+    return handleError(error, res, next);
   }
 }
 
@@ -313,5 +354,7 @@ module.exports = {
   submitDraft,
   listMyEventRequests,
   getUnassignedEvents,
+  getCoordinatorAvailability,
+  assignCoordinator,
   getEventRequest,
 };

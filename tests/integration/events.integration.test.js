@@ -100,7 +100,7 @@ afterAll(async () => {
 });
 
 describe("POST /api/events (SPM-35)", () => {
-  test("[SPM-35-TC-001] should_submit_assign_a_coordinator_and_notify_both_parties_in_one_transaction", async () => {
+  test("[SPM-35-TC-001] should_submit_an_unassigned_request_and_notify_the_organiser", async () => {
     const res = await call("post", "/api/events", "organiserA", validRequest("TC-001"), newKey());
 
     expect(res.status).toBe(201);
@@ -110,13 +110,13 @@ describe("POST /api/events (SPM-35)", () => {
 
     const row = await eventRow(eventId);
     expect(row.status).toBe("SUBMITTED");
-    expect(row.coordinator_id).not.toBeNull();
+    expect(row.coordinator_id).toBeNull();
     expect(await activityActions(eventId)).toEqual(["EVENT_SUBMITTED"]);
 
     const notifications = await notificationsFor(eventId);
     const recipients = notifications.flatMap((item) => item.notification_recipient.map(({ recipient_id }) => recipient_id));
-    expect(notifications.map(({ title }) => title).sort()).toEqual(["Event request received", "New event request assigned"]);
-    expect(recipients.sort()).toEqual([fixtures.accounts.organiserA.userId, row.coordinator_id].sort());
+    expect(notifications.map(({ title }) => title)).toEqual(["Event request received"]);
+    expect(recipients).toEqual([fixtures.accounts.organiserA.userId]);
 
     const list = await call("get", "/api/events/mine?status=SUBMITTED", "organiserA");
     expect(list.body.events.find((event) => event.eventId === eventId)).toEqual(
@@ -157,7 +157,7 @@ describe("POST /api/events (SPM-35)", () => {
     expect(second.headers["idempotent-replayed"]).toBe("true");
     expect(second.body.event.eventId).toBe(first.body.event.eventId);
     expect(await eventsTitled(body.title)).toBe(1);
-    expect(await notificationsFor(first.body.event.eventId)).toHaveLength(2);
+    expect(await notificationsFor(first.body.event.eventId)).toHaveLength(1);
   });
 
   test("[EVT-IDEM-004] should_return_409_when_an_idempotency_key_is_reused_for_a_different_request", async () => {
@@ -183,11 +183,7 @@ describe("POST /api/events (SPM-35)", () => {
     expect(await eventsTitled(body.title)).toBe(1);
   });
 
-  test("[EVT-CONC-001] should_rotate_coordinators_without_losing_a_submission_when_requests_run_in_parallel", async () => {
-    const coordinators = await rows(
-      supabase.from("user").select("user_id").eq("role", "COORDINATOR").eq("is_active", true),
-      "coordinator count"
-    );
+  test("[EVT-CONC-001] should_keep_parallel_submissions_unassigned", async () => {
     await signIn("organiserA");
 
     const responses = await Promise.all(
@@ -195,9 +191,8 @@ describe("POST /api/events (SPM-35)", () => {
     );
 
     expect(responses.map(({ status }) => status)).toEqual([201, 201, 201, 201]);
-    const assigned = await Promise.all(responses.map(({ body: { event } }) => eventRow(event.eventId)));
-    expect(assigned.every(({ coordinator_id }) => coordinator_id !== null)).toBe(true);
-    expect(new Set(assigned.map(({ coordinator_id }) => coordinator_id)).size).toBe(Math.min(coordinators.length, 4));
+    const submitted = await Promise.all(responses.map(({ body: { event } }) => eventRow(event.eventId)));
+    expect(submitted.every(({ coordinator_id }) => coordinator_id === null)).toBe(true);
   });
 });
 
@@ -288,7 +283,7 @@ describe("drafts (SPM-37)", () => {
 
     expect(submitted.status).toBe(200);
     expect(submitted.body.event.statusLabel).toBe("Pending Approval");
-    expect(await notificationsFor(eventId)).toHaveLength(2);
+    expect(await notificationsFor(eventId)).toHaveLength(1);
     expect(await activityActions(eventId)).toEqual(["DRAFT_CREATED", "EVENT_SUBMITTED"]);
 
     const lateEdit = await call("put", `/api/events/${eventId}/draft`, "organiserA", { title: "Too late" });
