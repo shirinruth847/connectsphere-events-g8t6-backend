@@ -40,6 +40,25 @@ Returns:
 }
 ```
 
+### Authentication (SPM-32)
+
+The browser signs in **directly with Supabase Auth** (`supabase.auth.signInWithPassword`), so Supabase's per-IP sign-in limit applies to each user's own IP. It then calls `GET /api/auth/me` with the access token. On `200` it redirects to `user.home_path`; on `401` (no active ConnectSphere profile) it signs out again. The backend never receives passwords.
+
+Errors use one shape: `{ "error": "<safe message>", "code": "<MACHINE_CODE>" }`, plus `fields` for validation errors. Authenticated requests send `Authorization: Bearer <access_token>`, and their responses carry `Cache-Control: no-store`. Only `FRONTEND_ORIGIN` may call the API from a browser.
+
+| Method & path | Access | Input | Success | Errors |
+| --- | --- | --- | --- | --- |
+| `GET /api/auth/me` | Any signed-in user | — | `200 { user: { user_id, email, name, role, roles, home_path } }` | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
+| `POST /api/auth/logout` | Bearer token, if any | — | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })` | — (idempotent) |
+| `GET /api/events/mine` | `ORGANISER` | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { events: [{ event_id, title, status, start_datetime, end_datetime, expected_attendance, organisation, is_owner, created_at, updated_at }], page: { limit, offset, next_offset } }`: own requests plus submitted requests from the organiser's organisations, newest first | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN` |
+| `GET /api/registrations/mine` | `ATTENDEE` | `?limit`, `?offset` as above | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN` |
+
+- `home_path` is `/dashboard` for organisers and staff and `/my-registrations` for attendees.
+- `roles` is a list so the contract survives multi-role users; the schema currently stores one role per user.
+- `attendee_status` is a display value: `CONFIRMED`, `COMPLETED`, `CANCELLED`, or `PENDING_CONFIRMATION` for any internal planning state. It is not an event state.
+- `next_offset` is `null` on the last page.
+- Roles and organisation memberships always come from the database, never from the request or token metadata.
+
 ---
 
 ## 🧪 Example `.env` File
@@ -47,11 +66,54 @@ Returns:
 Create a `.env` file in the root directory:
 
 ```bash
-# Required to run the app
 PORT=8000
+SUPABASE_URL=https://rvwiflsedoujspmzfrbq.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service role key from the Supabase dashboard; never commit it>
+# Optional
+FRONTEND_ORIGIN=http://localhost:3000   # the only browser origin allowed by CORS (default shown)
+SUPABASE_ANON_KEY=<anon/publishable key>  # tests sign in with it like the browser; falls back to the service role key
+SEED_ACCOUNT_PASSWORD=<private password for seeded dev accounts, 12+ characters>
+SEED_NAMESPACE=dev                         # prefix for seeded emails and organisation names
 ```
 
-_This will be updated accordingly as the backend grows._
+The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.
+
+---
+
+## 👤 Development Accounts
+
+Nobody can log in until an Auth account is linked to an active profile (`user.auth_user_id`). To create one synthetic account per role, plus two organisations (organisers A and B belong to different ones):
+
+```bash
+npm run seed:accounts           # idempotent; re-running resets passwords to SEED_ACCOUNT_PASSWORD
+npm run seed:accounts:cleanup   # removes exactly what supabase/seed/manifests/ lists
+```
+
+Accounts are `<SEED_NAMESPACE>-<organiser-a|organiser-b|coordinator|venue-staff|tech-support|attendee>@connectsphere.test`. The `.test` domain is undeliverable, so no email is ever sent.
+
+The five pre-existing `user` rows are not linked to Auth accounts. To link one, its owner creates the Auth user in the Supabase dashboard (**Authentication → Users → Add user**, with **Auto Confirm** on) using the profile's email, then sets that row's `auth_user_id` to the new user's ID. Never edit `auth.*` tables with SQL.
+
+---
+
+## ✅ Testing
+
+```bash
+npm test                  # unit tests (no network; Supabase is mocked)
+npm run test:integration  # live tests against the Supabase development project in .env
+npm run test:cleanup      # removes fixtures left by an interrupted integration run
+```
+
+Integration tests create namespaced synthetic Auth accounts (`spm32-<run>-…@connectsphere.test`) through the Auth Admin API, sign in with Supabase Auth as the browser does, and call the backend with the resulting token. Each created ID is recorded in `tests/fixtures/manifests/` (git-ignored), and the run removes exactly those records afterwards. Cleanup then verifies that nothing it created remains.
+
+Supabase Auth rate-limits password sign-ins per IP. The suite reuses one session per role and makes about 20 sign-ins, so wait about 5 minutes between consecutive integration runs. A run started too soon fails with `Sign-in for <role> failed: 429`.
+
+Test names follow `[<Jira test case or domain ID>] should_<behaviour>_when_<condition>`, e.g. `[TC-LOGIN-013] should_reject_the_access_token_immediately_when_user_logs_out`.
+
+---
+
+## 🗄️ Database Migrations
+
+Schema changes live in `supabase/migrations/<version>_<name>.sql`. The version matches the one recorded in the remote migration history. Add the SQL file first, review it, then apply it to the development project. Never edit an applied migration; add a corrective one.
 
 ---
 
@@ -67,17 +129,35 @@ Please refer to the `COMMIT_MESSAGES.md` file in the root directory for details.
 
 ```bash
 connectsphere-events-g8t6-backend/
-├── config/               # External service configurations (Supabase)
+├── config/               # External service configurations (Supabase) and shared constants
+│   ├── roles.js
 │   └── supabase.js 
 ├── controller/           # Route handler logic and controllers
-│   └── authController.js
+│   ├── authController.js
+│   ├── eventController.js
+│   └── registrationController.js
 ├── middleware/           # Request/response middleware functions
-│   └── auth.js
+│   ├── auth.js           # Verifies the Supabase access token and loads the profile
+│   ├── authorize.js      # Role checks
+│   ├── errorHandler.js   # Safe responses for unhandled errors
+│   └── validate.js       # Body allowlisting and field validation
 ├── model/                # Data models and logic
-│   └── healthModel.js
+│   ├── eventModel.js
+│   ├── healthModel.js
+│   ├── registrationModel.js
+│   └── userModel.js
 ├── routes/               # API route definitions
 │   ├── authRoutes.js
+│   ├── eventRoutes.js
+│   ├── registrationRoutes.js
 │   └── routers.js
+├── supabase/
+│   ├── migrations/       # Versioned schema changes
+│   └── seed/             # Development account provisioning
+├── tests/
+│   ├── fixtures/         # Synthetic data setup and cleanup
+│   ├── integration/
+│   └── unit/
 ├── COMMIT_MESSAGES.md    # Commit message SOP standards
 ├── README.md             # Backend documentation
 └── server.js             # Main server entry point

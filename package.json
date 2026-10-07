@@ -3,7 +3,11 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "jest tests/unit",
+    "test:integration": "jest tests/integration --runInBand",
+    "test:cleanup": "node tests/fixtures/cleanupManifests.js",
+    "seed:accounts": "node supabase/seed/provisionAccounts.js",
+    "seed:accounts:cleanup": "node supabase/seed/provisionAccounts.js cleanup",
     "dev": "nodemon server.js"
   },
   "author": "",
@@ -15,5 +19,12 @@
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "nodemon": "^3.1.10"
+  },
+  "devDependencies": {
+    "jest": "^30.5.2",
+    "supertest": "^7.3.1"
+  },
+  "jest": {
+    "testEnvironment": "node"
   }
 }
