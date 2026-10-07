@@ -127,6 +127,8 @@ const toApi = (row, viewerUserId) => {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
+    ...(row.coordinator_id === undefined ? {} : { coordinatorId: row.coordinator_id }),
+    ...(row.coordinator_name === undefined ? {} : { coordinatorName: row.coordinator_name }),
     ...(viewerUserId === undefined ? {} : { isOwner: row.organiser_id === viewerUserId }),
   };
 };
@@ -464,48 +466,16 @@ async function findCoordinatorAvailability() {
 }
 
 async function assignCoordinator({ eventId, coordinatorId }) {
-  const [{ data: event, error: eventError }, { data: coordinator, error: coordinatorError }] =
-    await Promise.all([
-      supabase.from("event").select("*").eq("event_id", eventId).maybeSingle(),
-      supabase
-        .from("user")
-        .select("user_id,name")
-        .eq("user_id", coordinatorId)
-        .eq("role", "COORDINATOR")
-        .eq("is_active", true)
-        .maybeSingle(),
-    ]);
-  if (eventError) throw eventError;
-  if (coordinatorError) throw coordinatorError;
-  if (!event || event.status !== EVENT_STATUS.SUBMITTED || event.coordinator_id !== null) {
-    throw toEventRequestError("EVENT_NOT_FOUND");
-  }
-  if (!coordinator) throw toEventRequestError("INVALID_COORDINATOR");
-
-  const { data: conflicts, error: conflictError } = await supabase
-    .from("event")
-    .select("title,start_datetime,end_datetime")
-    .eq("coordinator_id", coordinatorId)
-    .not("status", "in", `("DRAFT","REJECTED","CANCELLED")`)
-    .lt("start_datetime", event.end_datetime)
-    .gt("end_datetime", event.start_datetime);
-  if (conflictError) throw conflictError;
-  if (conflicts.length) {
-    throw toEventRequestError("COORDINATOR_CONFLICT", {
-      coordinatorName: coordinator.name,
-      conflict: conflicts[0],
-    });
-  }
-
-  const { data: updated, error: updateError } = await supabase
-    .from("event")
-    .update({ coordinator_id: coordinatorId })
-    .eq("event_id", eventId)
-    .is("coordinator_id", null)
-    .select("*")
-    .single();
-  if (updateError) throw updateError;
-  return updated;
+  const { data, error } = await supabase.rpc("assign_event_coordinator", {
+    p_event_id: eventId,
+    p_coordinator_id: coordinatorId,
+  });
+  if (error) throw toEventRequestError(error);
+  if (!data || !data.event) throw new Error("assign_event_coordinator returned no event.");
+  return {
+    ...data.event,
+    coordinator_name: data.coordinator_name,
+  };
 }
 
 // Allowed layout options come from the rooms that actually exist, plus "no preference".

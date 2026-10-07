@@ -45,7 +45,7 @@ Returns:
 `GET /api/events/unassigned`
 
 Returns submitted event requests that do not yet have a coordinator assigned.
-This endpoint requires an authenticated `COORDINATOR_LEAD` profile and returns
+This endpoint requires an authenticated `COORDINATOR` or `COORDINATOR_LEAD` profile and returns
 the event summary fields used for assignment.
 
 ```json
@@ -68,7 +68,7 @@ the event summary fields used for assignment.
 `GET /api/events/unassigned`
 
 Returns submitted event requests that do not yet have a coordinator assigned.
-This endpoint requires an authenticated `COORDINATOR_LEAD` profile and returns
+This endpoint requires an authenticated `COORDINATOR` or `COORDINATOR_LEAD` profile and returns
 the event summary fields used for assignment.
 
 ```json
@@ -103,7 +103,7 @@ All event routes require an `ORGANISER` bearer token and use the error shape des
 - **Server-controlled fields** (`status`, `organiserId`, `requestId`, …) are rejected with `400`, never silently ignored.
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
-- **Submission** creates a `SUBMITTED` event with no coordinator, writes the event and activity record, and notifies the organiser in one database transaction (`submit_event_request`). A Coordinator Lead assigns the event separately. If the database rejects a submission, the `400` still carries field-level `fields`.
+- **Submission** creates a `SUBMITTED` event with no coordinator, writes the event and activity record, and notifies the organiser in one database transaction (`submit_event_request`). A Coordinator or Coordinator Lead assigns the event separately. If the database rejects a submission, the `400` still carries field-level `fields`.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.

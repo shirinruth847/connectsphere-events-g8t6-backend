@@ -93,19 +93,18 @@ describe("authentication and role checks", () => {
 
   describe("[SPM-174] coordinator lead assignment routes", () => {
     test.each(["get", "patch"])(
-      "should_return_403_when_a_regular_coordinator_calls_the_%s_route",
+      "should_allow_a_regular_coordinator_to_call_the_%s_route",
       async (method) => {
         signedInAs("COORDINATOR");
         const path = method === "get" ? "/api/events/unassigned" : "/api/events/42/coordinator";
+        if (method === "get") {
+          eventModel.findUnassignedSubmittedEvents.mockResolvedValue([]);
+        } else {
+          eventModel.assignCoordinator.mockResolvedValue(eventRow({ status: "SUBMITTED", coordinator_id: 7 }));
+        }
         const res = await send(method, path, method === "patch" ? { coordinatorId: 7 } : undefined);
 
-        expect(res.status).toBe(403);
-        expect(res.body).toEqual({
-          error: "You do not have permission to access this resource.",
-          code: "FORBIDDEN",
-        });
-        expect(eventModel.findUnassignedSubmittedEvents).not.toHaveBeenCalled();
-        expect(eventModel.assignCoordinator).not.toHaveBeenCalled();
+        expect(res.status).toBe(200);
       }
     );
 

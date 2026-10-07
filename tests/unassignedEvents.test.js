@@ -1,5 +1,6 @@
 jest.mock("../config/supabase", () => ({
   from: jest.fn(),
+  rpc: jest.fn(),
 }));
 
 const supabase = require("../config/supabase");
@@ -73,21 +74,21 @@ describe("[SPM-174] unassigned event queue", () => {
     });
   });
 
-  test("TC-SPM-174-AC4: permits only Coordinator Lead profiles", () => {
+  test("TC-SPM-174-AC4: permits Coordinator profiles", () => {
     const next = jest.fn();
-    const middleware = requireRole(USER_ROLES.COORDINATOR_LEAD);
+    const middleware = requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD);
 
-    middleware({ user: { role: USER_ROLES.COORDINATOR_LEAD } }, makeResponse(), next);
+    middleware({ user: { role: USER_ROLES.COORDINATOR } }, makeResponse(), next);
 
     expect(next).toHaveBeenCalledTimes(1);
   });
 
-  test("TC-SPM-174-AC4: rejects a regular coordinator", () => {
+  test("TC-SPM-174-AC4: rejects non-coordinator roles", () => {
     const next = jest.fn();
     const res = makeResponse();
-    const middleware = requireRole(USER_ROLES.COORDINATOR_LEAD);
+    const middleware = requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD);
 
-    middleware({ user: { role: USER_ROLES.COORDINATOR } }, res, next);
+    middleware({ user: { role: USER_ROLES.ORGANISER } }, res, next);
 
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.json).toHaveBeenCalledWith({
@@ -144,83 +145,45 @@ describe("[SPM-174] unassigned event queue", () => {
   });
 
   test("[SPM-174-AC3] rejects an assignment when the coordinator has an overlapping event", async () => {
-    const event = chain({
-      data: {
-        event_id: 42,
-        status: "SUBMITTED",
-        coordinator_id: null,
-        start_datetime: "2026-11-01T10:00:00.000Z",
-        end_datetime: "2026-11-01T12:00:00.000Z",
-      },
-      error: null,
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { message: "COORDINATOR_CONFLICT" },
     });
-    const coordinator = chain({
-      data: { user_id: 7, name: "Alice Coordinator" },
-      error: null,
-    });
-    const conflictsResult = [{ title: "Existing event", start_datetime: "2026-11-01T11:00:00.000Z", end_datetime: "2026-11-01T13:00:00.000Z" }];
-    const conflicts = chain({ data: conflictsResult, error: null });
-    conflicts.gt.mockResolvedValue({
-      data: conflictsResult,
-      error: null,
-    });
-    supabase.from
-      .mockReturnValueOnce(event)
-      .mockReturnValueOnce(coordinator)
-      .mockReturnValueOnce(conflicts);
 
     await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7 })).rejects.toMatchObject({
       name: "EventRequestError",
       code: "COORDINATOR_CONFLICT",
     });
-    expect(conflicts.lt).toHaveBeenCalledWith("start_datetime", "2026-11-01T12:00:00.000Z");
-    expect(conflicts.gt).toHaveBeenCalledWith("end_datetime", "2026-11-01T10:00:00.000Z");
-    expect(supabase.from).toHaveBeenCalledTimes(3);
+    expect(supabase.rpc).toHaveBeenCalledWith("assign_event_coordinator", {
+      p_event_id: 42,
+      p_coordinator_id: 7,
+    });
   });
 
   test("[SPM-174-AC3] allows an assignment when an existing event only touches a boundary", async () => {
-    const event = chain({
-      data: {
+    const updated = {
+      event: {
         event_id: 42,
         status: "SUBMITTED",
-        coordinator_id: null,
+        coordinator_id: 7,
         start_datetime: "2026-11-01T10:00:00.000Z",
         end_datetime: "2026-11-01T12:00:00.000Z",
       },
-      error: null,
-    });
-    const coordinator = chain({
-      data: { user_id: 7, name: "Alice Coordinator" },
-      error: null,
-    });
-    const conflicts = chain({ data: [], error: null });
-    conflicts.gt.mockResolvedValue({ data: [], error: null });
-    const updated = {
-      event_id: 42,
-      status: "SUBMITTED",
-      coordinator_id: 7,
-      start_datetime: "2026-11-01T10:00:00.000Z",
-      end_datetime: "2026-11-01T12:00:00.000Z",
+      coordinator_name: "Alice Coordinator",
     };
-    const update = chain({ data: updated, error: null });
-    supabase.from
-      .mockReturnValueOnce(event)
-      .mockReturnValueOnce(coordinator)
-      .mockReturnValueOnce(conflicts)
-      .mockReturnValueOnce(update);
+    supabase.rpc.mockResolvedValue({ data: updated, error: null });
 
-    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7 })).resolves.toEqual(updated);
-    expect(update.update).toHaveBeenCalledWith({ coordinator_id: 7 });
-    expect(update.is).toHaveBeenCalledWith("coordinator_id", null);
+    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7 })).resolves.toEqual({
+      ...updated.event,
+      coordinator_name: "Alice Coordinator",
+    });
   });
 
   test("[SPM-174-AC3] maps an invalid coordinator to a structured client error", async () => {
-    const event = chain({
-      data: { event_id: 42, status: "SUBMITTED", coordinator_id: null },
-      error: null,
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { message: "INVALID_COORDINATOR" },
     });
-    const coordinator = chain({ data: null, error: null });
-    supabase.from.mockReturnValueOnce(event).mockReturnValueOnce(coordinator);
     const res = makeResponse();
 
     await eventController.assignCoordinator({ params: { id: "42" }, body: { coordinatorId: 999 } }, res, jest.fn());

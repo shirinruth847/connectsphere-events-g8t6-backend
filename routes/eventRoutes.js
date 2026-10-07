@@ -21,7 +21,7 @@ const { USER_ROLES } = require("../config/roles");
 const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
 const coordinatorOperations = [
   requireAuth,
-  requireRole(USER_ROLES.COORDINATOR_LEAD),
+  requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD),
 ];
 
 // GET / is left free for event discovery (Master section 3.4).
