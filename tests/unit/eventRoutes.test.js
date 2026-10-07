@@ -12,6 +12,9 @@ jest.mock("../../model/eventModel", () => {
     findOwnEvent: jest.fn(),
     findOrganiserEventRequests: jest.fn(),
     findValidationContext: jest.fn(),
+    findUnassignedSubmittedEvents: jest.fn(),
+    findCoordinatorAvailability: jest.fn(),
+    assignCoordinator: jest.fn(),
   };
 });
 
@@ -86,6 +89,89 @@ describe("authentication and role checks", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.code).toBe("UNAUTHENTICATED");
+  });
+
+  describe("[SPM-174] coordinator lead assignment routes", () => {
+    test.each(["get", "patch"])(
+      "should_return_403_when_a_regular_coordinator_calls_the_%s_route",
+      async (method) => {
+        signedInAs("COORDINATOR");
+        const path = method === "get" ? "/api/events/unassigned" : "/api/events/42/coordinator";
+        const res = await send(method, path, method === "patch" ? { coordinatorId: 7 } : undefined);
+
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual({
+          error: "You do not have permission to access this resource.",
+          code: "FORBIDDEN",
+        });
+        expect(eventModel.findUnassignedSubmittedEvents).not.toHaveBeenCalled();
+        expect(eventModel.assignCoordinator).not.toHaveBeenCalled();
+      }
+    );
+
+    test("should_list_unassigned_requests_for_a_coordinator_lead", async () => {
+      signedInAs("COORDINATOR_LEAD");
+      eventModel.findUnassignedSubmittedEvents.mockResolvedValue([
+        eventRow({
+          event_id: 42,
+          status: "SUBMITTED",
+          coordinator_id: null,
+          start_datetime: "2026-11-01T09:00:00.000Z",
+          end_datetime: "2026-11-01T10:00:00.000Z",
+        }),
+      ]);
+
+      const res = await send("get", "/api/events/unassigned");
+
+      expect(res.status).toBe(200);
+      expect(res.body.events).toEqual([
+        expect.objectContaining({ eventId: 42, requestId: "REQ-000042", status: "SUBMITTED" }),
+      ]);
+    });
+
+    test("should_assign_a_request_for_a_coordinator_lead", async () => {
+      signedInAs("COORDINATOR_LEAD");
+      eventModel.assignCoordinator.mockResolvedValue(
+        eventRow({ event_id: 42, status: "SUBMITTED", coordinator_id: 7 })
+      );
+
+      const res = await send("patch", "/api/events/42/coordinator", { coordinatorId: 7 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.event).toEqual(
+        expect.objectContaining({ eventId: 42, status: "SUBMITTED" })
+      );
+      expect(eventModel.assignCoordinator).toHaveBeenCalledWith({ eventId: 42, coordinatorId: 7 });
+    });
+
+    test("should_reject_an_invalid_coordinator_id_before_assignment", async () => {
+      signedInAs("COORDINATOR_LEAD");
+
+      const res = await send("patch", "/api/events/42/coordinator", { coordinatorId: "7" });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: "Select an active Event Coordinator.",
+        code: "INVALID_COORDINATOR",
+      });
+      expect(eventModel.assignCoordinator).not.toHaveBeenCalled();
+    });
+
+    test("should_return_a_conflict_when_assignment_finds_an_overlap", async () => {
+      signedInAs("COORDINATOR_LEAD");
+      eventModel.assignCoordinator.mockRejectedValue(
+        domainError("COORDINATOR_CONFLICT", { coordinatorName: "Alice Coordinator" })
+      );
+
+      const res = await send("patch", "/api/events/42/coordinator", { coordinatorId: 7 });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        error: "The selected coordinator is unavailable during this event.",
+        code: "COORDINATOR_CONFLICT",
+        fields: { coordinatorName: "Alice Coordinator" },
+      });
+    });
   });
 
   test.each(["COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT", "ATTENDEE"])(

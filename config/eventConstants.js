@@ -11,6 +11,16 @@ const EVENT_STATUS = Object.freeze({
   CANCELLED: "CANCELLED",
 });
 
+const USER_ROLES = Object.freeze({
+  ORGANISER: "ORGANISER",
+  COORDINATOR: "COORDINATOR",
+  COORDINATOR_LEAD: "COORDINATOR_LEAD",
+});
+
+const NOTIFICATION_TYPES = Object.freeze({
+  STATUS_CHANGE: "STATUS_CHANGE",
+});
+
 // What the frontend shows for each stored status (SPM-35: dashboard shows "Pending Approval").
 const STATUS_LABELS = Object.freeze({
   DRAFT: "Draft",
@@ -22,6 +32,7 @@ const MIN_LEAD_TIME_HOURS = 48;
 
 module.exports = {
   EVENT_STATUS,
+  USER_ROLES,
   STATUS_LABELS,
   NO_LAYOUT_PREFERENCE,
   MIN_LEAD_TIME_HOURS,
