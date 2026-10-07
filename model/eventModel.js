@@ -407,7 +407,6 @@ const findValidationContext = async (input) => {
     equipmentIds: equipment.data.map(({ equipment_id }) => equipment_id),
   };
 };
-}
 
 async function findEventsByOrganiser(organiserId, status) {
   let query = supabase

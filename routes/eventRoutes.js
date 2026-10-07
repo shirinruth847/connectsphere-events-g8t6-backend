@@ -8,6 +8,7 @@ const {
   submitDraft,
   listMyEventRequests,
   getEventRequest,
+  getUnassignedEvents,
 } = require("../controller/eventController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole } = require("../middleware/authorize");
@@ -33,7 +34,7 @@ router.get(
 router.get(
   "/unassigned",
   coordinatorLeadOnly,
-  eventController.getUnassignedEvents,
+  getUnassignedEvents,
 );
 router.get("/:id", organiserOnly, getEventRequest);
 router.put("/:id/draft", organiserOnly, updateDraft);

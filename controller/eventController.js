@@ -311,7 +311,7 @@ module.exports = {
   createDraft,
   updateDraft,
   submitDraft,
-  getMyEvents,
+  listMyEventRequests,
   getUnassignedEvents,
-  getEventById,
+  getEventRequest,
 };
