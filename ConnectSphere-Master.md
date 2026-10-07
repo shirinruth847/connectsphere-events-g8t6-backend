@@ -2,8 +2,8 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 0.7 |
-| Updated | 30 September 2026 |
+| Version | 0.8 |
+| Updated | 7 October 2026 |
 | Status | Architecture and implementation baseline; repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
@@ -561,7 +561,7 @@ There is no separate event-level `APPROVED` state. Feasibility acceptance enters
 
 | Action | Actor | Preconditions | Result and required effects |
 | --- | --- | --- | --- |
-| Save draft | EO owner | Valid supplied fields; incomplete fields allowed | Remain `DRAFT`; persist only accepted changes |
+| Save draft | EO owner | Nonblank title; other fields may be incomplete, but supplied values must be valid | Remain `DRAFT`; persist only accepted changes |
 | Submit | EO owner | Required fields complete; eligible coordinator exists | Assign exactly one coordinator and enter `SUBMITTED` atomically |
 | Start review | Assigned EC | `SUBMITTED` | Enter `UNDER_REVIEW` and record review start |
 | Request clarification | Assigned EC | `UNDER_REVIEW` | Store a new round, enter `AWAITING_CLARIFICATION`, notify EO |
@@ -640,7 +640,7 @@ The supplied database and UML diagrams are design references and may contain err
 
 ### 6.1 Storage conventions
 
-Use UUID primary keys, `timestamptz` instants and positive integer versions for mutable aggregates. Auth owns passwords; the application profile ID links to the Auth user. Draft-only mandatory fields may be null; submitted events require their mandatory data and one coordinator.
+Use UUID primary keys, `timestamptz` instants and positive integer versions for mutable aggregates. Auth owns passwords; the application profile ID links to the Auth user. Drafts require a nonblank title; other submission-required fields may be null until submission. Submitted events require their mandatory data and one coordinator.
 
 Retain events, bookings, requests, registrations and activity after closure. Restrict deletion of referenced business records. Do not cascade deletion of an Auth account into event or audit history. JSON requirement/plan fields require bounded documented schemas and cannot replace foreign keys or allocation constraints.
 
@@ -653,6 +653,8 @@ Retain events, bookings, requests, registrations and activity after closure. Res
 | `organisations`, `organisation_memberships` | Verified memberships; never infer membership from editable email/domain text |
 | `staff_assignment_cursors` | Transaction-locked cursor for deterministic coordinator rotation |
 | `events` | Owner, optional organization, coordinator, lifecycle, requirements, timing, attendance, registration policy, publication, versions and confirmation history |
+| `event_venue_preference` | Ordered venue IDs preferred by one event; unique event/venue and event/order pairs |
+| `event_equipment_requirement` | Unique event/equipment pair with a positive requested quantity; does not itself reserve inventory |
 | `clarifications` | Preserved question/response rounds with state and timestamps |
 | `event_comments` | Event conversation with organizer-shared or internal visibility; not a formal approval |
 | `venues` | Venue details, capacity, facilities, accessibility, layouts, operating hours, active state and version |
@@ -696,6 +698,8 @@ Index event owner/organization/coordinator and status; venue-booking intervals; 
 ## 7. Transactions and Concurrency
 
 Use one checked-out database client for `BEGIN`, every related query, `COMMIT` and `ROLLBACK`. Separate client/pool calls do not form one transaction. Cross-domain work stays in the single monolith and shares the same transaction context.
+
+The backend reaches PostgreSQL through the Supabase client, which cannot hold a transaction open across calls. An atomic workflow may therefore be one versioned `SECURITY DEFINER` PL/pgSQL function called once through `supabase.rpc`, as event submission does (`submit_event_request`). Such a function must set a fixed `search_path`, take the acting user ID only from the verified token, be executable by `service_role` alone, and raise stable error codes that the model maps to domain errors.
 
 Use an explicit lock order: event IDs, then venue IDs, then equipment IDs, each in stable order. Scarce-resource operations should use appropriate isolation and bounded retry for serialization/deadlock failures. A retry must re-run every validation; a genuine resource conflict returns a business conflict instead of being retried blindly.
 
@@ -937,6 +941,7 @@ If this master, Jira, a repository README and implemented code disagree, surface
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 0.8 | 2026-10-07 | Implemented in code; database migration pending | Event request creation and drafts (Jira SPM-35, SPM-37). Section 5.2 save-draft precondition (nonblank title) and 6.1 draft storage; 6.2 `event_venue_preference` and `event_equipment_requirement`; section 7 permits a single `SECURITY DEFINER` RPC as the transaction for an atomic workflow. Idempotency records now exist for event creation. Compatibility: `GET /api/events/mine` changes from snake_case offset paging to camelCase cursor paging, and event endpoints use the shared `{ error, code, fields }` error shape. Database: `20261007024516_atomic_event_submission` applied; `20261007075542_event_request_review_fixes` not yet applied to the development project |
 | 0.7 | 2026-09-30 | Design reference gate added | Added section 10.5: a design reference gate for UI tasks covering Figma frame links, fallback to existing pages, developer override, purpose-based page URLs, design authority, follow-up prompts and the team design reference list. Added Figma to sections 10.1 and 10.2, made the gate step 1 of the section 9.2 ticket workflow and added design precedence to section 12.2. Jira request: none (direct developer request). Compatibility: documentation only; no code or database change |
 | 0.6 | 2026-09-23 | Startup gate added | Rewrote section 2.7 with the actual backend (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_ANON_KEY`, `PORT`) and frontend (`BACKEND_URL`) environment variables, backend and end-to-end startup checks, a mandatory startup gate before ticket work and troubleshooting; added the gate to the section 9.2 ticket workflow |
 | 0.5 | 2026-09-22 | Backend coding convention added | Established the supplied backend examples as the default CommonJS, Express route → controller → model structure and writing-style reference, with safeguards against copying placeholder names or error-swallowing behavior |

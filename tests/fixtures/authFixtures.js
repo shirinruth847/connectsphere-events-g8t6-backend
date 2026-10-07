@@ -63,6 +63,7 @@ const emptyManifest = (runId) => ({
   organisationIds: [],
   venueIds: [],
   roomIds: [],
+  equipmentIds: [],
   eventIds: [],
   bookingIds: [],
   registrationIds: [],
@@ -142,8 +143,16 @@ const createAuthFixtures = async (runId) => {
     "room",
   ));
 
+  const equipmentId = record("equipmentIds", await insertOne(
+    "equipment",
+    { name: `spm32-${runId} Projector`, category: "AV", total_quantity: 5 },
+    "equipment_id",
+    "equipment",
+  ));
+
   const events = {};
   for (const [key, spec] of Object.entries(EVENT_SPECS)) {
+    const isDraft = spec.status === "DRAFT";
     events[key] = record("eventIds", await insertOne(
       "event",
       {
@@ -153,9 +162,13 @@ const createAuthFixtures = async (runId) => {
         accessibility_needs: "Internal accessibility note",
         organiser_id: accounts[spec.organiser].userId,
         organisation_id: spec.organisation ? organisations[spec.organisation] : null,
-        coordinator_id: spec.status === "DRAFT" ? null : accounts.coordinator.userId,
+        coordinator_id: isDraft ? null : accounts.coordinator.userId,
         status: spec.status,
         expected_attendance: 50,
+        // event_submitted_fields_check requires these once a request leaves DRAFT.
+        start_datetime: isDraft ? null : "2027-03-01T01:00:00Z",
+        end_datetime: isDraft ? null : "2027-03-01T03:00:00Z",
+        preferred_layout_type: isDraft ? null : "THEATRE",
         is_published: Boolean(spec.published),
       },
       "event_id",
@@ -188,7 +201,14 @@ const createAuthFixtures = async (runId) => {
     ));
   }
 
-  return { runId, accounts, organisations, events, venue: { venueId, roomId } };
+  return { runId, accounts, organisations, events, venue: { venueId, roomId }, equipmentId };
+};
+
+// Records rows a test created through the API, so cleanup removes them too.
+const recordFixtureIds = (runId, list, ids) => {
+  const manifest = JSON.parse(fs.readFileSync(manifestPath(runId), "utf8"));
+  manifest[list] = [...(manifest[list] || []), ...ids];
+  saveManifest(manifest);
 };
 
 // Only ever changes a profile this run created.
@@ -221,14 +241,20 @@ const deleteIn = async (table, column, ids) => {
 // Throws if anything this run created is still present.
 const verifyManifestClean = async (manifest) => {
   const leftovers = [];
+  const eventIds = manifest.eventIds || [];
   const tables = [
     ["registration", "registration_id", manifest.registrationIds],
     ["venue_booking", "booking_id", manifest.bookingIds],
-    ["event", "event_id", manifest.eventIds],
+    ["notification", "event_id", eventIds],
+    ["event_venue_preference", "event_id", eventIds],
+    ["event_equipment_requirement", "event_id", eventIds],
+    ["event", "event_id", eventIds],
     ["organisation_membership", "user_id", manifest.userIds],
+    ["activity_log", "user_id", manifest.userIds],
     ["user", "user_id", manifest.userIds],
     ["room", "room_id", manifest.roomIds],
     ["venue", "venue_id", manifest.venueIds],
+    ["equipment", "equipment_id", manifest.equipmentIds || []],
     ["organisation", "organisation_id", manifest.organisationIds],
   ];
   for (const [table, column, ids] of tables) {
@@ -252,14 +278,20 @@ const verifyManifestClean = async (manifest) => {
 };
 
 // Dependency-safe order; Auth accounts last so profiles never dangle mid-cleanup.
+// Deleting the users cascades their activity_log and idempotency_records rows.
 const cleanupManifest = async (manifest) => {
+  const eventIds = manifest.eventIds || [];
   await deleteIn("registration", "registration_id", manifest.registrationIds);
   await deleteIn("venue_booking", "booking_id", manifest.bookingIds);
-  await deleteIn("event", "event_id", manifest.eventIds);
+  await deleteIn("notification", "event_id", eventIds);
+  await deleteIn("event_venue_preference", "event_id", eventIds);
+  await deleteIn("event_equipment_requirement", "event_id", eventIds);
+  await deleteIn("event", "event_id", eventIds);
   await deleteIn("organisation_membership", "user_id", manifest.userIds);
   await deleteIn("user", "user_id", manifest.userIds);
   await deleteIn("room", "room_id", manifest.roomIds);
   await deleteIn("venue", "venue_id", manifest.venueIds);
+  await deleteIn("equipment", "equipment_id", manifest.equipmentIds || []);
   await deleteIn("organisation", "organisation_id", manifest.organisationIds);
   for (const authUserId of manifest.authUserIds) {
     const { error } = await supabase.auth.admin.deleteUser(authUserId);
@@ -284,6 +316,7 @@ module.exports = {
   createAuthFixtures,
   cleanupAuthFixtures,
   cleanupManifest,
+  recordFixtureIds,
   setFixtureProfileActive,
   countFixtureActivity,
   MANIFEST_DIR,

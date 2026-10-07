@@ -1,13 +1,28 @@
 const express = require("express");
 const router = express.Router();
 
-const { listMyEventRequests } = require("../controller/eventController");
+const {
+  createAndSubmit,
+  createDraft,
+  updateDraft,
+  submitDraft,
+  listMyEventRequests,
+  getEventRequest,
+} = require("../controller/eventController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole } = require("../middleware/authorize");
-const { validatePagination } = require("../middleware/validate");
+const { validateCursorPagination } = require("../middleware/validate");
 const { USER_ROLES } = require("../config/roles");
 
+// Applied per route (not router-wide) so coordinator routes can be added here later.
+const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
+
 // GET / is left free for event discovery (Master section 3.4).
-router.get("/mine", requireAuth, requireRole(USER_ROLES.ORGANISER), validatePagination, listMyEventRequests);
+router.post("/", organiserOnly, createAndSubmit);
+router.post("/drafts", organiserOnly, createDraft);
+router.get("/mine", organiserOnly, validateCursorPagination, listMyEventRequests); // must stay above "/:id"
+router.get("/:id", organiserOnly, getEventRequest);
+router.put("/:id/draft", organiserOnly, updateDraft);
+router.put("/:id/submit", organiserOnly, submitDraft);
 
 module.exports = router;
