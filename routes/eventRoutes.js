@@ -1,6 +1,7 @@
 const express = require('express');
-const { requireAuth, requireRole } = require('../middleware/auth');
-const { USER_ROLES } = require('../config/eventConstants');
+const { requireAuth } = require('../middleware/auth');
+const { requireRole } = require('../middleware/authorize');
+const { USER_ROLES } = require('../config/roles');
 const eventController = require('../controller/eventController');
 
 const router = express.Router();

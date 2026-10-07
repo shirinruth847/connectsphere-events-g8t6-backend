@@ -32,7 +32,7 @@ test('another organiser and a missing event both use the owner-scoped 404 path',
     jest.fn()
   );
 
-  expect(eventModel.findEventById).toHaveBeenCalledWith(42, 17);
+  expect(eventModel.findEventById).toHaveBeenCalledWith(42, { user_id: 17 });
   expect(response.status).toHaveBeenCalledWith(404);
   expect(response.json).toHaveBeenCalledWith({ message: 'Event request not found.' });
 });

@@ -46,7 +46,7 @@ async function loadOwnEvent(req, res) {
     res.status(400).json({ message: 'Invalid event ID.' });
     return null;
   }
-  const event = await eventModel.findEventById(eventId, req.user.user_id);
+  const event = await eventModel.findEventById(eventId, req.user);
   if (!event) {
     res.status(404).json({ message: 'Event request not found.' });
     return null;
@@ -196,16 +196,42 @@ async function getMyEvents(req, res, next) {
     if (status && !Object.values(EVENT_STATUS).includes(status)) {
       return res.status(400).json({ message: 'Invalid status filter.' });
     }
-    const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+    const limit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+    const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
+    const fields = {};
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
-      return res.status(400).json({ message: 'Page size must be between 1 and 50.' });
+      fields.limit = 'Limit must be a whole number from 1 to 50.';
+    }
+    if (!Number.isInteger(offset) || offset < 0 || offset > 10000) {
+      fields.offset = 'Offset must be a whole number from 0 to 10000.';
+    }
+    if (req.query.cursor && req.query.offset !== undefined) {
+      fields.cursor = 'Cursor and offset cannot be used together.';
+    }
+    if (Object.keys(fields).length) {
+      return res.status(400).json({
+        error: 'Please correct the highlighted fields.',
+        code: 'VALIDATION_FAILED',
+        fields,
+      });
     }
     const cursor = eventModel.decodeCursor(req.query.cursor);
-    const rows = await eventModel.findEventsByOrganiser(req.user.user_id, status, limit, cursor);
+    if (!cursor) {
+      const result = status
+        ? await eventModel.findOrganiserEventRequests(req.user, { limit, offset }, status)
+        : await eventModel.findOrganiserEventRequests(req.user, { limit, offset });
+      return res.status(200).json({
+        events: result.events,
+        page: { limit, offset, next_offset: result.nextOffset },
+        ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }),
+      });
+    }
+
+    const rows = await eventModel.findEventsByOrganiser(req.user, status, limit, cursor, offset);
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit);
     return res.status(200).json({
-      events: page.map(eventModel.toApi),
+      events: page.map((event) => eventModel.toApi(event, req.user.user_id)),
       nextCursor: hasMore && page.length ? eventModel.encodeCursor(page[page.length - 1]) : null,
     });
   } catch (err) {
@@ -218,7 +244,7 @@ async function getEventById(req, res, next) {
   try {
     const event = await loadOwnEvent(req, res);
     if (!event) return undefined;
-    return res.status(200).json({ event: eventModel.toApi(event) });
+    return res.status(200).json({ event: eventModel.toApi(event, req.user.user_id) });
   } catch (err) {
     return next(err);
   }

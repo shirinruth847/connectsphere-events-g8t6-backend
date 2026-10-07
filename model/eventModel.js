@@ -19,7 +19,7 @@ const FIELD_MAP = Object.freeze({
 });
 
 const NUMERIC_FIELDS = ['expectedAttendance', 'registrationCapacity'];
-const EVENT_SELECT = '*,event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)';
+const EVENT_SELECT = '*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)';
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), 'venuePreferences', 'equipmentRequirements']);
 
 function getUnsupportedInputFields(body = {}, { allowAutoSave = false } = {}) {
@@ -65,7 +65,7 @@ function parseAccessibility(value) {
   }
 }
 
-function toApi(row) {
+function toApi(row, viewerUserId) {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
   const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
   return {
@@ -97,6 +97,8 @@ function toApi(row) {
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(viewerUserId === undefined ? {} : { is_owner: row.organiser_id === viewerUserId }),
+    ...(row.organisation ? { organisation: row.organisation } : {}),
   };
 }
 
@@ -164,22 +166,31 @@ async function submitEvent({ organiserId, eventId = null, input }) {
   return unpackRpcEvent(data);
 }
 
-async function findEventById(eventId, organiserId) {
+function getOrganiserVisibilityFilter(user) {
+  const ownRequests = `organiser_id.eq.${Number(user.user_id)}`;
+  const organisationIds = Array.isArray(user.organisation_ids)
+    ? user.organisation_ids.map(Number).filter(Number.isSafeInteger)
+    : [];
+  if (organisationIds.length === 0) return ownRequests;
+  return `${ownRequests},and(organisation_id.in.(${organisationIds.join(',')}),status.neq.DRAFT)`;
+}
+
+async function findEventById(eventId, user) {
   const { data, error } = await supabase
     .from('event')
     .select(EVENT_SELECT)
     .eq('event_id', eventId)
-    .eq('organiser_id', organiserId)
+    .or(getOrganiserVisibilityFilter(user))
     .maybeSingle();
   if (error) throw error;
   return data;
 }
 
-async function findEventsByOrganiser(organiserId, status, limit, cursor) {
+async function findEventsByOrganiser(user, status, limit, cursor, offset = 0) {
   let query = supabase
     .from('event')
     .select(EVENT_SELECT)
-    .eq('organiser_id', organiserId);
+    .or(getOrganiserVisibilityFilter(user));
   if (status) query = query.eq('status', status);
   if (cursor) {
     query = query.or(
@@ -188,11 +199,35 @@ async function findEventsByOrganiser(organiserId, status, limit, cursor) {
   }
   query = query
     .order('updated_at', { ascending: false })
-    .order('event_id', { ascending: false })
-    .limit(limit + 1);
+    .order('event_id', { ascending: false });
+  query = cursor ? query.limit(limit + 1) : query.range(offset, offset + limit);
   const { data, error } = await query;
   if (error) throw error;
   return data;
+}
+
+async function findOrganiserEventRequests(user, { limit, offset }, status) {
+  let query = supabase
+    .from('event')
+    .select('event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,updated_at,created_at,organisation(organisation_id,name)')
+    .or(getOrganiserVisibilityFilter(user))
+    .order('updated_at', { ascending: false })
+    .order('event_id', { ascending: false });
+  if (status) query = query.eq('status', status);
+
+  const { data, error } = await query.range(offset, offset + limit);
+  if (error) throw error;
+
+  const events = data.slice(0, limit).map(({ organiser_id, ...event }) => ({
+    ...event,
+    is_owner: organiser_id === user.user_id,
+  }));
+  const hasMore = data.length > limit;
+  return {
+    events,
+    nextOffset: hasMore ? offset + limit : null,
+    nextCursor: hasMore ? encodeCursor(data[limit - 1]) : null,
+  };
 }
 
 function decodeCursor(value) {
@@ -251,6 +286,9 @@ module.exports = {
   submitEvent,
   findEventById,
   findEventsByOrganiser,
+  findOrganiserEventRequests,
+  getOrganiserVisibilityFilter,
+  buildOrganiserVisibilityFilter: getOrganiserVisibilityFilter,
   decodeCursor,
   encodeCursor,
   getAllowedLayouts,

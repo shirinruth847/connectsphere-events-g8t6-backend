@@ -50,11 +50,14 @@ test('server starts and returns JSON for missing routes and database failures', 
 
     const eventRoute = await fetch(`http://127.0.0.1:${port}/api/events/mine`);
     expect(eventRoute.status).toBe(401);
-    expect(await eventRoute.json()).toEqual({ message: 'Please log in to continue.' });
+    expect(await eventRoute.json()).toEqual({ error: 'Please log in to continue.', code: 'UNAUTHENTICATED' });
 
     const databaseFailure = await fetch(`http://127.0.0.1:${port}/api/healthcheck`);
     expect(databaseFailure.status).toBe(500);
-    expect(await databaseFailure.json()).toEqual({ message: 'Internal server error.' });
+    expect(await databaseFailure.json()).toEqual({
+      error: 'Internal Server Error',
+      code: 'INTERNAL_ERROR',
+    });
     expect(errorOutput).not.toContain('startup-smoke-test-key');
   } finally {
     child.kill();
