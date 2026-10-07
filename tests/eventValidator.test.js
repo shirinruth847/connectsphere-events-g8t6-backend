@@ -1,4 +1,9 @@
-const { validateDraft, validateSubmission, MESSAGES } = require('../validators/eventValidator');
+const {
+  validateDraft,
+  validateSubmission,
+  validateRequirements,
+  MESSAGES,
+} = require('../validators/eventValidator');
 
 const HOUR = 60 * 60 * 1000;
 const NOW = new Date('2026-10-01T09:00:00+08:00');
@@ -122,5 +127,49 @@ describe('validateDraft (Draft Event Requests)', () => {
   test('Draft negative TC: submitting a draft with blank attendance shows the exact message', () => {
     const errors = submit({ ...validRequest(), expectedAttendance: '' });
     expect(errors.expectedAttendance).toBe('Expected Attendance is required for submission');
+  });
+});
+
+describe('validateRequirements (Event Venue and Equipment Requirements)', () => {
+  const allowed = { venueIds: [1, 2], equipmentIds: [3, 4] };
+
+  test('valid ordered venue preferences and equipment quantities pass', () => {
+    expect(
+      validateRequirements(
+        { venuePreferences: [2, 1], equipmentRequirements: [{ equipmentId: 3, quantity: 2 }] },
+        allowed
+      )
+    ).toEqual({});
+  });
+
+  test('unknown and duplicate venue IDs are rejected', () => {
+    expect(validateRequirements({ venuePreferences: [1, 1] }, allowed).venuePreferences).toBe(
+      MESSAGES.venuePreferencesInvalid
+    );
+    expect(validateRequirements({ venuePreferences: [9] }, allowed).venuePreferences).toBe(
+      MESSAGES.venuePreferencesInvalid
+    );
+  });
+
+  test('invalid or duplicate equipment requirements are rejected', () => {
+    expect(
+      validateRequirements({ equipmentRequirements: [{ equipmentId: 3, quantity: 0 }] }, allowed)
+        .equipmentRequirements
+    ).toBe(MESSAGES.equipmentRequirementsInvalid);
+    expect(
+      validateRequirements(
+        {
+          equipmentRequirements: [
+            { equipmentId: 3, quantity: 1 },
+            { equipmentId: 3, quantity: 2 },
+          ],
+        },
+        allowed
+      ).equipmentRequirements
+    ).toBe(MESSAGES.equipmentRequirementsInvalid);
+    expect(
+      validateRequirements({ equipmentRequirements: [{ equipmentId: 9, quantity: 1 }] }, allowed)
+        .equipmentRequirements
+    ).toBe(MESSAGES.equipmentRequirementsInvalid);
   });
 });

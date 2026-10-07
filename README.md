@@ -35,6 +35,28 @@ Open [http://localhost:8000](http://localhost:8000) with your browser or API cli
 Returns:
 
 ```json
+
+### Event Requests
+
+All event routes require an authenticated organiser and use the bearer access token.
+
+- `POST /api/events` creates and submits a request.
+- `POST /api/events/drafts` creates a draft; `PUT /api/events/:id/draft` saves changes.
+- `PUT /api/events/:id/submit` submits a saved draft.
+- `GET /api/events/:id` loads an organiser-owned request.
+- `GET /api/events/mine` lists organiser-owned requests. Optional `status`, `limit` (1-50, default 20), and opaque `cursor` parameters provide bounded pagination.
+
+Submissions assign an active coordinator and write the event, activity record, notification, and recipients in one database transaction. Optional `venuePreferences` is an ordered array of venue IDs; `equipmentRequirements` is an array of `{ "equipmentId": number, "quantity": number }` objects.
+
+Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
+
+### Tests
+
+Run the backend unit and startup smoke tests with:
+
+```bash
+npm test -- --runInBand
+```
 {
   "message": "App is working well"
 }
@@ -49,9 +71,11 @@ Create a `.env` file in the root directory:
 ```bash
 # Required to run the app
 PORT=8000
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<server-only-key>
 ```
 
-_This will be updated accordingly as the backend grows._
+Keep Supabase keys private and out of source control. The service-role key is server-only.
 
 ---
 
@@ -67,17 +91,24 @@ Please refer to the `COMMIT_MESSAGES.md` file in the root directory for details.
 
 ```bash
 connectsphere-events-g8t6-backend/
+├── app.js                 # Express app and middleware composition
 ├── config/               # External service configurations (Supabase)
 │   └── supabase.js 
 ├── controller/           # Route handler logic and controllers
 │   └── authController.js
 ├── middleware/           # Request/response middleware functions
-│   └── auth.js
+│   ├── auth.js
+│   └── errorHandler.js
 ├── model/                # Data models and logic
+│   ├── eventModel.js
 │   └── healthModel.js
 ├── routes/               # API route definitions
 │   ├── authRoutes.js
+│   ├── eventRoutes.js
 │   └── routers.js
+├── supabase/migrations/  # Versioned database changes
+├── tests/                # Unit and startup smoke tests
+├── validators/           # Request validation rules
 ├── COMMIT_MESSAGES.md    # Commit message SOP standards
 ├── README.md             # Backend documentation
 └── server.js             # Main server entry point

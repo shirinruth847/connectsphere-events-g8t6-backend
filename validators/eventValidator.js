@@ -18,6 +18,8 @@ const MESSAGES = Object.freeze({
   registrationFlagInvalid: 'Registration setting must be true or false.',
   registrationCapacityRequired: 'Registration capacity is required when registration is enabled.',
   registrationCapacityInvalid: 'Registration capacity must be a positive whole number.',
+  venuePreferencesInvalid: 'Choose valid venue preferences without duplicates.',
+  equipmentRequirementsInvalid: 'Choose valid equipment and positive quantities without duplicates.',
 });
 
 const isBlank = (value) =>
@@ -81,6 +83,60 @@ function validateDraft(input = {}, { allowedLayouts } = {}) {
   return errors;
 }
 
+function validateRequirements(input = {}, { venueIds, equipmentIds } = {}) {
+  const errors = {};
+
+  if (input.venuePreferences !== undefined) {
+    const preferences = input.venuePreferences;
+    if (!Array.isArray(preferences)) {
+      errors.venuePreferences = MESSAGES.venuePreferencesInvalid;
+    } else {
+      const normalized = preferences.map(Number);
+      if (
+        normalized.some((id) => !Number.isInteger(id) || id <= 0) ||
+        new Set(normalized).size !== normalized.length ||
+        (Array.isArray(venueIds) && normalized.some((id) => !venueIds.includes(id)))
+      ) {
+        errors.venuePreferences = MESSAGES.venuePreferencesInvalid;
+      }
+    }
+  }
+
+  if (input.equipmentRequirements !== undefined) {
+    const requirements = input.equipmentRequirements;
+    if (!Array.isArray(requirements)) {
+      errors.equipmentRequirements = MESSAGES.equipmentRequirementsInvalid;
+    } else {
+      const equipment = requirements.map((item) => ({
+        id: Number(item && item.equipmentId),
+        quantity: Number(item && item.quantity),
+        keysValid:
+          item &&
+          typeof item === 'object' &&
+          !Array.isArray(item) &&
+          Object.keys(item).every((key) => key === 'equipmentId' || key === 'quantity'),
+      }));
+      const ids = equipment.map(({ id }) => id);
+      if (
+        equipment.some(
+          ({ id, quantity, keysValid }) =>
+            !keysValid ||
+            !Number.isInteger(id) ||
+            id <= 0 ||
+            !Number.isInteger(quantity) ||
+            quantity <= 0 ||
+            (Array.isArray(equipmentIds) && !equipmentIds.includes(id))
+        ) ||
+        new Set(ids).size !== ids.length
+      ) {
+        errors.equipmentRequirements = MESSAGES.equipmentRequirementsInvalid;
+      }
+    }
+  }
+
+  return errors;
+}
+
 // Creation story AC2 + TC-002/TC-003, and Draft story Scenario 4 (submitting a draft).
 function validateSubmission(input = {}, { now = new Date(), allowedLayouts } = {}) {
   const errors = {};
@@ -114,4 +170,4 @@ function validateSubmission(input = {}, { now = new Date(), allowedLayouts } = {
 
 const hasErrors = (errors) => Object.keys(errors).length > 0;
 
-module.exports = { validateDraft, validateSubmission, hasErrors, MESSAGES };
+module.exports = { validateDraft, validateSubmission, validateRequirements, hasErrors, MESSAGES };

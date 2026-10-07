@@ -1,8 +1,11 @@
 const eventModel = require('../model/eventModel');
-const { logActivity } = require('../model/activityLogModel');
-const { createNotification } = require('../model/notificationModel');
-const { validateDraft, validateSubmission, hasErrors } = require('../validators/eventValidator');
-const { EVENT_STATUS, NOTIFICATION_TYPES } = require('../config/eventConstants');
+const {
+  validateDraft,
+  validateSubmission,
+  validateRequirements,
+  hasErrors,
+} = require('../validators/eventValidator');
+const { EVENT_STATUS } = require('../config/eventConstants');
 
 // ---------- helpers ----------
 
@@ -10,31 +13,29 @@ const { EVENT_STATUS, NOTIFICATION_TYPES } = require('../config/eventConstants')
 const validationFailed = (res, errors) =>
   res.status(400).json({ message: 'Please fix the highlighted fields.', errors });
 
-// Logging and notifications run AFTER the event is saved. If one of them fails,
-// the submission itself should still succeed, so errors are logged, not thrown.
-async function safely(label, task) {
-  try {
-    await task();
-  } catch (err) {
-    console.error(`[eventController] ${label} failed:`, err.message);
+function validateRequestBody(req, res, { allowAutoSave = false } = {}) {
+  if (req.body === undefined) req.body = {};
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    return validationFailed(res, { _request: 'A JSON object is required.' });
   }
+
+  const unsupported = eventModel.getUnsupportedInputFields(req.body, { allowAutoSave });
+  if (unsupported.length) {
+    const fields = unsupported.slice(0, 5).map((field) => field.slice(0, 60));
+    return validationFailed(res, { _request: `Unsupported request field(s): ${fields.join(', ')}.` });
+  }
+  if (allowAutoSave && req.body.isAutoSave !== undefined && typeof req.body.isAutoSave !== 'boolean') {
+    return validationFailed(res, { isAutoSave: 'Auto-save flag must be true or false.' });
+  }
+  return null;
 }
 
-// AC4: notification confirming receipt of the request.
-function sendSubmissionReceipt(event, userId) {
-  return createNotification({
-    eventId: event.event_id,
-    title: 'Event request received',
-    message: `Your event request "${event.title}" (${eventModel.formatRequestId(
-      event.event_id
-    )}) has been submitted and is pending approval.`,
-    type: NOTIFICATION_TYPES.STATUS_CHANGE,
-    recipientIds: [userId],
-  });
-}
-
-function recordActivity(userId, eventId, action, details) {
-  return logActivity({ userId, entityName: 'event', entityId: eventId, action, details });
+async function getValidationContext() {
+  const [allowedLayouts, allowedRequirements] = await Promise.all([
+    eventModel.getAllowedLayouts(),
+    eventModel.getAllowedRequirementIds(),
+  ]);
+  return { allowedLayouts, ...allowedRequirements };
 }
 
 // Loads an event and checks it belongs to the logged-in organiser.
@@ -45,13 +46,9 @@ async function loadOwnEvent(req, res) {
     res.status(400).json({ message: 'Invalid event ID.' });
     return null;
   }
-  const event = await eventModel.findEventById(eventId);
+  const event = await eventModel.findEventById(eventId, req.user.user_id);
   if (!event) {
     res.status(404).json({ message: 'Event request not found.' });
-    return null;
-  }
-  if (event.organiser_id !== req.user.user_id) {
-    res.status(403).json({ message: 'You can only access your own event requests.' });
     return null;
   }
   return event;
@@ -62,30 +59,23 @@ function mergeWithExisting(existingRow, input) {
   return { ...eventModel.pickEventInput(eventModel.toApi(existingRow)), ...input };
 }
 
-const nowIso = () => new Date().toISOString();
-
 // ---------- handlers ----------
 
 // POST /api/events  — Creation story: create and submit in one step (AC1-AC4, TC-001-003)
 async function createAndSubmit(req, res, next) {
   try {
+    const bodyError = validateRequestBody(req, res);
+    if (bodyError) return bodyError;
     const input = eventModel.pickEventInput(req.body);
-    const allowedLayouts = await eventModel.getAllowedLayouts();
-    const errors = validateSubmission(input, { allowedLayouts });
+    const validationContext = await getValidationContext();
+    const errors = {
+      ...validateSubmission(input, { allowedLayouts: validationContext.allowedLayouts }),
+      ...validateRequirements(input, validationContext),
+    };
     if (hasErrors(errors)) return validationFailed(res, errors);
 
     const userId = req.user.user_id;
-    const event = await eventModel.createEvent({
-      ...eventModel.toRow(input),
-      organiser_id: userId,
-      status: EVENT_STATUS.SUBMITTED,
-      updated_at: nowIso(),
-    });
-
-    await safely('activity log', () =>
-      recordActivity(userId, event.event_id, 'EVENT_SUBMITTED', 'Event request created and submitted.')
-    );
-    await safely('notification', () => sendSubmissionReceipt(event, userId));
+    const event = await eventModel.submitEvent({ organiserId: userId, input });
 
     return res.status(201).json({
       message: 'Your event request has been submitted successfully.',
@@ -99,22 +89,20 @@ async function createAndSubmit(req, res, next) {
 // POST /api/events/drafts  — Draft story Scenario 1 (and the first auto-save)
 async function createDraft(req, res, next) {
   try {
+    const bodyError = validateRequestBody(req, res);
+    if (bodyError) return bodyError;
     const input = eventModel.pickEventInput(req.body);
-    const allowedLayouts = await eventModel.getAllowedLayouts();
-    const errors = validateDraft(input, { allowedLayouts });
+    const validationContext = await getValidationContext();
+    const errors = {
+      ...validateDraft(input, { allowedLayouts: validationContext.allowedLayouts }),
+      ...validateRequirements(input, validationContext),
+    };
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const userId = req.user.user_id;
-    const event = await eventModel.createEvent({
-      ...eventModel.toRow(input),
-      organiser_id: userId,
-      status: EVENT_STATUS.DRAFT,
-      updated_at: nowIso(),
+    const event = await eventModel.saveDraft({
+      organiserId: req.user.user_id,
+      input,
     });
-
-    await safely('activity log', () =>
-      recordActivity(userId, event.event_id, 'DRAFT_CREATED', 'Event request saved as draft.')
-    );
 
     return res.status(201).json({
       message: 'Draft saved successfully.',
@@ -130,6 +118,8 @@ async function createDraft(req, res, next) {
 // Send { ...fields, isAutoSave: true } from the 30-second idle timer.
 async function updateDraft(req, res, next) {
   try {
+    const bodyError = validateRequestBody(req, res, { allowAutoSave: true });
+    if (bodyError) return bodyError;
     const existing = await loadOwnEvent(req, res);
     if (!existing) return undefined;
     if (existing.status !== EVENT_STATUS.DRAFT) {
@@ -137,22 +127,21 @@ async function updateDraft(req, res, next) {
     }
 
     const input = eventModel.pickEventInput(req.body);
-    const allowedLayouts = await eventModel.getAllowedLayouts();
-    const errors = validateDraft(mergeWithExisting(existing, input), { allowedLayouts });
+    const validationContext = await getValidationContext();
+    const completeInput = mergeWithExisting(existing, input);
+    const errors = {
+      ...validateDraft(completeInput, { allowedLayouts: validationContext.allowedLayouts }),
+      ...validateRequirements(completeInput, validationContext),
+    };
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const event = await eventModel.updateEvent(existing.event_id, {
-      ...eventModel.toRow(input),
-      updated_at: nowIso(),
-    });
-
     const isAutoSave = req.body.isAutoSave === true;
-    // Auto-saves happen every 30s of idle time, so only manual saves are logged.
-    if (!isAutoSave) {
-      await safely('activity log', () =>
-        recordActivity(req.user.user_id, event.event_id, 'DRAFT_UPDATED', 'Draft saved.')
-      );
-    }
+    const event = await eventModel.saveDraft({
+      organiserId: req.user.user_id,
+      eventId: existing.event_id,
+      input,
+      isAutoSave,
+    });
 
     return res.status(200).json({
       message: isAutoSave ? 'Draft auto-saved.' : 'Draft saved successfully.',
@@ -167,6 +156,8 @@ async function updateDraft(req, res, next) {
 // PUT /api/events/:id/submit  — Draft story Scenario 4 (submit a saved draft)
 async function submitDraft(req, res, next) {
   try {
+    const bodyError = validateRequestBody(req, res);
+    if (bodyError) return bodyError;
     const existing = await loadOwnEvent(req, res);
     if (!existing) return undefined;
     if (existing.status !== EVENT_STATUS.DRAFT) {
@@ -174,22 +165,20 @@ async function submitDraft(req, res, next) {
     }
 
     const input = eventModel.pickEventInput(req.body);
-    const allowedLayouts = await eventModel.getAllowedLayouts();
-    const errors = validateSubmission(mergeWithExisting(existing, input), { allowedLayouts });
+    const validationContext = await getValidationContext();
+    const completeInput = mergeWithExisting(existing, input);
+    const errors = {
+      ...validateSubmission(completeInput, { allowedLayouts: validationContext.allowedLayouts }),
+      ...validateRequirements(completeInput, validationContext),
+    };
     // Nothing is written on failure, so the status stays DRAFT (draft negative TC).
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const userId = req.user.user_id;
-    const event = await eventModel.updateEvent(existing.event_id, {
-      ...eventModel.toRow(input),
-      status: EVENT_STATUS.SUBMITTED,
-      updated_at: nowIso(),
+    const event = await eventModel.submitEvent({
+      organiserId: req.user.user_id,
+      eventId: existing.event_id,
+      input,
     });
-
-    await safely('activity log', () =>
-      recordActivity(userId, event.event_id, 'EVENT_SUBMITTED', 'Draft submitted for review.')
-    );
-    await safely('notification', () => sendSubmissionReceipt(event, userId));
 
     return res.status(200).json({
       message: 'Your event request has been submitted successfully.',
@@ -207,8 +196,18 @@ async function getMyEvents(req, res, next) {
     if (status && !Object.values(EVENT_STATUS).includes(status)) {
       return res.status(400).json({ message: 'Invalid status filter.' });
     }
-    const rows = await eventModel.findEventsByOrganiser(req.user.user_id, status);
-    return res.status(200).json({ events: rows.map(eventModel.toApi) });
+    const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+      return res.status(400).json({ message: 'Page size must be between 1 and 50.' });
+    }
+    const cursor = eventModel.decodeCursor(req.query.cursor);
+    const rows = await eventModel.findEventsByOrganiser(req.user.user_id, status, limit, cursor);
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    return res.status(200).json({
+      events: page.map(eventModel.toApi),
+      nextCursor: hasMore && page.length ? eventModel.encodeCursor(page[page.length - 1]) : null,
+    });
   } catch (err) {
     return next(err);
   }

@@ -561,7 +561,7 @@ There is no separate event-level `APPROVED` state. Feasibility acceptance enters
 
 | Action | Actor | Preconditions | Result and required effects |
 | --- | --- | --- | --- |
-| Save draft | EO owner | Valid supplied fields; incomplete fields allowed | Remain `DRAFT`; persist only accepted changes |
+| Save draft | EO owner | Nonblank title; other fields may be incomplete, but supplied values must be valid | Remain `DRAFT`; persist only accepted changes |
 | Submit | EO owner | Required fields complete; eligible coordinator exists | Assign exactly one coordinator and enter `SUBMITTED` atomically |
 | Start review | Assigned EC | `SUBMITTED` | Enter `UNDER_REVIEW` and record review start |
 | Request clarification | Assigned EC | `UNDER_REVIEW` | Store a new round, enter `AWAITING_CLARIFICATION`, notify EO |
@@ -640,7 +640,7 @@ The supplied database and UML diagrams are design references and may contain err
 
 ### 6.1 Storage conventions
 
-Use UUID primary keys, `timestamptz` instants and positive integer versions for mutable aggregates. Auth owns passwords; the application profile ID links to the Auth user. Draft-only mandatory fields may be null; submitted events require their mandatory data and one coordinator.
+Use UUID primary keys, `timestamptz` instants and positive integer versions for mutable aggregates. Auth owns passwords; the application profile ID links to the Auth user. Drafts require a nonblank title; other submission-required fields may be null until submission. Submitted events require their mandatory data and one coordinator.
 
 Retain events, bookings, requests, registrations and activity after closure. Restrict deletion of referenced business records. Do not cascade deletion of an Auth account into event or audit history. JSON requirement/plan fields require bounded documented schemas and cannot replace foreign keys or allocation constraints.
 
@@ -653,6 +653,8 @@ Retain events, bookings, requests, registrations and activity after closure. Res
 | `organisations`, `organisation_memberships` | Verified memberships; never infer membership from editable email/domain text |
 | `staff_assignment_cursors` | Transaction-locked cursor for deterministic coordinator rotation |
 | `events` | Owner, optional organization, coordinator, lifecycle, requirements, timing, attendance, registration policy, publication, versions and confirmation history |
+| `event_venue_preference` | Ordered venue IDs preferred by one event; unique event/venue and event/order pairs |
+| `event_equipment_requirement` | Unique event/equipment pair with a positive requested quantity; does not itself reserve inventory |
 | `clarifications` | Preserved question/response rounds with state and timestamps |
 | `event_comments` | Event conversation with organizer-shared or internal visibility; not a formal approval |
 | `venues` | Venue details, capacity, facilities, accessibility, layouts, operating hours, active state and version |
