@@ -2,7 +2,7 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
-const { NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require("../config/eventConstants");
+const { EVENT_STATUS, NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require("../config/eventConstants");
 const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
 
 // Allowlist: the ONLY fields a client may set. status, organiser_id, coordinator_id etc.
@@ -127,6 +127,8 @@ const toApi = (row, viewerUserId) => {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
+    ...(row.coordinator_id === undefined ? {} : { coordinatorId: row.coordinator_id }),
+    ...(row.coordinator_name === undefined ? {} : { coordinatorName: row.coordinator_name }),
     ...(viewerUserId === undefined ? {} : { isOwner: row.organiser_id === viewerUserId }),
   };
 };
@@ -164,6 +166,8 @@ const DOMAIN_CODES = new Set([
   "IDEMPOTENCY_KEY_REQUIRED",
   "IDEMPOTENCY_KEY_REUSED",
   "IDEMPOTENCY_IN_PROGRESS",
+  "COORDINATOR_CONFLICT",
+  "INVALID_COORDINATOR",
 ]);
 
 // submit_event_request reports "<field>:<reason>" pairs in the error detail.
@@ -201,11 +205,12 @@ const CONSTRAINT_FIELD_ERRORS = Object.freeze({
   event_equipment_requirement_equipment_id_fkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
 });
 
-const toEventRequestError = (error) => {
+const toEventRequestError = (error, fields) => {
+  if (typeof error === "string") return eventRequestError(error, fields);
   const message = error.message || "";
   const code = error.code || "";
 
-  if (DOMAIN_CODES.has(message)) return eventRequestError(message);
+  if (DOMAIN_CODES.has(message)) return eventRequestError(message, error.fields);
   if (message === "INVALID_EVENT_SUBMISSION") {
     const fields = {};
     for (const failure of String(error.details || "").split(",")) {
@@ -408,6 +413,78 @@ const findValidationContext = async (input) => {
   };
 };
 
+async function findEventsByOrganiser(organiserId, status) {
+  let query = supabase
+    .from('event')
+    .select('*')
+    .eq('organiser_id', organiserId)
+    .order('updated_at', { ascending: false });
+  if (status) query = query.eq('status', status);
+  const { data, error } = await query;
+  if (error) throw error;
+  return data;
+}
+
+async function findUnassignedSubmittedEvents() {
+  const { data, error } = await supabase
+    .from('event')
+    .select('*')
+    .eq('status', EVENT_STATUS.SUBMITTED)
+    .is('coordinator_id', null)
+    .order('start_datetime', { ascending: true })
+    .order('event_id', { ascending: true });
+  if (error) throw error;
+  return data;
+}
+
+async function findCoordinatorAvailability() {
+  const [{ data: users, error: usersError }, { data: events, error: eventsError }] =
+    await Promise.all([
+      supabase
+        .from("user")
+        .select("user_id,name")
+        .eq("role", "COORDINATOR")
+        .eq("is_active", true)
+        .order("name", { ascending: true }),
+      supabase
+        .from("event")
+        .select("*")
+        .not("coordinator_id", "is", null)
+        .not("status", "in", `("DRAFT","REJECTED","CANCELLED")`)
+        .order("start_datetime", { ascending: true }),
+    ]);
+  if (usersError) throw usersError;
+  if (eventsError) throw eventsError;
+
+  return users.map((user) => ({
+    coordinatorId: user.user_id,
+    name: user.name,
+    events: events
+      .filter((event) => event.coordinator_id === user.user_id)
+      .map(toApi),
+  }));
+}
+
+async function assignCoordinator({ eventId, coordinatorId }) {
+  const { data, error } = await supabase.rpc("assign_event_coordinator", {
+    p_event_id: eventId,
+    p_coordinator_id: coordinatorId,
+  });
+  if (error) throw toEventRequestError(error);
+  if (!data || !data.event) throw new Error("assign_event_coordinator returned no event.");
+  return {
+    ...data.event,
+    coordinator_name: data.coordinator_name,
+  };
+}
+
+// Allowed layout options come from the rooms that actually exist, plus "no preference".
+async function getAllowedLayouts() {
+  const { data, error } = await supabase.from('room').select('layout_type');
+  if (error) throw error;
+  return [NO_LAYOUT_PREFERENCE, ...new Set(data.map((room) => room.layout_type))];
+}
+
 module.exports = {
   getUnsupportedInputFields,
   pickEventInput,
@@ -425,6 +502,9 @@ module.exports = {
   findOwnEvent,
   findOrganiserEventRequests,
   encodeCursor,
+  findUnassignedSubmittedEvents,
+  findCoordinatorAvailability,
+  assignCoordinator,
   decodeCursor,
   findValidationContext,
 };

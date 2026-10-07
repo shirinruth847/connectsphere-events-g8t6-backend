@@ -16,9 +16,23 @@ const IDEMPOTENCY_KEY_MESSAGE =
 const DOMAIN_ERRORS = Object.freeze({
   EVENT_NOT_FOUND: [404, "Event request not found."],
   EVENT_NOT_DRAFT: [409, "Only draft requests can be changed or submitted."],
-  NO_ELIGIBLE_COORDINATOR: [409, "No coordinator is currently available. Your request was not submitted."],
-  IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
-  IDEMPOTENCY_IN_PROGRESS: [409, "This request is still being processed. Try again shortly."],
+  NO_ELIGIBLE_COORDINATOR: [
+    409,
+    "No coordinator is currently available. Your request was not submitted.",
+  ],
+  IDEMPOTENCY_KEY_REUSED: [
+    409,
+    "This Idempotency-Key was already used for a different request.",
+  ],
+  IDEMPOTENCY_IN_PROGRESS: [
+    409,
+    "This request is still being processed. Try again shortly.",
+  ],
+  COORDINATOR_CONFLICT: [
+    409,
+    "The selected coordinator is unavailable during this event.",
+  ],
+  INVALID_COORDINATOR: [400, "Select an active Event Coordinator."],
 });
 
 // ---------- helpers ----------
@@ -32,26 +46,34 @@ const validationFailed = (res, fields) =>
     res,
     400,
     "VALIDATION_FAILED",
-    hasErrors(fields) ? "Please correct the highlighted fields." : "Some values could not be saved. Check the form and try again.",
-    fields
+    hasErrors(fields)
+      ? "Please correct the highlighted fields."
+      : "Some values could not be saved. Check the form and try again.",
+    fields,
   );
 
-const eventNotFound = (res) => sendError(res, 404, "EVENT_NOT_FOUND", DOMAIN_ERRORS.EVENT_NOT_FOUND[1]);
+const eventNotFound = (res) =>
+  sendError(res, 404, "EVENT_NOT_FOUND", DOMAIN_ERRORS.EVENT_NOT_FOUND[1]);
 
 const handleError = (error, res, next) => {
   if (error.name === "EventRequestError") {
-    if (error.code === "VALIDATION_FAILED") return validationFailed(res, error.fields || {});
-    if (error.code === "INVALID_CURSOR") return validationFailed(res, { cursor: "Invalid page cursor." });
-    if (error.code === "IDEMPOTENCY_KEY_REQUIRED") return validationFailed(res, { idempotencyKey: IDEMPOTENCY_KEY_MESSAGE });
+    if (error.code === "VALIDATION_FAILED")
+      return validationFailed(res, error.fields || {});
+    if (error.code === "INVALID_CURSOR")
+      return validationFailed(res, { cursor: "Invalid page cursor." });
+    if (error.code === "IDEMPOTENCY_KEY_REQUIRED")
+      return validationFailed(res, { idempotencyKey: IDEMPOTENCY_KEY_MESSAGE });
     const mapped = DOMAIN_ERRORS[error.code];
-    if (mapped) return sendError(res, mapped[0], error.code, mapped[1]);
+    if (mapped) return sendError(res, mapped[0], error.code, mapped[1], error.fields);
   }
   return next(error);
 };
 
 // IDs that cannot exist are "not found", like IDs the user may not see.
 const parseEventId = (value) =>
-  /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_EVENT_ID ? Number(value) : null;
+  /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_EVENT_ID
+    ? Number(value)
+    : null;
 
 const readIdempotencyKey = (req) => {
   const key = req.get("Idempotency-Key");
@@ -68,9 +90,13 @@ const checkRequestBody = (body, { allowAutoSave = false } = {}) => {
     eventModel
       .getUnsupportedInputFields(body, { allowAutoSave })
       .slice(0, 10)
-      .map((field) => [field.slice(0, 60), "This field cannot be set."])
+      .map((field) => [field.slice(0, 60), "This field cannot be set."]),
   );
-  if (allowAutoSave && body.isAutoSave !== undefined && typeof body.isAutoSave !== "boolean") {
+  if (
+    allowAutoSave &&
+    body.isAutoSave !== undefined &&
+    typeof body.isAutoSave !== "boolean"
+  ) {
     fields.isAutoSave = "Auto-save flag must be true or false.";
   }
   return fields;
@@ -109,7 +135,11 @@ const createAndSubmit = async (req, res, next) => {
     const errors = await validateWith(validateSubmission, input);
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const result = await eventModel.submitEvent({ organiserId: req.user.user_id, input, idempotencyKey });
+    const result = await eventModel.submitEvent({
+      organiserId: req.user.user_id,
+      input,
+      idempotencyKey,
+    });
     markReplay(res, result);
     return res.status(201).json({
       message: "Your event request has been submitted successfully.",
@@ -133,7 +163,11 @@ const createDraft = async (req, res, next) => {
     const errors = await validateWith(validateDraft, input);
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const result = await eventModel.saveDraft({ organiserId: req.user.user_id, input, idempotencyKey });
+    const result = await eventModel.saveDraft({
+      organiserId: req.user.user_id,
+      input,
+      idempotencyKey,
+    });
     markReplay(res, result);
     return res.status(201).json({
       message: "Draft saved successfully.",
@@ -158,15 +192,28 @@ const updateDraft = async (req, res, next) => {
     const existing = await eventModel.findOwnEvent(eventId, req.user.user_id);
     if (!existing) return eventNotFound(res);
     if (existing.status !== EVENT_STATUS.DRAFT) {
-      return sendError(res, 409, "EVENT_NOT_DRAFT", DOMAIN_ERRORS.EVENT_NOT_DRAFT[1]);
+      return sendError(
+        res,
+        409,
+        "EVENT_NOT_DRAFT",
+        DOMAIN_ERRORS.EVENT_NOT_DRAFT[1],
+      );
     }
 
     const input = eventModel.pickEventInput(body);
-    const errors = await validateWith(validateDraft, mergeWithExisting(existing, input));
+    const errors = await validateWith(
+      validateDraft,
+      mergeWithExisting(existing, input),
+    );
     if (hasErrors(errors)) return validationFailed(res, errors);
 
     const isAutoSave = body.isAutoSave === true;
-    const result = await eventModel.saveDraft({ organiserId: req.user.user_id, eventId, input, isAutoSave });
+    const result = await eventModel.saveDraft({
+      organiserId: req.user.user_id,
+      eventId,
+      input,
+      isAutoSave,
+    });
     return res.status(200).json({
       message: isAutoSave ? "Draft auto-saved." : "Draft saved successfully.",
       event: eventModel.toApi(result.event),
@@ -189,15 +236,27 @@ const submitDraft = async (req, res, next) => {
     const existing = await eventModel.findOwnEvent(eventId, req.user.user_id);
     if (!existing) return eventNotFound(res);
     if (existing.status !== EVENT_STATUS.DRAFT) {
-      return sendError(res, 409, "EVENT_NOT_DRAFT", DOMAIN_ERRORS.EVENT_NOT_DRAFT[1]);
+      return sendError(
+        res,
+        409,
+        "EVENT_NOT_DRAFT",
+        DOMAIN_ERRORS.EVENT_NOT_DRAFT[1],
+      );
     }
 
     const input = eventModel.pickEventInput(body);
-    const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input));
+    const errors = await validateWith(
+      validateSubmission,
+      mergeWithExisting(existing, input),
+    );
     // Nothing is written on failure, so the status stays DRAFT (SPM-37 negative TC).
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const result = await eventModel.submitEvent({ organiserId: req.user.user_id, eventId, input });
+    const result = await eventModel.submitEvent({
+      organiserId: req.user.user_id,
+      eventId,
+      input,
+    });
     return res.status(200).json({
       message: "Your event request has been submitted successfully.",
       event: eventModel.toApi(result.event),
@@ -214,15 +273,64 @@ const listMyEventRequests = async (req, res, next) => {
     if (status !== undefined && !EVENT_STATUSES.includes(status)) {
       return validationFailed(res, { status: "Unknown status filter." });
     }
-    const { events, nextCursor } = await eventModel.findOrganiserEventRequests(req.user, {
-      ...req.pagination,
-      status: status ?? null,
-    });
+    const { events, nextCursor } = await eventModel.findOrganiserEventRequests(
+      req.user,
+      {
+        ...req.pagination,
+        status: status ?? null,
+      },
+    );
     return res.status(200).json({ events, nextCursor });
   } catch (error) {
     return handleError(error, res, next);
   }
 };
+
+// GET /api/events/unassigned — coordinator lead assignment queue.
+async function getUnassignedEvents(req, res, next) {
+  try {
+    const rows = await eventModel.findUnassignedSubmittedEvents();
+    return res.status(200).json({ events: rows.map((row) => eventModel.toApi(row)) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function getCoordinatorAvailability(req, res, next) {
+  try {
+    const coordinators = await eventModel.findCoordinatorAvailability();
+    return res.status(200).json({ coordinators });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function assignCoordinator(req, res, next) {
+  try {
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return eventNotFound(res);
+    if (
+      !req.body ||
+      !Number.isInteger(req.body.coordinatorId) ||
+      req.body.coordinatorId < 1
+    ) {
+      return sendError(
+        res,
+        DOMAIN_ERRORS.INVALID_COORDINATOR[0],
+        "INVALID_COORDINATOR",
+        DOMAIN_ERRORS.INVALID_COORDINATOR[1],
+      );
+    }
+
+    const event = await eventModel.assignCoordinator({
+      eventId,
+      coordinatorId: req.body.coordinatorId,
+    });
+    return res.status(200).json({ event: eventModel.toApi(event) });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+}
 
 // GET /api/events/:id — load one request (e.g. to prefill "Edit Draft")
 const getEventRequest = async (req, res, next) => {
@@ -231,7 +339,9 @@ const getEventRequest = async (req, res, next) => {
     if (!eventId) return eventNotFound(res);
     const event = await eventModel.findVisibleEvent(eventId, req.user);
     if (!event) return eventNotFound(res);
-    return res.status(200).json({ event: eventModel.toApi(event, req.user.user_id) });
+    return res
+      .status(200)
+      .json({ event: eventModel.toApi(event, req.user.user_id) });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -243,5 +353,8 @@ module.exports = {
   updateDraft,
   submitDraft,
   listMyEventRequests,
+  getUnassignedEvents,
+  getCoordinatorAvailability,
+  assignCoordinator,
   getEventRequest,
 };
