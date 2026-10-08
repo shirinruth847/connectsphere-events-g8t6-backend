@@ -12,9 +12,10 @@ const POSTGREST_TIMESTAMP = "2026-10-07T07:14:14.406209+00:00";
 
 const queryReturning = (result) => {
   const query = {};
-  for (const method of ["select", "eq", "or", "order", "in"]) {
+  for (const method of ["select", "eq", "neq", "or", "order", "in"]) {
     query[method] = jest.fn(() => query);
   }
+  query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   query.limit = jest.fn().mockResolvedValue(result);
   query.maybeSingle = jest.fn().mockResolvedValue(result);
   return query;
@@ -150,7 +151,7 @@ describe("reads", () => {
     const query = queryReturning({ data: null, error: null });
     supabase.from.mockReturnValue(query);
 
-    await expect(eventModel.findVisibleEvent(42, { user_id: 17, organisation_ids: [] })).resolves.toBeNull();
+    await expect(eventModel.findVisibleEvent(42, { user_id: 17, role: "ORGANISER", organisation_ids: [] })).resolves.toBeNull();
 
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
     expect(query.or).toHaveBeenCalledWith("organiser_id.eq.17");
@@ -251,4 +252,63 @@ describe("reads", () => {
     expect(supabase.from).not.toHaveBeenCalled();
     expect(context.allowedLayouts).toEqual(["NO_PREFERENCE"]);
   });
+
+  test("[SPM-180-AC3] should_scope_coordinator_event_reads_to_the_current_assignee", async () => {
+    const query = queryReturning({ data: null, error: null });
+    supabase.from.mockReturnValue(query);
+
+    await eventModel.findVisibleEvent(42, { user_id: 21, role: "COORDINATOR" });
+
+    expect(query.eq).toHaveBeenCalledWith("event_id", 42);
+    expect(query.eq).toHaveBeenCalledWith("coordinator_id", 21);
+    expect(query.neq).toHaveBeenCalledWith("status", "DRAFT");
+    expect(query.or).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-180-AC3/AC4] should_list_only_events_assigned_to_the_requested_coordinator", async () => {
+    const query = queryReturning({ data: [], error: null });
+    supabase.from.mockReturnValue(query);
+
+    await eventModel.findCoordinatorEvents(21);
+
+    expect(query.eq).toHaveBeenCalledWith("coordinator_id", 21);
+    expect(query.neq).toHaveBeenCalledWith("status", "DRAFT");
+    expect(query.order).toHaveBeenCalledWith("start_datetime", { ascending: true });
+  });
+});
+
+describe("SPM-180 reassignment RPC", () => {
+  test("[SPM-180-AC1/AC2] should_call_the_atomic_rpc_and_return_the_new_current_coordinator", async () => {
+    supabase.rpc.mockResolvedValue({
+      data: {
+        event: { event_id: 42, title: "Conference", status: "SUBMITTED", coordinator_id: 29 },
+        coordinator: { user_id: 29, name: "Coordinator Two" },
+      },
+      error: null,
+    });
+
+    const result = await eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, leadId: 10 });
+
+    expect(supabase.rpc).toHaveBeenCalledWith("reassign_event_coordinator", {
+      p_event_id: 42,
+      p_coordinator_id: 29,
+      p_lead_id: 10,
+    });
+    expect(result).toEqual({
+      event: { eventId: 42, requestId: "REQ-000042", title: "Conference", status: "SUBMITTED", coordinatorId: 29 },
+      coordinator: { coordinatorId: 29, name: "Coordinator Two" },
+    });
+  });
+
+  test.each(["EVENT_NOT_REASSIGNABLE", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT", "COORDINATOR_UNCHANGED"])(
+    "[SPM-180] should_preserve_domain_error_%s_from_the_atomic_rpc",
+    async (code) => {
+      supabase.rpc.mockResolvedValue({ data: null, error: { message: code, code: "P0001" } });
+
+      await expect(eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, leadId: 10 })).rejects.toMatchObject({
+        name: "EventRequestError",
+        code,
+      });
+    }
+  );
 });
