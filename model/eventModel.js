@@ -27,7 +27,7 @@ const EVENT_SELECT =
   "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 const LIST_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
 const MAX_LOOKUP_IDS = 50;
 
 // ---------- input mapping ----------
@@ -127,6 +127,7 @@ const toApi = (row, viewerUserId) => {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
+    isAssignedToCoordinator: row.coordinator_id != null,
     ...(viewerUserId === undefined ? {} : { isOwner: row.organiser_id === viewerUserId }),
   };
 };
@@ -141,6 +142,7 @@ const toListItem = (row, viewerUserId) => ({
   endDatetime: row.end_datetime,
   expectedAttendance: row.expected_attendance,
   organisation: toOrganisation(row.organisation),
+  isAssignedToCoordinator: row.coordinator_id != null,
   isOwner: row.organiser_id === viewerUserId,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
