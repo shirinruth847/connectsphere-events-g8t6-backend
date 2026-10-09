@@ -204,6 +204,9 @@ const createAuthFixtures = async (runId) => {
   return { runId, accounts, organisations, events, venue: { venueId, roomId }, equipmentId };
 };
 
+// Starts an empty manifest for suites that create their records through the API.
+const startFixtureManifest = (runId) => saveManifest(emptyManifest(runId));
+
 // Records rows a test created through the API, so cleanup removes them too.
 const recordFixtureIds = (runId, list, ids) => {
   const manifest = JSON.parse(fs.readFileSync(manifestPath(runId), "utf8"));
@@ -316,6 +319,7 @@ module.exports = {
   createAuthFixtures,
   cleanupAuthFixtures,
   cleanupManifest,
+  startFixtureManifest,
   recordFixtureIds,
   setFixtureProfileActive,
   countFixtureActivity,
