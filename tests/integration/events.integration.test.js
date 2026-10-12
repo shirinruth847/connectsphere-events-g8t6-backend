@@ -291,9 +291,10 @@ describe("drafts (SPM-37)", () => {
     expect(await notificationsFor(eventId)).toHaveLength(2);
     expect(await activityActions(eventId)).toEqual(["DRAFT_CREATED", "EVENT_SUBMITTED"]);
 
+    // SPM-33 AC3: a submitted request is read-only; the owner is pointed to a change request.
     const lateEdit = await call("put", `/api/events/${eventId}/draft`, "organiserA", { title: "Too late" });
-    expect(lateEdit.status).toBe(409);
-    expect(lateEdit.body.code).toBe("EVENT_NOT_DRAFT");
+    expect(lateEdit.status).toBe(403);
+    expect(lateEdit.body.code).toBe("EDIT_REQUIRES_CHANGE_REQUEST");
   });
 });
 

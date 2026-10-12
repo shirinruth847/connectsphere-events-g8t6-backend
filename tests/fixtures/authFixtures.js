@@ -78,8 +78,9 @@ const insertOne = async (table, row, idColumn, step) =>
   check(await supabase.from(table).insert(row).select(idColumn).single(), step)[idColumn];
 
 // Callers pass a run ID they already hold, so a failure part-way through
-// setup can still be cleaned up from the manifest.
-const createAuthFixtures = async (runId) => {
+// setup can still be cleaned up from the manifest. extraAccounts adds accounts
+// only one suite needs (e.g. a second coordinator and a Lead for reassignment).
+const createAuthFixtures = async (runId, { extraAccounts = [] } = {}) => {
   const password = `Spm32-${crypto.randomBytes(12).toString("base64url")}`;
   const manifest = emptyManifest(runId);
   saveManifest(manifest);
@@ -101,7 +102,7 @@ const createAuthFixtures = async (runId) => {
   }
 
   const accounts = {};
-  for (const account of ACCOUNTS) {
+  for (const account of [...ACCOUNTS, ...extraAccounts]) {
     const email = `spm32-${runId}-${account.key.toLowerCase()}@${TEST_EMAIL_DOMAIN}`;
     const authUser = check(
       await supabase.auth.admin.createUser({ email, password, email_confirm: true }),
@@ -251,6 +252,7 @@ const verifyManifestClean = async (manifest) => {
     ["notification", "event_id", eventIds],
     ["event_venue_preference", "event_id", eventIds],
     ["event_equipment_requirement", "event_id", eventIds],
+    ["event_assignments", "event_id", eventIds],
     ["event", "event_id", eventIds],
     ["organisation_membership", "user_id", manifest.userIds],
     ["activity_log", "user_id", manifest.userIds],
@@ -289,6 +291,8 @@ const cleanupManifest = async (manifest) => {
   await deleteIn("notification", "event_id", eventIds);
   await deleteIn("event_venue_preference", "event_id", eventIds);
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
+  // Assignment history references the event without a cascade.
+  await deleteIn("event_assignments", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);
   await deleteIn("organisation_membership", "user_id", manifest.userIds);
   await deleteIn("user", "user_id", manifest.userIds);
