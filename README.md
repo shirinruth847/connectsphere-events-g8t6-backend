@@ -81,6 +81,21 @@ Errors use one shape: `{ "error": "<safe message>", "code": "<MACHINE_CODE>" }`,
 - `next_offset` is `null` on the last page of registrations.
 - Roles and organisation memberships always come from the database, never from the request or token metadata.
 
+### Sign-Up (SPM-123)
+
+Prospective attendees and event organisers create their own accounts. Staff roles (`COORDINATOR`, `VENUE_STAFF`, `TECH_SUPPORT`) are never self-registered.
+
+| Method & path | Access | Input | Success | Errors |
+| --- | --- | --- | --- | --- |
+| `POST /api/auth/signup` | Public; at most 5 attempts per IP per 15 minutes | `{ "accountType": "ATTENDEE" | "ORGANISER", "name", "email", "password" }`, no other fields | `201 { message, user: { user_id, email, name, role, roles, home_path } }`. No session: the browser then signs in with `supabase.auth.signInWithPassword` as for login | `400 VALIDATION_FAILED` with `fields` (missing fields, invalid email, weak password, staff or unknown `accountType`, any extra field such as `role`), `409 EMAIL_UNAVAILABLE` (`"The email cannot be used for registration."`), `429 RATE_LIMITED` |
+
+- **Field rules:** `name` 1–100 characters; `email` a valid address of up to 150 characters, stored lowercase; `password` 8–72 characters with at least one letter and one number. The `400` message for a weak password states these rules.
+- **Duplicate emails** get the same `409` whether the email belongs to an account, differs only in letter case, or matches a profile not yet linked to Auth, so the response never confirms that an account exists.
+- **Accounts are usable immediately.** Email verification is deferred (SPM-123 AC6–AC8), so new accounts are created already confirmed and no email is sent.
+- **Consistency:** Supabase Auth and the `user` table cannot share a transaction. The Auth account is created first, marked in `app_metadata.signup_account_type`; if the profile insert then fails, the Auth account is deleted again. A marked Auth account left without a profile (e.g. after a crash) is removed and recreated when the same email signs up again more than two minutes later.
+- **Organisers** start without an organisation membership, so `GET /api/events/mine` shows only their own requests.
+- **Behind a proxy** (production), set Express `trust proxy` so the rate limit counts each client's IP rather than the proxy's.
+
 ---
 
 ## 🧪 Example `.env` File
@@ -96,6 +111,7 @@ FRONTEND_ORIGIN=http://localhost:3000   # the only browser origin allowed by COR
 SUPABASE_ANON_KEY=<anon/publishable key>  # tests sign in with it like the browser; falls back to the service role key
 SEED_ACCOUNT_PASSWORD=<private password for seeded dev accounts, 12+ characters>
 SEED_NAMESPACE=dev                         # prefix for seeded emails and organisation names
+SIGNUP_RATE_LIMIT_MAX=5                    # sign-up attempts per IP per 15 minutes (default 5; tests raise it)
 ```
 
 The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.
@@ -125,7 +141,7 @@ npm run test:integration  # live tests against the Supabase development project 
 npm run test:cleanup      # removes fixtures left by an interrupted integration run
 ```
 
-Integration tests create namespaced synthetic Auth accounts (`spm32-<run>-…@connectsphere.test`) through the Auth Admin API, sign in with Supabase Auth as the browser does, and call the backend with the resulting token. Each created ID is recorded in `tests/fixtures/manifests/` (git-ignored), and the run removes exactly those records afterwards. Cleanup then verifies that nothing it created remains.
+Integration tests create namespaced synthetic Auth accounts (`spm32-<run>-…` and, for sign-up, `spm123-<run>-…@connectsphere.test`) through the Auth Admin API, sign in with Supabase Auth as the browser does, and call the backend with the resulting token. Each created ID is recorded in `tests/fixtures/manifests/` (git-ignored), and the run removes exactly those records afterwards. Cleanup then verifies that nothing it created remains.
 
 Supabase Auth rate-limits password sign-ins per IP. The suite reuses one session per role and makes about 20 sign-ins, so wait about 5 minutes between consecutive integration runs. A run started too soon fails with `Sign-in for <role> failed: 429`.
 
@@ -165,6 +181,7 @@ connectsphere-events-g8t6-backend/
 │   ├── auth.js           # Verifies the Supabase access token and loads the profile
 │   ├── authorize.js      # Role checks
 │   ├── errorHandler.js   # Safe responses for unhandled errors
+│   ├── rateLimit.js      # Per-IP limit for sign-up attempts
 │   └── validate.js       # Offset and cursor pagination bounds
 ├── model/                # Data models and logic
 │   ├── eventModel.js
@@ -184,6 +201,7 @@ connectsphere-events-g8t6-backend/
 │   ├── integration/      # Live tests against the development project
 │   └── unit/             # Mocked Supabase; run by npm test
 ├── validators/           # Pure request validation rules
+│   ├── authValidator.js
 │   └── eventValidator.js
 ├── COMMIT_MESSAGES.md    # Commit message SOP standards
 ├── README.md             # Backend documentation
