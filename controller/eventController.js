@@ -133,6 +133,29 @@ const readVersion = (body, required, errors) => {
   return version;
 };
 
+// Everything in a save request besides the event fields: the version the client
+// loaded, its idempotency key and whether this is an auto-save. "rules" says what
+// the route accepts and requires. The values are only meaningful when "errors",
+// the problems with the request itself, is empty.
+const readSaveRequest = (req, body, { allowAutoSave, requireVersion, requireIdempotencyKey }) => {
+  const errors = checkRequestBody(body, { allowAutoSave, allowVersion: true });
+  if (errors.body) return { errors };
+
+  const expectedVersion = readVersion(body, requireVersion, errors);
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey && (requireIdempotencyKey || req.get("Idempotency-Key") !== undefined)) {
+    errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  }
+  return { errors, expectedVersion, idempotencyKey, isAutoSave: allowAutoSave && body.isAutoSave === true };
+};
+
+// A coordinator's edit must change at least one ordinary field (SPM-33 AC4).
+const validateCoordinatorEdit = (input) =>
+  Object.keys(input).length === 0 ? { body: "Send at least one field to change." } : validateOrdinaryFields(input);
+
+// The owner's draft is validated as a whole: the saved values plus the ones sent.
+const validateOwnerDraft = (existing, input) => validateWith(validateDraft, mergeWithExisting(existing, input));
+
 // The save was made against an older version: nothing changed, and the current
 // values are returned so the user can review them before trying again (AC7).
 const sendVersionConflict = async (req, res, eventId) => {
@@ -149,8 +172,9 @@ const sendVersionConflict = async (req, res, eventId) => {
 // the AC6 table: viewing scope (404, by requireVisibleEvent before this), permission
 // to make this edit (403), input (400), then the write, where the database rechecks
 // relationship, status and version under the event row lock (409 for a stale version).
-const saveEventEdit = async (req, res, next, { allowAutoSave, requireVersion, requireIdempotencyKey }) => {
+const saveEventEdit = async (req, res, next, rules) => {
   const { eventId, event: existing, access } = req.visibleEvent;
+  const actorId = req.user.user_id;
 
   try {
     const denial = getEditDenial(access, existing);
@@ -160,42 +184,17 @@ const saveEventEdit = async (req, res, next, { allowAutoSave, requireVersion, re
     const deniedFields = isPlainObject(body) ? getFieldDenials(body, access) : {};
     if (hasErrors(deniedFields)) return sendDomainError(res, "FIELD_NOT_EDITABLE", deniedFields);
 
-    const requestErrors = checkRequestBody(body, { allowAutoSave, allowVersion: true });
-    if (requestErrors.body) return validationFailed(res, requestErrors);
-    const expectedVersion = readVersion(body, requireVersion, requestErrors);
-    const idempotencyKey = readIdempotencyKey(req);
-    if (!idempotencyKey && (requireIdempotencyKey || req.get("Idempotency-Key") !== undefined)) {
-      requestErrors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
-    }
+    const { errors: requestErrors, expectedVersion, idempotencyKey, isAutoSave } = readSaveRequest(req, body, rules);
     if (hasErrors(requestErrors)) return validationFailed(res, requestErrors);
 
     const input = eventModel.pickEventInput(body);
     const isCoordinatorEdit = access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR;
-    const isAutoSave = allowAutoSave && body.isAutoSave === true;
-    let result;
-    if (isCoordinatorEdit) {
-      if (Object.keys(input).length === 0) return validationFailed(res, { body: "Send at least one field to change." });
-      const errors = validateOrdinaryFields(input);
-      if (hasErrors(errors)) return validationFailed(res, errors);
-      result = await eventModel.updateEventDetails({
-        actorId: req.user.user_id,
-        eventId,
-        input,
-        expectedVersion,
-        idempotencyKey,
-      });
-    } else {
-      const errors = await validateWith(validateDraft, mergeWithExisting(existing, input));
-      if (hasErrors(errors)) return validationFailed(res, errors);
-      result = await eventModel.saveDraft({
-        organiserId: req.user.user_id,
-        eventId,
-        input,
-        isAutoSave,
-        idempotencyKey,
-        expectedVersion,
-      });
-    }
+    const errors = isCoordinatorEdit ? validateCoordinatorEdit(input) : await validateOwnerDraft(existing, input);
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const result = isCoordinatorEdit
+      ? await eventModel.updateEventDetails({ actorId, eventId, input, expectedVersion, idempotencyKey })
+      : await eventModel.saveDraft({ organiserId: actorId, eventId, input, isAutoSave, idempotencyKey, expectedVersion });
 
     markReplay(res, result);
     const saved = { ...existing, ...result.event };
