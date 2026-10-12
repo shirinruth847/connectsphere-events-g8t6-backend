@@ -1,6 +1,6 @@
 const eventModel = require("../model/eventModel");
 const activityModel = require("../model/activityModel");
-const { getEventAccess, loadEventForViewer, EVENT_NOT_FOUND } = require("../middleware/authorize");
+const { getEventAccess, getEditDenial, loadEventForViewer, EVENT_NOT_FOUND } = require("../middleware/authorize");
 const { parseEventId } = require("../middleware/validate");
 const {
   validateDraft,
@@ -14,7 +14,6 @@ const {
 const { EVENT_STATUS, EVENT_RELATIONSHIP, EVENT_FIELD_GROUPS } = require("../config/eventConstants");
 
 const EVENT_STATUSES = Object.values(EVENT_STATUS);
-const CLOSED_STATUSES = [EVENT_STATUS.COMPLETED, EVENT_STATUS.REJECTED, EVENT_STATUS.CANCELLED];
 const KNOWN_EVENT_FIELDS = new Set(Object.values(EVENT_FIELD_GROUPS).flat());
 const SYSTEM_FIELDS = new Set(EVENT_FIELD_GROUPS.SYSTEM);
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{8,128}$/;
@@ -105,16 +104,6 @@ const validateWith = async (validate, input) => {
 
 const markReplay = (res, result) => {
   if (result.replayed) res.set("Idempotent-Replayed", "true");
-};
-
-// Why a user who can see the event cannot edit it at all, or null when they can.
-const getEditDenial = (access, event) => {
-  if (access.canEdit) return null;
-  if (access.relationship === EVENT_RELATIONSHIP.ORGANISATION_MEMBER) return "EVENT_READ_ONLY";
-  if (access.relationship === EVENT_RELATIONSHIP.OWNER && !CLOSED_STATUSES.includes(event.status)) {
-    return "EDIT_REQUIRES_CHANGE_REQUEST";
-  }
-  return "EVENT_NOT_EDITABLE_IN_STATUS";
 };
 
 // Event fields this user may not change now. One of them rejects the whole

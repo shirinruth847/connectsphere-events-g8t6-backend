@@ -20,6 +20,8 @@ const HISTORY_AUDIENCES = Object.freeze({
   [EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR]: Object.freeze([HISTORY_AUDIENCE.ORGANISER_SAFE, HISTORY_AUDIENCE.STAFF_ONLY]),
 });
 
+const CLOSED_STATUSES = [EVENT_STATUS.COMPLETED, EVENT_STATUS.REJECTED, EVENT_STATUS.CANCELLED];
+
 const FORBIDDEN = { error: "You do not have permission to access this resource.", code: "FORBIDDEN" };
 const EVENT_NOT_FOUND = { error: "Event request not found.", code: "EVENT_NOT_FOUND" };
 
@@ -72,6 +74,17 @@ const getEventAccess = (user, event) => {
   };
 };
 
+// Why a user who can see the event cannot edit it at all, as the error code to
+// answer with, or null when they can.
+const getEditDenial = (access, event) => {
+  if (access.canEdit) return null;
+  if (access.relationship === EVENT_RELATIONSHIP.ORGANISATION_MEMBER) return "EVENT_READ_ONLY";
+  if (access.relationship === EVENT_RELATIONSHIP.OWNER && !CLOSED_STATUSES.includes(event.status)) {
+    return "EDIT_REQUIRES_CHANGE_REQUEST";
+  }
+  return "EVENT_NOT_EDITABLE_IN_STATUS";
+};
+
 // The event and what this user may do with it, or null when it is outside their
 // viewing scope. Callers answer "not found" for null, never "forbidden", so the
 // response does not confirm that the event exists (SPM-33 AC1, AC6).
@@ -106,5 +119,6 @@ module.exports = {
   loadEventForViewer,
   getEventRelationship,
   getEventAccess,
+  getEditDenial,
   EVENT_NOT_FOUND,
 };
