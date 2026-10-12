@@ -1,4 +1,6 @@
 const { UNAUTHENTICATED } = require("./auth");
+const { parseEventId } = require("./validate");
+const eventModel = require("../model/eventModel");
 const { USER_ROLES } = require("../config/roles");
 const {
   EVENT_STATUS,
@@ -19,6 +21,7 @@ const HISTORY_AUDIENCES = Object.freeze({
 });
 
 const FORBIDDEN = { error: "You do not have permission to access this resource.", code: "FORBIDDEN" };
+const EVENT_NOT_FOUND = { error: "Event request not found.", code: "EVENT_NOT_FOUND" };
 
 // Usage: requireRole("ORGANISER") or requireRole("COORDINATOR", "ORGANISER").
 // Must run after requireAuth, which loads the trusted role from the database.
@@ -69,4 +72,39 @@ const getEventAccess = (user, event) => {
   };
 };
 
-module.exports = { requireRole, getEventRelationship, getEventAccess };
+// The event and what this user may do with it, or null when it is outside their
+// viewing scope. Callers answer "not found" for null, never "forbidden", so the
+// response does not confirm that the event exists (SPM-33 AC1, AC6).
+const loadEventForViewer = async (eventId, user) => {
+  const event = await eventModel.findEventForViewer(eventId, user);
+  if (!event) return null;
+  const access = getEventAccess(user, event);
+  return access.relationship ? { event, access } : null;
+};
+
+// Must run after requireAuth. Loads the event named by ":id" for the signed-in
+// user and answers "not found" unless it is inside their viewing scope, so the
+// handlers after it only ever see events the user may see. Sets
+// req.visibleEvent = { eventId, event, access }.
+const requireVisibleEvent = async (req, res, next) => {
+  try {
+    const eventId = parseEventId(req.params.id);
+    const visible = eventId ? await loadEventForViewer(eventId, req.user) : null;
+    if (!visible) {
+      return res.status(404).json(EVENT_NOT_FOUND);
+    }
+    req.visibleEvent = { eventId, ...visible };
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+};
+
+module.exports = {
+  requireRole,
+  requireVisibleEvent,
+  loadEventForViewer,
+  getEventRelationship,
+  getEventAccess,
+  EVENT_NOT_FOUND,
+};

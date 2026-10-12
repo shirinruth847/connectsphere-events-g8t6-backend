@@ -1,6 +1,7 @@
 const eventModel = require("../model/eventModel");
 const activityModel = require("../model/activityModel");
-const { getEventAccess } = require("../middleware/authorize");
+const { getEventAccess, loadEventForViewer, EVENT_NOT_FOUND } = require("../middleware/authorize");
+const { parseEventId } = require("../middleware/validate");
 const {
   validateDraft,
   validateSubmission,
@@ -8,6 +9,7 @@ const {
   validateOrdinaryFields,
   hasErrors,
   toWholeNumber,
+  MAX_INTEGER,
 } = require("../validators/eventValidator");
 const { EVENT_STATUS, EVENT_RELATIONSHIP, EVENT_FIELD_GROUPS } = require("../config/eventConstants");
 
@@ -15,14 +17,13 @@ const EVENT_STATUSES = Object.values(EVENT_STATUS);
 const CLOSED_STATUSES = [EVENT_STATUS.COMPLETED, EVENT_STATUS.REJECTED, EVENT_STATUS.CANCELLED];
 const KNOWN_EVENT_FIELDS = new Set(Object.values(EVENT_FIELD_GROUPS).flat());
 const SYSTEM_FIELDS = new Set(EVENT_FIELD_GROUPS.SYSTEM);
-const MAX_EVENT_ID = 2147483647;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{8,128}$/;
 const IDEMPOTENCY_KEY_MESSAGE =
   "Send an Idempotency-Key header of 8-128 letters, digits, '.', '_', ':' or '-' (a UUID works).";
 const VERSION_MESSAGE = "Send the version of the event you loaded.";
 
 const DOMAIN_ERRORS = Object.freeze({
-  EVENT_NOT_FOUND: [404, "Event request not found."],
+  EVENT_NOT_FOUND: [404, EVENT_NOT_FOUND.error],
   EVENT_NOT_DRAFT: [409, "Only draft requests can be changed or submitted."],
   NO_ELIGIBLE_COORDINATOR: [409, "No coordinator is currently available. Your request was not submitted."],
   IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
@@ -62,10 +63,6 @@ const handleError = (error, res, next) => {
   }
   return next(error);
 };
-
-// IDs that cannot exist are "not found", like IDs the user may not see.
-const parseEventId = (value) =>
-  /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_EVENT_ID ? Number(value) : null;
 
 const readIdempotencyKey = (req) => {
   const key = req.get("Idempotency-Key");
@@ -110,16 +107,6 @@ const markReplay = (res, result) => {
   if (result.replayed) res.set("Idempotent-Replayed", "true");
 };
 
-// The event and what this user may do with it, or null when it is outside their
-// viewing scope. Callers answer "not found" for null, never "forbidden", so the
-// response does not confirm that the event exists (SPM-33 AC1, AC6).
-const loadEventForViewer = async (eventId, user) => {
-  const event = await eventModel.findEventForViewer(eventId, user);
-  if (!event) return null;
-  const access = getEventAccess(user, event);
-  return access.relationship ? { event, access } : null;
-};
-
 // Why a user who can see the event cannot edit it at all, or null when they can.
 const getEditDenial = (access, event) => {
   if (access.canEdit) return null;
@@ -150,7 +137,7 @@ const getFieldDenials = (body, access) => {
 const readVersion = (body, required, errors) => {
   if (body.version === undefined && !required) return null;
   const version = toWholeNumber(body.version);
-  if (!Number.isInteger(version) || version < 1 || version > MAX_EVENT_ID) {
+  if (!Number.isInteger(version) || version < 1 || version > MAX_INTEGER) {
     errors.version = VERSION_MESSAGE;
     return null;
   }
@@ -170,18 +157,13 @@ const sendVersionConflict = async (req, res, eventId) => {
 };
 
 // One save path for every direct edit (SPM-33 AC2-AC7). Checks run in the order of
-// the AC6 table: viewing scope (404), permission to make this edit (403), input
-// (400), then the write, where the database rechecks relationship, status and
-// version under the event row lock (409 for a stale version).
+// the AC6 table: viewing scope (404, by requireVisibleEvent before this), permission
+// to make this edit (403), input (400), then the write, where the database rechecks
+// relationship, status and version under the event row lock (409 for a stale version).
 const saveEventEdit = async (req, res, next, { allowAutoSave, requireVersion, requireIdempotencyKey }) => {
-  const eventId = parseEventId(req.params.id);
-  if (!eventId) return eventNotFound(res);
+  const { eventId, event: existing, access } = req.visibleEvent;
 
   try {
-    const visible = await loadEventForViewer(eventId, req.user);
-    if (!visible) return eventNotFound(res);
-    const { event: existing, access } = visible;
-
     const denial = getEditDenial(access, existing);
     if (denial) return sendDomainError(res, denial);
 
@@ -360,11 +342,8 @@ const listMyEventRequests = async (req, res, next) => {
 // opening an event never changes its status.
 const getEventRequest = async (req, res, next) => {
   try {
-    const eventId = parseEventId(req.params.id);
-    if (!eventId) return eventNotFound(res);
-    const visible = await loadEventForViewer(eventId, req.user);
-    if (!visible) return eventNotFound(res);
-    return res.status(200).json({ event: eventModel.toEventView(visible.event, req.user, visible.access) });
+    const { event, access } = req.visibleEvent;
+    return res.status(200).json({ event: eventModel.toEventView(event, req.user, access) });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -375,13 +354,10 @@ const getEventRequest = async (req, res, next) => {
 // entries from before submission, which are for the owner alone.
 const getEventHistory = async (req, res, next) => {
   try {
-    const eventId = parseEventId(req.params.id);
-    if (!eventId) return eventNotFound(res);
-    const visible = await loadEventForViewer(eventId, req.user);
-    if (!visible) return eventNotFound(res);
+    const { eventId, access } = req.visibleEvent;
     const { history, nextCursor } = await activityModel.findEventHistory(eventId, {
       ...req.pagination,
-      audiences: visible.access.historyAudiences,
+      audiences: access.historyAudiences,
     });
     return res.status(200).json({ history, nextCursor });
   } catch (error) {
