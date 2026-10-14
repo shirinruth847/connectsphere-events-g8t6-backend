@@ -433,9 +433,10 @@ const findCoordinatorAvailability = async () => {
   ]);
   if (usersError) throw dbError(usersError);
   if (eventsError) throw dbError(eventsError);
-
-  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
-  return users.map((user) => ({
+  const usersData = users || [];
+  const eventsData = events || [];
+  const coordinatorNames = new Map(usersData.map(({ user_id, name }) => [user_id, name]));
+  return usersData.map((user) => ({
     coordinatorId: user.user_id,
     name: user.name,
     events: events
