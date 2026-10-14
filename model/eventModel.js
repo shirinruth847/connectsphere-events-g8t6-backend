@@ -413,7 +413,7 @@ const findLeadAssignments = async () => {
   if (eventsError) throw dbError(eventsError);
   if (usersError) throw dbError(usersError);
   const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
-  return events.map((event) => mapLeadAssignment(event, coordinatorNames));
+  return (events || []).map((event) => mapLeadAssignment(event, coordinatorNames || new Map()));
 };
 
 const findCoordinatorAvailability = async () => {
@@ -440,7 +440,7 @@ const findCoordinatorAvailability = async () => {
     name: user.name,
     events: events
       .filter((event) => event.coordinator_id === user.user_id)
-      .map((event) => mapCalendarEvent(event, coordinatorNames)),
+      .map((event) => mapCalendarEvent(event, coordinatorNames)).filter(Boolean),
   }));
 };
 
