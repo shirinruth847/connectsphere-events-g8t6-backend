@@ -322,7 +322,8 @@ const findCoordinatorEvents = async (coordinatorId) => {
     .neq("status", "DRAFT")
     .order("start_datetime", { ascending: true });
   if (error) throw dbError(error);
-  return data.map((row) => ({
+  const dataRows = data || [];
+  return dataRows.map((row) => ({
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
     status: row.status,
