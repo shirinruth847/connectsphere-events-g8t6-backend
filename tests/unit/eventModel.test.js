@@ -12,7 +12,7 @@ const POSTGREST_TIMESTAMP = "2026-10-07T07:14:14.406209+00:00";
 
 const queryReturning = (result) => {
   const query = {};
-  for (const method of ["select", "eq", "neq", "or", "order", "in"]) {
+  for (const method of ["select", "eq", "neq", "or", "order", "in", "is", "not"]) {
     query[method] = jest.fn(() => query);
   }
   query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
@@ -277,6 +277,54 @@ describe("reads", () => {
   });
 });
 
+describe("Lead assignment reads", () => {
+  test("should_list_only_submitted_unassigned_events_in_queue_order", async () => {
+    const query = queryReturning({ data: [], error: null });
+    supabase.from.mockReturnValue(query);
+
+    await eventModel.findUnassignedSubmittedEvents();
+
+    expect(query.eq).toHaveBeenCalledWith("status", "SUBMITTED");
+    expect(query.is).toHaveBeenCalledWith("coordinator_id", null);
+    expect(query.order).toHaveBeenNthCalledWith(1, "created_at", { ascending: true });
+    expect(query.order).toHaveBeenNthCalledWith(2, "event_id", { ascending: true });
+  });
+
+  test("should_return_active_assignments_with_current_coordinator_names", async () => {
+    const eventQuery = queryReturning({ data: [{
+      event_id: 42, coordinator_id: 20, status: "PLANNING", title: "Conference",
+      start_datetime: "2026-11-01T09:00:00.000Z", end_datetime: "2026-11-01T10:00:00.000Z",
+      expected_attendance: 100, organisation: { organisation_id: 3, name: "Org" },
+    }], error: null });
+    const userQuery = queryReturning({ data: [{ user_id: 20, name: "Coordinator Two" }], error: null });
+    supabase.from.mockImplementation((table) => table === "event" ? eventQuery : userQuery);
+
+    await expect(eventModel.findLeadAssignments()).resolves.toEqual([expect.objectContaining({
+      eventId: 42, coordinatorId: 20, coordinatorName: "Coordinator Two", status: "PLANNING",
+    })]);
+    expect(eventQuery.not).toHaveBeenCalledWith("coordinator_id", "is", null);
+    expect(eventQuery.not).toHaveBeenCalledWith("status", "in", '("COMPLETED","REJECTED","CANCELLED")');
+  });
+
+  test("should_return_only_active_coordinators_and_their_active_event_schedules", async () => {
+    const userRows = [{ user_id: 20, name: "Coordinator Two" }];
+    const eventRows = [{
+      event_id: 42, coordinator_id: 20, status: "PLANNING", title: "Conference",
+      start_datetime: "2026-11-01T09:00:00.000Z", end_datetime: "2026-11-01T10:00:00.000Z",
+      expected_attendance: 100,
+    }];
+    const userQuery = queryReturning({ data: userRows, error: null });
+    const eventQuery = queryReturning({ data: eventRows, error: null });
+    supabase.from.mockImplementation((table) => table === "user" ? userQuery : eventQuery);
+
+    await expect(eventModel.findCoordinatorAvailability()).resolves.toEqual([
+      expect.objectContaining({ coordinatorId: 20, name: "Coordinator Two", events: [expect.objectContaining({ eventId: 42 })] }),
+    ]);
+    expect(userQuery.eq).toHaveBeenNthCalledWith(1, "role", "COORDINATOR");
+    expect(userQuery.eq).toHaveBeenNthCalledWith(2, "is_active", true);
+  });
+});
+
 describe("SPM-180 reassignment RPC", () => {
   test("[SPM-180-AC1/AC2] should_call_the_atomic_rpc_and_return_the_new_current_coordinator", async () => {
     supabase.rpc.mockResolvedValue({
@@ -287,11 +335,12 @@ describe("SPM-180 reassignment RPC", () => {
       error: null,
     });
 
-    const result = await eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, leadId: 10 });
+    const result = await eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, expectedCoordinatorId: 21, leadId: 10 });
 
     expect(supabase.rpc).toHaveBeenCalledWith("reassign_event_coordinator", {
       p_event_id: 42,
       p_coordinator_id: 29,
+      p_expected_coordinator_id: 21,
       p_lead_id: 10,
     });
     expect(result).toEqual({
@@ -300,12 +349,12 @@ describe("SPM-180 reassignment RPC", () => {
     });
   });
 
-  test.each(["EVENT_NOT_REASSIGNABLE", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT", "COORDINATOR_UNCHANGED"])(
+  test.each(["EVENT_NOT_REASSIGNABLE", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT", "COORDINATOR_UNCHANGED", "ASSIGNMENT_CHANGED"])(
     "[SPM-180] should_preserve_domain_error_%s_from_the_atomic_rpc",
     async (code) => {
       supabase.rpc.mockResolvedValue({ data: null, error: { message: code, code: "P0001" } });
 
-      await expect(eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, leadId: 10 })).rejects.toMatchObject({
+      await expect(eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, expectedCoordinatorId: 21, leadId: 10 })).rejects.toMatchObject({
         name: "EventRequestError",
         code,
       });

@@ -5,6 +5,10 @@ jest.mock("../../model/eventModel", () => {
   return {
     ...actual,
     findCoordinatorEvents: jest.fn(),
+    findLeadAssignments: jest.fn(),
+    findUnassignedSubmittedEvents: jest.fn(),
+    findCoordinatorAvailability: jest.fn(),
+    assignCoordinator: jest.fn(),
     findVisibleEvent: jest.fn(),
     reassignCoordinator: jest.fn(),
   };
@@ -41,17 +45,17 @@ describe("PATCH /api/events/:id/coordinator", () => {
       coordinator: { coordinatorId, name: "Coordinator Two" },
     });
 
-    const res = await send("patch", "/api/events/42/coordinator", { coordinatorId });
+    const res = await send("patch", "/api/events/42/coordinator", { coordinatorId, expectedCoordinatorId: 19 });
 
     expect(res.status).toBe(200);
     expect(res.body.coordinator).toEqual({ coordinatorId, name: "Coordinator Two" });
-    expect(eventModel.reassignCoordinator).toHaveBeenCalledWith({ eventId: 42, coordinatorId, leadId });
+    expect(eventModel.reassignCoordinator).toHaveBeenCalledWith({ eventId: 42, coordinatorId, expectedCoordinatorId: 19, leadId });
   });
 
   test("[SPM-180-AC6] should_reject_reassignment_when_the_actor_is_not_a_lead", async () => {
     signedInAs(coordinatorId, "COORDINATOR");
 
-    const res = await send("patch", "/api/events/42/coordinator", { coordinatorId: 21 });
+    const res = await send("patch", "/api/events/42/coordinator", { coordinatorId: 21, expectedCoordinatorId: 19 });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("FORBIDDEN");
@@ -59,9 +63,10 @@ describe("PATCH /api/events/:id/coordinator", () => {
   });
 
   test.each([
-    [{ coordinatorId: "21" }],
-    [{ coordinatorId: 0 }],
-    [{ coordinatorId: 21, leadId }],
+    [{ coordinatorId: "21", expectedCoordinatorId: 19 }],
+    [{ coordinatorId: 0, expectedCoordinatorId: 19 }],
+    [{ coordinatorId: 21, expectedCoordinatorId: 0 }],
+    [{ coordinatorId: 21, expectedCoordinatorId: 19, leadId }],
     [{}],
   ])("[SPM-180-AC6] should_reject_invalid_or_server_controlled_input_%p", async (body) => {
     signedInAs(leadId, "COORDINATOR_LEAD");
@@ -71,6 +76,25 @@ describe("PATCH /api/events/:id/coordinator", () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("VALIDATION_FAILED");
     expect(eventModel.reassignCoordinator).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/events/:id/coordinator initial assignment", () => {
+  test("should_allow_only_a_lead_to_assign_an_unassigned_request", async () => {
+    signedInAs(leadId, "COORDINATOR_LEAD");
+    eventModel.assignCoordinator.mockResolvedValue({
+      event_id: 42,
+      title: "Conference",
+      status: "SUBMITTED",
+      coordinator_id: coordinatorId,
+    });
+
+    const res = await send("post", "/api/events/42/coordinator", { coordinatorId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.event.eventId).toBe(42);
+    expect(res.body.event.status).toBe("SUBMITTED");
+    expect(eventModel.assignCoordinator).toHaveBeenCalledWith({ eventId: 42, coordinatorId, leadId });
   });
 });
 
@@ -95,5 +119,27 @@ describe("Coordinator event access", () => {
     expect(res.status).toBe(404);
     expect(res.body.code).toBe("EVENT_NOT_FOUND");
     expect(eventModel.findVisibleEvent).toHaveBeenCalledWith(42, expect.objectContaining({ user_id: coordinatorId }));
+  });
+});
+
+describe("Lead assignment workspace reads", () => {
+  test("[SPM-180] should_return_active_assignments_to_a_lead", async () => {
+    signedInAs(leadId, "COORDINATOR_LEAD");
+    eventModel.findLeadAssignments.mockResolvedValue([{ eventId: 42, coordinatorId, coordinatorName: "Coordinator" }]);
+
+    const res = await send("get", "/api/events/assignments");
+
+    expect(res.status).toBe(200);
+    expect(res.body.assignments).toHaveLength(1);
+    expect(eventModel.findLeadAssignments).toHaveBeenCalledTimes(1);
+  });
+
+  test("[SPM-180] should_reject_coordinator_access_to_the_lead_assignment_workspace", async () => {
+    signedInAs(coordinatorId, "COORDINATOR");
+
+    const res = await send("get", "/api/events/assignments");
+
+    expect(res.status).toBe(403);
+    expect(eventModel.findLeadAssignments).not.toHaveBeenCalled();
   });
 });
