@@ -441,7 +441,7 @@ const findCoordinatorAvailability = async () => {
     name: user.name,
     events: events
       .filter((event) => event.coordinator_id === user.user_id)
-      .map((event) => mapCalendarEvent(event, coordinatorNames)).filter(Boolean),
+      .map((event) => mapCalendarEvent(event, coordinatorNames)),
   }));
 };
 
