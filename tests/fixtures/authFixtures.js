@@ -13,7 +13,10 @@ const ACCOUNTS = [
   { key: "organiserA2", role: "ORGANISER", organisation: "A" },
   { key: "organiserB", role: "ORGANISER", organisation: "B" },
   { key: "organiserSolo", role: "ORGANISER" },
+  { key: "coordinatorLead", role: "COORDINATOR_LEAD" },
   { key: "coordinator", role: "COORDINATOR" },
+  { key: "coordinatorTwo", role: "COORDINATOR" },
+  { key: "coordinatorThree", role: "COORDINATOR" },
   { key: "venueStaff", role: "VENUE_STAFF" },
   { key: "techSupport", role: "TECH_SUPPORT" },
   { key: "attendee", role: "ATTENDEE" },
@@ -29,8 +32,12 @@ const EVENT_SPECS = {
   colleagueDraft: { organiser: "organiserA2", organisation: "A", status: "DRAFT" },
   otherOrganisation: { organiser: "organiserB", organisation: "B", status: "SUBMITTED" },
   soloSubmitted: { organiser: "organiserSolo", organisation: null, status: "SUBMITTED" },
+  unassignedQueueItem: { organiser: "organiserA", organisation: "A", status: "SUBMITTED", unassigned: true },
   registeredConfirmed: { organiser: "organiserB", organisation: "B", status: "CONFIRMED", published: true },
   registeredPlanning: { organiser: "organiserB", organisation: "B", status: "PLANNING" },
+  completedAssignment: { organiser: "organiserA", organisation: "A", status: "COMPLETED" },
+  reassignable: { organiser: "organiserA", organisation: "A", coordinator: "coordinator", status: "PLANNING", start: "2027-03-10T10:00:00Z", end: "2027-03-10T12:00:00Z" },
+  coordinatorTwoBusy: { organiser: "organiserB", organisation: "B", coordinator: "coordinatorTwo", status: "CONFIRMED", start: "2027-03-10T10:00:00Z", end: "2027-03-10T12:00:00Z" },
 };
 
 const BOOKING_SPECS = [
@@ -153,6 +160,8 @@ const createAuthFixtures = async (runId) => {
   const events = {};
   for (const [key, spec] of Object.entries(EVENT_SPECS)) {
     const isDraft = spec.status === "DRAFT";
+    const coordinatorKey = spec.coordinator || "coordinator";
+    const coordinatorId = isDraft || spec.unassigned ? null : accounts[coordinatorKey].userId;
     events[key] = record("eventIds", await insertOne(
       "event",
       {
@@ -162,18 +171,25 @@ const createAuthFixtures = async (runId) => {
         accessibility_needs: "Internal accessibility note",
         organiser_id: accounts[spec.organiser].userId,
         organisation_id: spec.organisation ? organisations[spec.organisation] : null,
-        coordinator_id: isDraft ? null : accounts.coordinator.userId,
+        coordinator_id: coordinatorId,
         status: spec.status,
         expected_attendance: 50,
         // event_submitted_fields_check requires these once a request leaves DRAFT.
-        start_datetime: isDraft ? null : "2027-03-01T01:00:00Z",
-        end_datetime: isDraft ? null : "2027-03-01T03:00:00Z",
+        start_datetime: isDraft ? null : spec.start || "2027-03-01T01:00:00Z",
+        end_datetime: isDraft ? null : spec.end || "2027-03-01T03:00:00Z",
         preferred_layout_type: isDraft ? null : "THEATRE",
         is_published: Boolean(spec.published),
       },
       "event_id",
       `event ${key}`,
     ));
+    if (coordinatorId !== null) {
+      check(await supabase.from("event_assignments").insert({
+        event_id: events[key],
+        coordinator_id: coordinatorId,
+        assigned_by: accounts.coordinatorLead.userId,
+      }), `assignment history ${key}`);
+    }
   }
 
   for (const spec of BOOKING_SPECS) {
@@ -249,6 +265,7 @@ const verifyManifestClean = async (manifest) => {
     ["registration", "registration_id", manifest.registrationIds],
     ["venue_booking", "booking_id", manifest.bookingIds],
     ["notification", "event_id", eventIds],
+    ["event_assignments", "event_id", eventIds],
     ["event_venue_preference", "event_id", eventIds],
     ["event_equipment_requirement", "event_id", eventIds],
     ["event", "event_id", eventIds],
@@ -287,6 +304,7 @@ const cleanupManifest = async (manifest) => {
   await deleteIn("registration", "registration_id", manifest.registrationIds);
   await deleteIn("venue_booking", "booking_id", manifest.bookingIds);
   await deleteIn("notification", "event_id", eventIds);
+  await deleteIn("event_assignments", "event_id", eventIds);
   await deleteIn("event_venue_preference", "event_id", eventIds);
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);

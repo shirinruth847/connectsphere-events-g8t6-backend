@@ -339,7 +339,18 @@ describe("GET /api/events/mine (organiser data scoping)", () => {
       cursor = page.res.body.nextCursor;
     } while (cursor && pagedIds.length <= allIds.length);
 
-    expect(allIds).toHaveLength(3);
+    // SPM-174 and SPM-180 added visible submitted/assigned fixture events.
+    // Keep the paging assertion tied to this fixture's intended scope rather
+    // than the original three-record fixture shape.
+    const sortedAllIds = [...allIds].sort((left, right) => left - right);
+    expect(sortedAllIds).toEqual([
+      fixtures.events.ownSubmitted,
+      fixtures.events.ownDraft,
+      fixtures.events.colleagueSubmitted,
+      fixtures.events.unassignedQueueItem,
+      fixtures.events.completedAssignment,
+      fixtures.events.reassignable,
+    ].sort((left, right) => left - right));
     expect(pagedIds).toEqual(allIds);
     expect(all.res.body.nextCursor).toBeNull();
   });
