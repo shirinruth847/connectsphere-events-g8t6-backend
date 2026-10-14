@@ -2,9 +2,9 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 0.8 |
-| Updated | 7 October 2026 |
-| Status | Architecture and implementation baseline; repository verification required per ticket |
+| Version | 1.0 |
+| Updated | 14 October 2026 |
+| Status | Release 1 baseline: customer requirements complete (Week 7 changes and clarification sessions 1–3); repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
 | Data platform | Supabase PostgreSQL and Supabase Auth; MongoDB Atlas for venue and equipment detail |
@@ -13,6 +13,26 @@
 This document gives developers and coding agents the durable context needed to build ConnectSphere. It defines the repository layout, architectural boundaries, roles, business rules, data ownership, workflow guarantees, test expectations and agent workflow.
 
 This document intentionally does **not** define a route-by-route API contract, request/response payload catalogue, OpenAPI specification or deployment/runtime architecture. Ticket acceptance criteria, implemented route definitions and tests determine the transport details for each feature. When a ticket changes an enduring business rule or structure, update this master in the same work item.
+
+## Changes from 0.8
+
+Version 1.0 is the Release 1 baseline. It applies the customer's Session 3 answers and the team's remaining decisions. Several 0.8 rules changed. If you built anything on 0.8, check it against this table; code that depended on a 0.8 provisional rule is marked `// PROVISIONAL Qn` or has tests prefixed `[Qn]` (section 9.2, step 7).
+
+| Area | 0.8 said | 1.0 says | Section |
+| --- | --- | --- | --- |
+| Lifecycle order | `SAFETY_REVIEW → PREPARATION → CONFIRMED`; confirmation needed preparation `READY` | `SAFETY_REVIEW → CONFIRMED → PREPARATION → COMPLETED`. The coordinator confirms after safety approval, then explicitly starts preparation. Preparation progress no longer blocks confirmation. | 5.2, 5.3 |
+| Assignment | `SUBMITTED` with or without a coordinator; a separate "start review" step | Assigning a coordinator moves the event straight to `UNDER_REVIEW`; resubmission returns to `UNDER_REVIEW`. `SUBMITTED` always means unassigned. The organiser can withdraw while unassigned. | 5.2 |
+| Leads | One pool; a user could be Lead and Coordinator | Each assigned event has one supervising Lead (whoever assigned it), who alone can reassign it. A user cannot be both Lead and Coordinator. Coordinators request transfers. Leads hand events over before leave. Users with active work cannot be deactivated. | 3.1, 5.8 |
+| Multiple venues | Every booking used the full event time; one "main space" | Each booking has its own time window inside the event. The coordinator picks one primary venue, which is the only one attendees see. | 5.4.2 |
+| Setup/turnaround changes | Allowed; a conflict scan created `BUFFER_CONFLICT` incidents | Refused while the venue has any future active hold or booking, with the blocking bookings listed. `BUFFER_CONFLICT` and stored per-booking buffer minutes are removed. | 5.4.1 |
+| Operating hours | The event had to be within hours (blocking) | The whole occupied range is checked, and only a warning is shown | 5.4 |
+| Holds | Capped at the start of the occupied range | 7 days, or 24 hours before setup if earlier; no holds within 24 hours of setup | 5.4.3 |
+| Venue unavailable | A confirmed event kept its state; an approved replacement went to `SAFETY_REVIEW` | The coordinator chooses: restore the original booking (Venue Staff confirm), replace the venue (a change request; the event returns to `PLANNING`), or cancel. The organiser is told immediately; attendees only after reconfirmation. | 5.4.4 |
+| Safety outcomes | Approval moved the event to `PREPARATION`; rejection meant reworking everything | Approval lets the coordinator confirm. Rejection names the unsuitable venue bookings and leaves the event in `PLANNING`. Nothing resets automatically. Organiser-visible comments are stored separately from internal notes. | 5.9 |
+| Changes | Versioned proposal and plan, staff reviews, explicit atomic apply | The coordinator accepts or rejects. Acceptance updates the requirements and returns the event to `PLANNING`; existing arrangements stay until the coordinator revises them. | 5.7 |
+| Registration | Open only in `CONFIRMED`; capped by the main space | Open in `CONFIRMED` and `PREPARATION`; capped by the primary venue | 5.6 |
+| Organiser labels | Not defined | Eight labels mapped by the backend | 3.5 |
+| Provisional gate | Former section 10.6 gated Q1, Q3, Q4, Q6 | All four are decided, so the gate is removed | 9.2 |
 
 ## 1. Architecture Decision
 
@@ -187,7 +207,7 @@ The `supabase`, `mongodb`, `jobs` and `tests` directories are controlled extensi
 - `controller/*.js` deal with transport input and output. A controller must not trust actor IDs or roles supplied by the request body.
 - `model/*.js` own database queries and domain changes. Cross-domain changes must share one PostgreSQL transaction/client rather than opening unrelated writes.
 - `venueDetailModel.js` and `equipmentDetailModel.js` are the only files that query MongoDB. Every other model reaches MongoDB through them. They read documents and apply outbox entries; they never decide a blocking rule.
-- `venueConflictModel.js` holds booking conflict detection: occupied-range calculation, overlap and block checks, overdue-hold expiry and the buffer-change scan. `safetyModel.js` holds the operational safety check. Both are modules, not services.
+- `venueConflictModel.js` holds booking conflict detection: occupied-range calculation, overlap and block checks, overdue-hold expiry and the check that refuses setup/turnaround changes while future bookings exist. `safetyModel.js` holds the operational safety check. Both are modules, not services.
 - `jobs/*.js` run scheduled internal work. A job claims work with a durable lease and calls model operations; it contains no business rules of its own. `jobs/runner.js` is started from `server.js` and exposes no HTTP trigger.
 - `middleware/auth.js` verifies the Supabase access token and establishes the authenticated identity.
 - `middleware/authorize.js` applies role and relationship policies after authentication. Hiding a frontend button is not authorization.
@@ -540,33 +560,35 @@ Inspect the real repository status before creating or switching branches. Preser
 
 ## 3. Product Scope and User Experience
 
-ConnectSphere manages event requests from draft through coordinator assignment, review, resource planning, operational safety review, preparation, confirmation, attendee registration and completion. It also handles clarification, reassignment, tentative venue holds, multi-venue arrangements, venue unavailability and replacement, significant changes, cancellation, resource incidents, notifications and audit history.
+ConnectSphere manages event requests from draft through coordinator assignment, review, resource planning, operational safety review, confirmation, preparation, attendee registration and completion. It also handles clarification, reassignment, tentative venue holds, multi-venue arrangements, venue unavailability and replacement, changes after planning has started, cancellation, resource incidents, notifications and audit history.
 
 ### 3.1 Roles
 
 | Code | Role | Main responsibility |
 | --- | --- | --- |
 | `ORGANISER` | Event Organiser (EO) | Create event requests, answer clarifications, request changes and manage registration policy |
-| `COORDINATOR_LEAD` | Event Coordinator Lead (ECL) | Review the unassigned queue, assign and reassign coordinators, and oversee coordinator assignments and active events |
+| `COORDINATOR_LEAD` | Event Coordinator Lead (ECL) | Review the shared unassigned queue, assign coordinators, and supervise and reassign the events they assigned |
 | `COORDINATOR` | Event Coordinator (EC) | Review assigned events, coordinate resources and make lifecycle decisions for assigned events |
-| `VENUE_STAFF` | Venue Staff (VS) | Maintain venue data, setup and turnaround times, holds and blocks, and decide venue-booking requests |
-| `TECH_SUPPORT` | Technical Support Staff (TS) | Review technical needs and reserve equipment/support |
+| `VENUE_STAFF` | Venue Staff (VS) | Maintain venue data, setup and turnaround times, holds and blocks; decide venue-booking requests; record venue preparation |
+| `TECH_SUPPORT` | Technical Support Staff (TS) | Review technical needs, reserve equipment/support and record technical preparation |
 | `SAFETY_OFFICER` | Safety Officer (SO) | Conduct the Operational Safety Check and approve, reject or request changes to an event's arrangements |
 | `ATTENDEE` | Attendee (AT) | View published events and manage personal participation |
 
-Users may hold multiple roles. A multi-role user receives each role's permissions only within that role's scope; for example, a user who is both ECL and EC makes lifecycle decisions only on events assigned to them as coordinator. There is no baseline application System Administrator role. External users may self-register as organiser or attendee only. Staff accounts and staff roles, including `COORDINATOR_LEAD` and `SAFETY_OFFICER`, require trusted provisioning.
+Users may hold multiple roles, and a multi-role user receives each role's permissions only within that role's scope. One exception applies: a user cannot hold both `COORDINATOR_LEAD` and `COORDINATOR`. A Lead supervises assignments but never acts as a coordinator, and cannot assign an event to themselves.
+
+There is no System Administrator role. External users self-register as organiser or attendee only. Staff accounts and staff roles are created through trusted provisioning (system defaults or seed scripts). The Lead does not create, change or deactivate accounts. Before an internal user is deactivated, their active work must be moved: a coordinator's active events are reassigned, and a Lead's supervised events are handed to another Lead (section 5.8).
 
 ### 3.2 Included capabilities
 
 - Authentication, profile provisioning, roles and organization membership.
-- Draft event creation, submission, review, clarification, resubmission, feasibility acceptance, operational safety review, preparation, confirmation, rejection and completion.
-- An unassigned queue for submitted events, with coordinator assignment and reassignment by the Event Coordinator Lead.
-- Venue catalogue, configurable setup and turnaround times, availability, suitability, tentative holds with expiry, booking review, conflict prevention, operational blocks and preparation status.
-- Multiple venue bookings for one event, each checked independently.
+- Draft event creation, submission, review, clarification (shown to users as "Returned"), resubmission, feasibility acceptance, operational safety review, confirmation, preparation, rejection and completion.
+- A shared unassigned queue for submitted events, with one or more Event Coordinator Leads who assign coordinators and supervise the events they assigned.
+- Venue catalogue, per-venue setup and turnaround times, availability, suitability, tentative holds with expiry, booking review, conflict prevention, operational blocks, booking restoration and per-booking preparation status.
+- Multiple venue bookings for one event, each with its own time window and checked independently, with one primary venue shown to attendees.
 - Equipment inventory, time-based availability, technical review, reservation and preparation status.
 - Attendee registration, capacity enforcement, waiting list, offers, withdrawal and attendance history.
-- Significant event changes, cancellation, venue replacement and resource incidents.
-- Durable in-app notifications and audience-filtered activity history.
+- Change requests, cancellation, venue replacement and resource incidents.
+- Durable in-app notifications, email/SMS delivery and audience-filtered activity history.
 
 ### 3.3 Baseline exclusions
 
@@ -579,18 +601,36 @@ Payments, pricing, full reporting/export suites, general document management, re
 | `/login`, `/signup` | Authentication and permitted external onboarding |
 | `/dashboard` | Role-specific drafts, assignments and outstanding work |
 | `/events`, `/events/new`, `/events/[eventId]` | Event discovery/list, creation and role-aware workspace |
-| `/assignments` | Event Coordinator Lead's unassigned queue, coordinator assignments and oversight of active events |
+| `/assignments` | Lead's unassigned queue, supervised events, transfer requests and handovers |
 | `/venues`, `/venues/[venueId]` | Venue catalogue, details, setup/turnaround configuration, blocks, suitability and calendar information |
 | `/technical-requests` | Technical review and preparation queue |
 | `/safety-reviews` | Safety Officer's review queue and review workspace |
 | `/my-registrations` | Current user's registrations, invitations and withdrawal actions |
 | `/notifications` | Durable inbox and read state |
 
-The event workspace should expose overview, requirements, clarification, assignment, venue arrangements (one entry per venue booking or hold), technical arrangements, safety review, changes, registrations and history according to permissions. Display current and proposed values separately. A saved draft is not submitted, a held venue is not a booked venue, an expired hold is not a booking, a waitlist entry is not a confirmed registration, an approved resource is not a confirmed event, a safety-approved event is not a confirmed event, and an approved change is not applied until the explicit apply step succeeds.
+The event workspace should expose overview, requirements, clarification, assignment, venue arrangements (one entry per venue booking or hold, each with its own status), technical arrangements, safety review, changes, registrations and history according to permissions. The coordinator field shows "Unassigned" until a Lead assigns a coordinator, then the coordinator's name.
 
-Venue calendars distinguish event time from setup and turnaround time, and show active holds (with their expiry), approved bookings and operational blocks distinctly.
+A saved draft is not submitted, a held venue is not a booked venue, an expired hold is not a booking, a waitlist entry is not a confirmed registration, an approved resource is not a confirmed event, a safety-approved event is not confirmed until the coordinator confirms it, and a requested change has no effect until the coordinator accepts it.
+
+Venue calendars distinguish booking time from setup and turnaround time, and show active holds (with their expiry), approved bookings and operational blocks distinctly.
 
 Every page must handle loading, empty, validation, forbidden, conflict, retry and success states. Preserve user input after recoverable errors. Support keyboard operation and practical mobile layouts. Do not optimistically claim scarce-resource allocation or final confirmation before the backend commits it.
+
+### 3.5 Organiser status labels
+
+The database stores the detailed states in section 5.2. Organiser-facing pages show one of eight labels instead, computed by one backend function next to the transition table in `eventModel.js`. Organiser endpoints return the label and flags; staff endpoints return the stored state. The frontend never maps states itself, and a filter by label is expanded to states by the backend.
+
+| Stored state | Organiser label | Flag |
+| --- | --- | --- |
+| `DRAFT` | Draft | |
+| `SUBMITTED` | Submitted | |
+| `UNDER_REVIEW` | Under Review | |
+| `AWAITING_CLARIFICATION` | Under Review | "Returned – action required" |
+| `PLANNING`, `SAFETY_REVIEW` | Approved & Planning | "Reconfirmation pending" if the event was previously confirmed |
+| `CONFIRMED`, `PREPARATION` | Confirmed | |
+| `COMPLETED`, `CANCELLED`, `REJECTED` | Matching label | |
+
+"Approved" is display wording only; there is no `APPROVED` state.
 
 ## 4. Authentication and Authorization
 
@@ -609,20 +649,20 @@ Do not trust a decoded-only token, a body-supplied actor ID, an `X-User-ID` head
 | Data/action | EO | ECL | EC | VS | TS | SO | AT |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Private draft | Owner read/write only | No access | No access | No access | No access | No access | No access |
-| Unassigned queue | Own event status only | Basic information for every queued event | No access | No access | No access | No access | No access |
-| Submitted event | Own and permitted organization events; limited editing | Events under supervision, read-only | Assigned events | Relevant venue information | Assigned technical information | Safety-relevant information for events in or past safety review | Published attendee-safe view only |
-| Coordinator assignment or reassignment | No | Yes, for non-terminal events | No; may ask the Lead | No | No | No | No |
-| Lifecycle decision | No | No, unless also the assigned EC | Assigned coordinator only | No | No | Safety outcome only | No |
-| Venue catalogue, buffers, holds, blocks and booking decision | Read candidate data through event planning | Read | Request holds and bookings; read | Maintain and decide within scope | Relevant operational read | Read venue safety information | Published summary only |
-| Equipment/technical decision | State requirements | Read | Request/refine | No decision | Assigned review and reservation | Read equipment placement | No |
-| Safety review | Outcome summary | Read | Submit for review; read outcome | Read outcome for own venues | Read outcome for own requests | Claim and decide | No |
-| Change/cancellation request | Owner may request | Read | Review and explicitly apply/decide | Review affected venue plan | Review affected technical plan | Re-review when arrangements change | No |
+| Unassigned queue | Own event shows "Unassigned" | Basic information for every queued event (all Leads) | No access | No access | No access | No access | No access |
+| Submitted event | Own and permitted organization events; limited editing | Events they supervise, read-only | Assigned events | Relevant venue information | Assigned technical information | Events in the safety queue or claimed by them, with relevant change history | Published attendee-safe view only |
+| Coordinator assignment or reassignment | No | Assign from the queue; reassign events they supervise | No; may request a transfer | No | No | No | No |
+| Lifecycle decision | No | No | Assigned coordinator only | No | No | Safety outcome only | No |
+| Venue arrangements | Each venue's status, unavailability and next action | Read | Request holds, bookings and replacements; choose the primary venue | Maintain venues, buffers, holds and blocks; decide bookings; record venue preparation | Relevant operational read | Read venue safety information | Primary venue only |
+| Equipment/technical decision | State requirements | Read | Request/refine | No decision | Assigned review, reservation and technical preparation | Read equipment placement | No |
+| Safety review | Outcome and organiser comments | Read outcome | Submit for review; read outcome and all comments | Read outcome for own venues | Read outcome for own requests | Claim and decide; internal notes | No |
+| Change/cancellation request | Owner may request | Read | Accept/reject; raise venue replacements; cancel | Decide new or replacement venue requests | Decide revised technical requests | Review again when the event returns to safety review | No |
 | Participant list | Event owner | No by default | Assigned coordinator | No by default | No by default | Counts only | Own registration only |
-| Internal notes/history | External-safe subset | Assignment history and events under supervision | Assigned scope | Relevant portion | Relevant portion | Relevant portion | Own/published subset only |
+| Internal notes/history | External-safe subset | Assignment and supervision history for events they supervise | Assigned scope | Relevant portion | Relevant portion | Relevant portion | Own/published subset only |
 
-Basic information for the unassigned queue is the event title, purpose, organiser organization, proposed date and time, expected attendance and a summary of venue and equipment requirements. It excludes clarification content, internal notes and participant data. "Events under supervision" covers every active event and coordinator while Q7 remains at its temporary baseline (section 12.1.2).
+Basic information for the unassigned queue is the event title, purpose, organiser organization, proposed date and time, expected attendance and a summary of venue and equipment requirements. It excludes clarification content, internal notes and participant data.
 
-Same-organization visibility begins after submission and does not grant edit rights or participant personal data. Reassignment removes the previous coordinator's mutation rights and grants the new coordinator's rights in the same transaction. Unrelated or private resources should normally respond as not found rather than confirming their existence.
+Same-organization visibility begins after submission and does not grant edit rights or participant personal data. Reassignment removes the previous coordinator's mutation rights and grants the new coordinator's rights in the same transaction; all event-linked records (requests, holds, comments, history) stay with the event. Unrelated or private resources should normally respond as not found rather than confirming their existence.
 
 ### 4.3 Database and credential boundary
 
@@ -639,7 +679,7 @@ If the project temporarily exposes tables through a Supabase Data API, row-level
 
 ## 5. Domain Architecture and Business Rules
 
-Rules marked with a question ID (for example Q6) are provisional or temporary baselines listed in section 12.1. Work that depends on a provisional rule (Q1, Q3, Q4, Q6) must pass the provisional decision gate in section 10.6.
+The rules in this section reflect the Week 1 briefing, the Week 4 instructions, the Week 7 customer changes and the customer clarification sessions 1–3, together with the team decisions recorded in section 12.1. The customer has said no further Release 1 changes are expected.
 
 ### 5.1 Domain-to-code mapping
 
@@ -647,13 +687,13 @@ The domain modules are logical groupings implemented through the existing layere
 
 | Domain | Primary backend files | Responsibilities |
 | --- | --- | --- |
-| Identity and access | `authRoutes.js`, `authController.js`, `auth.js`, `authorize.js`, `userModel.js` | Auth context, profile, roles (including Lead and Safety Officer), memberships and relationship checks |
-| Events | `eventRoutes.js`, `eventController.js`, `eventModel.js` | Drafts, unassigned queue, coordinator assignment and reassignment, review, clarification, lifecycle transitions, arrangement version and readiness |
-| Venues | `venueRoutes.js`, `venueController.js`, `venueModel.js`, `venueConflictModel.js`, `venueDetailModel.js` | Catalogue, setup and turnaround buffers, suitability, multiple bookings per event, holds and expiry, blocks, decisions, replacement and preparation |
+| Identity and access | `authRoutes.js`, `authController.js`, `auth.js`, `authorize.js`, `userModel.js` | Auth context, profile, roles (including Lead and Safety Officer), role exclusion, memberships, relationship checks and deactivation checks |
+| Events | `eventRoutes.js`, `eventController.js`, `eventModel.js` | Drafts, unassigned queue, assignment, supervision, transfer requests, review, clarification, lifecycle transitions, organiser labels, arrangement version and readiness |
+| Venues | `venueRoutes.js`, `venueController.js`, `venueModel.js`, `venueConflictModel.js`, `venueDetailModel.js` | Catalogue, setup and turnaround buffers, suitability, multiple bookings per event, holds and expiry, blocks, restoration, decisions and preparation |
 | Technical/equipment | `equipmentRoutes.js`, `equipmentController.js`, `equipmentModel.js`, `equipmentDetailModel.js` | Inventory, unavailable stock, technical requests, reservations and preparation |
-| Safety | `safetyRoutes.js`, `safetyController.js`, `safetyModel.js` | Safety review queue, claims, review rounds, outcomes and approval invalidation |
+| Safety | `safetyRoutes.js`, `safetyController.js`, `safetyModel.js` | Safety review queue, claims, checklists, outcomes and approval invalidation |
 | Registration | `registrationRoutes.js`, `registrationController.js`, `registrationModel.js` | Registration policy, capacity, queue, offers, withdrawal and attendance |
-| Changes/cancellation | `changeRequestRoutes.js`, `changeRequestController.js`, `changeRequestModel.js` | Proposals, impact plans, staff reviews, explicit application and cancellation |
+| Changes/cancellation | `changeRequestRoutes.js`, `changeRequestController.js`, `changeRequestModel.js` | Organiser change requests, coordinator venue replacements, decisions and cancellation |
 | Notifications/history | `notificationRoutes.js`, `activityRoutes.js` and matching controllers/models | Durable inbox, recipients, read state, email/SMS delivery queue and audience-filtered history |
 | Detail sync | `outboxModel.js`, `jobs/mongoSyncJob.js` | Outbox entries and applying them to MongoDB |
 
@@ -663,122 +703,122 @@ A feature may touch several domain files, but it remains one in-process workflow
 
 Canonical states are:
 
-`DRAFT`, `SUBMITTED`, `UNDER_REVIEW`, `AWAITING_CLARIFICATION`, `PLANNING`, `SAFETY_REVIEW`, `PREPARATION`, `CONFIRMED`, `COMPLETED`, `REJECTED`, `CANCELLED`.
+`DRAFT`, `SUBMITTED`, `UNDER_REVIEW`, `AWAITING_CLARIFICATION`, `PLANNING`, `SAFETY_REVIEW`, `CONFIRMED`, `PREPARATION`, `COMPLETED`, `REJECTED`, `CANCELLED`.
 
-`PREPARATION` is provisional (Q6). There is no separate event-level `APPROVED` state. Feasibility acceptance enters `PLANNING`, safety approval enters `PREPARATION`, and only final coordinator confirmation enters `CONFIRMED`. The unassigned queue is not a separate state: it is every `SUBMITTED` event with no coordinator.
+The customer's names for these stages are: Draft → Submitted (unassigned queue) → Assigned / Under Review → Planning → Venue & Tech approved → Pending Safety Check → Confirmed → Preparation → Completed, with Returned, Rejected and Cancelled as separate outcomes. "Returned" is `AWAITING_CLARIFICATION`. "Venue & Tech approved" is a readiness condition inside `PLANNING`, not a stored state. There is no `APPROVED` state.
+
+`SUBMITTED` always means "waiting in the unassigned queue": an event in `SUBMITTED` has no coordinator, and every active state from `UNDER_REVIEW` onward has exactly one.
 
 ```text
-DRAFT ──submit──▶ SUBMITTED (unassigned) ──Lead assigns──▶ SUBMITTED (assigned) ──start review──▶ UNDER_REVIEW
-UNDER_REVIEW ──request clarification──▶ AWAITING_CLARIFICATION ──resubmit──▶ SUBMITTED (assigned)
+DRAFT ──submit──▶ SUBMITTED ──Lead assigns──▶ UNDER_REVIEW
+UNDER_REVIEW ──request clarification──▶ AWAITING_CLARIFICATION ──resubmit──▶ UNDER_REVIEW
 UNDER_REVIEW ──accept feasibility──▶ PLANNING ──submit for safety review──▶ SAFETY_REVIEW
-SAFETY_REVIEW ──approve──▶ PREPARATION ──confirm──▶ CONFIRMED ──end passes──▶ COMPLETED
+SAFETY_REVIEW ──safety approved, coordinator confirms──▶ CONFIRMED ──start preparation──▶ PREPARATION
+CONFIRMED or PREPARATION ──event end passes──▶ COMPLETED
 SAFETY_REVIEW ──changes requested / rejected / superseded──▶ PLANNING
-PREPARATION or CONFIRMED ──applied significant change──▶ PLANNING                  (section 5.7)
-PREPARATION or CONFIRMED ──approved replacement venue──▶ SAFETY_REVIEW              (section 5.4.4, Q3)
-Never-confirmed active event ──reject──▶ REJECTED
-Eligible active event ──cancel──▶ CANCELLED
+PLANNING … PREPARATION ──change accepted──▶ PLANNING              (sections 5.4.4, 5.7)
+UNDER_REVIEW … SAFETY_REVIEW, never confirmed ──reject──▶ REJECTED
+SUBMITTED ──organiser withdraws──▶ CANCELLED
+Any active state after SUBMITTED ──cancel──▶ CANCELLED
 ```
 
 | Action | Actor | Preconditions | Result and required effects |
 | --- | --- | --- | --- |
 | Save draft | EO owner | Valid supplied fields; incomplete fields allowed | Remain `DRAFT`; persist only accepted changes |
 | Submit | EO owner | Required fields complete | Enter `SUBMITTED` with no coordinator; notify Leads |
-| Assign coordinator | ECL | `SUBMITTED` with no coordinator; assignee holds an active `COORDINATOR` role | Set the coordinator, record assignment history, notify assignee and owner |
-| Reassign coordinator | ECL | Non-terminal state with a coordinator; new assignee active and different | Replace the coordinator, record history, notify new and previous coordinator and owner; previous coordinator loses mutation rights immediately |
-| Start review | Assigned EC | `SUBMITTED` with a coordinator | Enter `UNDER_REVIEW` and record review start |
-| Request clarification | Assigned EC | `UNDER_REVIEW` | Store a new round, enter `AWAITING_CLARIFICATION`, notify EO |
-| Respond/resubmit | EO owner | Open clarification; valid amendments | Keep the event and coordinator, mark round responded, return to `SUBMITTED` (assigned; not the unassigned queue) |
-| Accept feasibility | Assigned EC | Sufficient reviewed requirements | Enter `PLANNING`; do not confirm automatically |
-| Submit for safety review | Assigned EC | `PLANNING`; every active venue booking approved, suitable and conflict-free; technical arrangements approved or `NOT_REQUIRED`; no open blocking incident; no approved but unapplied change | Enter `SAFETY_REVIEW`; open a review round bound to the current arrangement version; notify Safety Officers |
-| Approve safety | Claiming SO | `SAFETY_REVIEW`; reviewed arrangement version is current | Enter `PREPARATION` (Q6); notify coordinator and relevant staff |
-| Request safety changes or reject safety arrangement | Claiming SO | `SAFETY_REVIEW` | Record outcome and named arrangements; return to `PLANNING`; notify coordinator (section 5.9) |
-| Confirm | Assigned EC | `PREPARATION`; every readiness check in section 5.3 passes | Enter `CONFIRMED`, store confirmation snapshot and notify relevant users |
-| Complete | Internal job or assigned EC | `CONFIRMED`; event end has passed; no unapplied blocking change | Enter `COMPLETED` and close registration |
-| Reject | Assigned EC | Never previously confirmed; state from `UNDER_REVIEW` to `PREPARATION` | Enter `REJECTED`; release holds, bookings and reservations; preserve history |
-| Apply significant change | Assigned EC | Versioned proposal and plan fully reviewed; all rechecks pass | Replace arrangements atomically, invalidate safety approval and return to `PLANNING` |
-| Cancel | Assigned EC, directly or by approving an EO request | Active eligible event and reason | Enter `CANCELLED`; release resources and close registrations/offers |
+| Assign coordinator | ECL | `SUBMITTED`; assignee holds an active `COORDINATOR` role | Set the coordinator and the supervising Lead, record history, enter `UNDER_REVIEW`, notify the coordinator and the owner |
+| Reassign coordinator | Supervising ECL | Non-terminal state after `SUBMITTED`; new assignee active and different | Replace the coordinator, record history, close any transfer request, notify the new and previous coordinator and the owner; the previous coordinator loses mutation rights immediately |
+| Request transfer | Assigned EC | Non-terminal state after `SUBMITTED` | Record the request and reason on the event; notify the supervising Lead. The coordinator stays assigned until the Lead reassigns. |
+| Request clarification | Assigned EC | `UNDER_REVIEW` | Store a new round, enter `AWAITING_CLARIFICATION` (shown as "Returned"), notify EO |
+| Respond/resubmit | EO owner | Open clarification; valid amendments | Mark round responded, return to `UNDER_REVIEW` with the same coordinator (not the unassigned queue) |
+| Accept feasibility | Assigned EC | `UNDER_REVIEW`; sufficient reviewed requirements | Enter `PLANNING` |
+| Submit for safety review | Assigned EC | `PLANNING`; every readiness condition in section 5.3 except safety approval | Enter `SAFETY_REVIEW`; open a review round bound to the current arrangement version; notify Safety Officers |
+| Safety decision | Claiming SO | `SAFETY_REVIEW`; reviewed arrangement version is current | `APPROVED` keeps `SAFETY_REVIEW` with an approved round and notifies the coordinator; `CHANGES_REQUESTED` or `REJECTED` returns to `PLANNING` (section 5.9) |
+| Confirm | Assigned EC | `SAFETY_REVIEW` with an `APPROVED` round for the current arrangement version; every readiness condition in section 5.3 | Enter `CONFIRMED`, store a confirmation snapshot, notify relevant users |
+| Start preparation | Assigned EC | `CONFIRMED` | Enter `PREPARATION`; unlock preparation updates for Venue Staff and Technical Support; notify them |
+| Complete | Internal job or assigned EC | `CONFIRMED` or `PREPARATION`; event end has passed | Enter `COMPLETED` and close registration |
+| Reject | Assigned EC | Never previously confirmed; `UNDER_REVIEW`, `AWAITING_CLARIFICATION`, `PLANNING` or `SAFETY_REVIEW` | Enter `REJECTED`; release holds, bookings and reservations; preserve history |
+| Accept change | Assigned EC | Open change request (section 5.7) | Update the requirements, invalidate safety approval, enter `PLANNING` |
+| Withdraw | EO owner | `SUBMITTED` (no coordinator yet) | Enter `CANCELLED`; remove from the queue; notify Leads |
+| Cancel | Assigned EC, directly or by approving an EO request | Active state after `SUBMITTED`; reason recorded | Enter `CANCELLED`; release resources and close registrations/offers |
 
-Submission requires title, purpose, start/end interval, positive expected attendance and venue/layout requirements. Submission does not assign a coordinator and does not fail for lack of an available coordinator (section 5.8). An event without a coordinator cannot be reviewed, clarified, accepted, rejected or planned.
+Submission requires title, purpose, start/end interval, positive expected attendance and venue/layout requirements. Submission does not assign a coordinator and never fails for lack of an available coordinator. An event without a coordinator cannot be reviewed, clarified, accepted, rejected or planned.
 
 Clarification preserves all question/response rounds. Do not start new planning arrangements while clarification is outstanding. Ordinary comments cannot substitute for formal review steps.
 
-After submission, ordinary descriptive/contact changes may be permitted. Date, duration, attendance, venue/layout and equipment changes are significant and must use the reviewed change workflow, except when explicitly amended during the pre-planning clarification loop.
+After submission, ordinary descriptive/contact changes may be permitted. Date, duration, attendance, venue/layout and equipment changes are significant and must use the change workflow in section 5.7, except when explicitly amended during the clarification loop.
 
-New venue holds, venue bookings and technical requests are created only while the event is in `PLANNING`. The exceptions are replacement bookings under section 5.4.4 and arrangements built by a significant-change plan under section 5.7.
+New holds, venue bookings and technical requests are created only while the event is in `PLANNING`. A venue replacement or accepted change returns the event to `PLANNING` first, so this rule has no exceptions.
 
-`events.arrangement_version` increases in the same transaction whenever the event's active venue bookings, booking decisions, blocking incidents, technical arrangements or expected attendance change. Safety approval is valid only for the arrangement version it reviewed.
+`events.arrangement_version` increases in the same transaction whenever the event's active venue bookings, booking decisions, blocking incidents, technical arrangements or expected attendance change. A safety approval is valid only for the arrangement version it reviewed.
 
-### 5.3 Readiness and publication
+### 5.3 Readiness, preparation and publication
 
-Confirmation requires:
+An event can be submitted for safety review when all of these hold, and confirmed when they still hold and the current safety round is approved:
 
-- the event is in `PREPARATION` (Q6);
-- at least one active venue booking, and every active venue booking approved, suitable and free of conflicts over its occupied range (section 5.4.1);
-- exactly one active booking marked as the main space (Q4);
+- at least one active venue booking, and every active booking approved, suitable and free of conflicts over its occupied range ("Venue & Tech approved");
+- exactly one active booking marked as the primary venue;
 - approved equipment and support arrangements for every requested technical need, or `NOT_REQUIRED`;
-- a safety approval for the current arrangement version;
-- preparation status `READY` on every active venue booking and technical request (Q6);
-- matching current requirement versions;
-- valid registration settings when registration is enabled, with registration capacity no greater than the main space's capacity (Q4);
-- no unresolved blocking incident;
-- no approved but unapplied significant change.
+- valid registration settings when registration is enabled, with registration capacity no greater than the primary venue's capacity;
+- no open blocking incident and no open change request.
 
-Holds, and rejected, expired, released or cancelled bookings never count toward readiness. If no technical need exists, the technical state is `NOT_REQUIRED`. Venue Staff and Technical Support record preparation progress only while the event is in `PREPARATION` or `CONFIRMED` (Q6). Coordinators cannot override a missing readiness item.
+Holds, and rejected, expired, released or cancelled bookings, never count toward readiness. A booking that was rejected stays visible in the event's history; the coordinator replaces it or revises the plan. Coordinators cannot override a missing readiness item.
 
-Attendee discovery is limited to events that are both confirmed and explicitly published. A new event defaults to unpublished until the assigned coordinator chooses publication. Existing participants retain an attendee-safe history if an event returns to an earlier state, completes or is cancelled.
+Preparation comes after confirmation. Venue Staff record preparation progress per venue booking, and Technical Support per technical request, only while the event is in `PREPARATION`. Event-level preparation progress is the aggregate of those records. Preparation progress does not block completion.
+
+Attendee discovery is limited to events in `CONFIRMED` or `PREPARATION` that are explicitly published. A new event defaults to unpublished until the assigned coordinator chooses publication. Attendees see the primary venue only; the organiser sees every venue. When a previously confirmed event returns to `PLANNING`, attendees continue to see the last confirmation snapshot, registration pauses, and attendees are notified only when the event is reconfirmed with changed attendee-facing details.
 
 ### 5.4 Venue rules
 
 - The baseline treats each venue as one independently bookable space; the draft `Room` entity is not authoritative.
 - Venue booking states are `HELD`, `PENDING`, `APPROVED`, `REJECTED`, `EXPIRED`, `RELEASED` and `CANCELLED`. `HELD`, `PENDING` and `APPROVED` are active and occupy the venue.
 - Blocking checks read PostgreSQL only. Layout, facility and accessibility information comes from MongoDB `venue_details` (section 6.4).
-- Each booking is checked on its own requirements. Capacity against the booking's expected attendance, and availability over the booking's occupied range against active bookings, active holds and blocks, are blocking checks. Supported layout, required facilities, accessibility and operating hours produce warnings shown to the coordinator and Venue Staff; Venue Staff decide.
-- The event interval must fall within the venue's operating hours; setup and turnaround time may fall outside them (Q8).
+- Each booking is checked on its own requirements and its own booking window. Capacity against the booking's expected attendance, and availability over the booking's occupied range against active bookings, active holds and blocks, are blocking checks.
+- Supported layout, required facilities, accessibility and operating hours produce warnings shown to the coordinator and Venue Staff; Venue Staff decide. The operating-hours check covers the whole occupied range, from setup start to turnaround end; any part outside the venue's hours produces a warning, not a block.
 - Coordinators cannot override blocking checks or Venue Staff decisions. There are no staff overrides for venue conflicts.
 - Venue search may return partial matches with suitability warnings (section 5.4.5). Search is advisory; the PostgreSQL recheck inside the decision transaction is authoritative.
 - Time ranges are half-open: `[start, end)`. Adjacent ranges are allowed; any overlap, including one second, is a conflict. Competing requests are decided strictly first come, first served.
-- Venue rejection releases the rejected booking but keeps the event in planning so an alternative can be selected. Other bookings for the same event are unaffected.
-- Edits to a venue's capacity, facilities or operating hours notify Venue Staff and the coordinators of affected future events for manual review; existing bookings are not recalculated automatically. Changes to setup and turnaround time follow section 5.4.1.
+- Venue rejection releases the rejected booking but keeps the event in planning so an alternative can be selected. Other bookings for the same event are unaffected and stay attached.
+- Edits to a venue's capacity, facilities or operating hours notify Venue Staff and the coordinators of affected future events for manual review; existing bookings are not recalculated automatically.
 
 #### 5.4.1 Setup and turnaround time
 
-- Venue Staff configure `setup_minutes` and `turnaround_minutes` per venue as non-negative integers defaulting to `0`. There is no per-event override.
-- Every hold and booking stores the setup and turnaround values in effect when it is created, and its occupied range `[event_start − setup, event_end + turnaround)`.
-- Availability, suitability, conflict detection and the booking exclusion constraint use the occupied range, not the advertised event interval. For example, an event from 10:00 to 12:00 at a venue with 30 minutes of setup and 45 minutes of turnaround occupies `[09:30, 12:45)`. Another booking whose occupied range starts at 12:45 is allowed; one starting at 12:44 is a conflict.
-- Changing a venue's setup or turnaround time never edits existing holds or bookings. In the same transaction, the system recomputes the occupied ranges of future active holds and bookings at that venue using the new values. For each pair that would overlap, it opens a `BUFFER_CONFLICT` incident linked to both bookings and notifies both coordinators and Venue Staff. Nothing is removed. New holds and bookings use the new values.
-- A `BUFFER_CONFLICT` incident is resolved when the overlap no longer exists, for example after a booking is replaced or released, or the buffers are reduced.
-- When buffers are first introduced, existing bookings are backfilled with zero buffers before venue values are set, so the conflict scan identifies bookings that become problematic.
-- Holds and bookings created by a significant-change plan or a replacement use the venue's current values.
+- Venue Staff set `setup_minutes` and `turnaround_minutes` for each venue when the venue is created, as non-negative whole minutes. Zero is allowed, and each venue may have different values. There is no per-event override.
+- A booking's occupied range is `[booking_start − setup_minutes, booking_end + turnaround_minutes)`, computed and stored when the hold or booking is created. Availability, suitability, conflict detection and the booking exclusion constraint use the occupied range, not the advertised booking time. For example, a booking from 10:00 to 12:00 at a venue with 30 minutes of setup and 45 minutes of turnaround occupies `[09:30, 12:45)`. Another booking's setup may start at 12:45; starting at 12:44 is a conflict.
+- Setup and turnaround times can be changed only while the venue has no active hold or booking whose occupied range ends in the future. Otherwise the change is refused, and the response lists the holds and bookings that prevent it so Venue Staff can see which events are affected. Existing bookings therefore never change underneath an event.
 - Equipment reservations do not use venue buffers (section 5.5).
 
 #### 5.4.2 Multiple venues for one event
 
-- An event may have several active venue bookings, at most one per venue. Each booking carries its own label (for example "Main hall" or "Breakout A"), expected attendance, layout and required facilities/accessibility, and is checked independently for suitability, availability and conflicts.
-- Every booking uses the full event interval (Q4).
-- Exactly one active booking is marked as the main space before confirmation; registration capacity cannot exceed the main space's capacity (Q4). A replacement for the main space inherits the flag.
-- Rejecting, releasing or cancelling one booking does not change the event's other bookings. Other bookings are released only by an explicit coordinator action, event rejection or event cancellation.
-- A significant change to date or time rechecks every booking named in the replacement plan.
+- An event may have several active venue bookings, at most one per venue. Each booking carries its own label (for example "Main hall" or "Breakout A"), its own booking window, expected attendance, layout and required facilities/accessibility.
+- A booking window must lie within the event's start and end. Suitability, availability, setup and turnaround are checked independently for each booking and its own window.
+- Each booking's expected attendance must not exceed its venue's capacity.
+- The coordinator designates exactly one active booking as the primary venue before confirmation. Attendees see only the primary venue; the organiser sees every venue with its status. Registration capacity cannot exceed the primary venue's capacity (section 5.6). Changing the primary venue rechecks the registration capacity.
+- Every active booking must be approved before the event can be confirmed. If one venue is rejected, the event stays in planning while the coordinator arranges a replacement or revises the plan; approved bookings remain attached.
+- Cancelling one venue booking does not cancel the others. Other bookings are released only by an explicit coordinator action, event rejection or event cancellation.
 
 #### 5.4.3 Tentative holds
 
-- Venue Staff create a hold for an event in `PLANNING` at the coordinator's request (Q1). A hold is a venue booking in `HELD` state with a required `hold_expires_at`.
-- A hold expires 7 days after creation by default and never later than the start of its occupied range. Venue Staff may extend a hold once before it expires, within the same cap (Q2).
+- Venue Staff create a hold for an event in `PLANNING` at the coordinator's request. A hold is a venue booking in `HELD` state with a required `hold_expires_at`. Holds apply to venues only, never to equipment.
+- A hold expires 7 days after creation, or 24 hours before its occupied range starts, whichever is earlier. If the occupied range starts less than 24 hours from now, no hold is possible and the coordinator submits a booking request directly.
+- Venue Staff may extend a hold once, at the coordinator's request and before it expires, by up to 7 more days, within the same 24-hours-before-setup limit.
 - Active holds occupy the venue. Two events cannot hold overlapping occupied ranges at the same venue.
-- The coordinator converts a hold by submitting the booking request for it before expiry. The booking moves from `HELD` to `PENDING`, keeping the slot (Q1), and then follows the normal decision.
-- At expiry a hold moves to `EXPIRED`, the venue becomes available to other requests, and the hold can no longer be converted or extended. An expired hold is never treated as a booking. A later attempt for the same venue creates a new row.
+- The coordinator converts a hold by confirming the held venue, which submits it as a booking request before expiry. The booking moves from `HELD` to `PENDING`, keeping the slot, and Venue Staff then approve or reject it.
+- At expiry a hold moves to `EXPIRED`, the venue becomes available to other requests, and the hold can no longer be converted or extended. An expired hold is never treated as a booking. The event stays in `PLANNING`.
 - A PostgreSQL exclusion constraint cannot depend on the current time, so an overdue hold that the expiry job has not yet processed would still block the venue. Every operation that creates, converts or extends a hold or booking at a venue therefore first moves that venue's overdue holds to `EXPIRED` inside the same transaction, using database time. Converting or extending an overdue hold fails even if the job has not run.
-- The coordinator and Venue Staff are notified 24 hours before a hold expires and when it expires.
+- The coordinator and Venue Staff are notified 24 hours before a hold expires (immediately, if the hold lasts less than 24 hours) and again when it expires.
 - A hold is released when the event is rejected or cancelled, when the coordinator or Venue Staff release it, or when the booking is updated.
 
-#### 5.4.4 Operational blocks and venue replacement
+#### 5.4.4 Operational blocks, replacement and restoration
 
 - Venue Staff create venue blocks with a reason (`MAINTENANCE`, `EQUIPMENT_FAILURE`, `RENOVATION`, `SAFETY`, `OTHER`), an interval and a note. Blocks have no setup or turnaround time and are shown on the venue calendar.
 - Creating a block is never refused because of existing bookings. Blocks are not part of the booking exclusion constraint; new holds and bookings are checked against blocks under the venue lock.
-- In the block transaction, every active hold or booking whose occupied range overlaps the block receives a `VENUE_BLOCK` incident. The event's arrangement version increases, and the coordinator and Venue Staff are notified that alternative arrangements are required. The event is not cancelled, the booking is not deleted, and the original event information is preserved.
-- Effect on the event (Q3): an event in `PLANNING` stays in `PLANNING`. An open safety review is superseded and the event returns to `PLANNING`. An event in `PREPARATION` or `CONFIRMED` keeps its state while the incident is open; the incident blocks confirmation.
-- The coordinator searches for a replacement and submits a replacement booking request that references the affected booking. This is allowed in any non-terminal state and is subject to all normal checks.
-- When Venue Staff approve the replacement, one transaction releases the replaced booking, resolves its incident and increases the arrangement version. If the event was in `PREPARATION` or `CONFIRMED`, it moves to `SAFETY_REVIEW` and must be reconfirmed (Q3). Registrations are retained; attendees are notified of the new venue when the event is reconfirmed.
-- If a block is lifted or shortened so that it no longer overlaps an affected booking, that booking's incident is resolved in the same transaction.
+- In the block transaction, every active hold or booking whose occupied range overlaps the block receives a `VENUE_BLOCK` incident and the event's arrangement version increases. The coordinator and Venue Staff are notified, and the organiser is told that their venue arrangement is affected and what happens next. Attendees are not notified about an unresolved internal issue. The event is not cancelled or rejected automatically, the booking is not deleted, and the original event information is preserved.
+- The event keeps its current state while the coordinator decides the next action. An open blocking incident prevents submission for safety review and confirmation. An open safety review on the event is closed as `SUPERSEDED` and the event returns to `PLANNING`.
+- The coordinator's options are:
+  1. **Restore the original booking.** If the block is lifted or shortened so that the venue is free for the booking's whole occupied range, Venue Staff confirm the restoration. The incident is resolved and the event keeps its state.
+  2. **Replace the venue.** The coordinator raises a venue replacement, which is recorded as a change request (section 5.7). The event enters `PLANNING`, and the new venue request goes through the full hold/booking approval, then safety review and confirmation again. The affected booking is released when the replacement is approved, or earlier if the coordinator releases it. If the original venue becomes free before the replacement is approved, option 1 remains available and the replacement request can be withdrawn.
+  3. **Cancel the event**, under the normal cancellation rules, if no alternative can be found.
 - Moving an event on the day it takes place is coordinated by staff offline and then recorded in the system.
 
 #### 5.4.5 Venue search and calendar data
@@ -790,56 +830,68 @@ Attendee discovery is limited to events that are both confirmed and explicitly p
 ### 5.5 Equipment and technical-support rules
 
 - Inventory total is not the same as interval availability.
-- Availability equals total usable stock minus active reservations and applicable unavailability during every segment of the requested interval.
+- Availability equals total usable stock in usable condition minus active reservations and applicable unavailability during every segment of the requested interval.
 - Reservations use the event interval. Venue setup and turnaround time does not apply to equipment, and equipment transit time between venues is zero.
+- Equipment location is reference information that helps Technical Support plan delivery. It never reserves or blocks a venue and is not part of the availability calculation.
 - A technical request is fulfilled completely or rejected; partial approval is not allowed. All lines in one technical approval succeed and reserve atomically or all fail.
 - Damaged or maintenance stock is represented explicitly and is not double-counted.
 - Quantities, unavailability and reservations live in PostgreSQL. Equipment specifications live in MongoDB `equipment_details` and are display information only.
 - Support-only requests still require technical review when on-site support is requested.
-- Resource approval does not confirm the event. The event must still pass the safety review, and the assigned coordinator performs final confirmation after all readiness checks pass.
+- Resource approval does not confirm the event. The event must still pass the safety review, and the assigned coordinator performs final confirmation.
 
 ### 5.6 Registration and waiting-list rules
 
 - The Event Organiser decides whether registration is enabled and sets the registration window. When registration is disabled, attendees may view the published event but cannot attend it.
-- Registration requires a confirmed, published event, enabled registration, an open registration window and an active user. Registration is unavailable while a previously confirmed event is back in an earlier state; existing registrations are retained.
-- Registration capacity cannot exceed the capacity of the main-space booking (Q4).
+- Registration requires a published event in `CONFIRMED` or `PREPARATION`, enabled registration, an open registration window and an active user. Registration pauses while a previously confirmed event is back in `PLANNING` or `SAFETY_REVIEW`; existing registrations are retained.
+- Registration capacity cannot exceed the capacity of the primary venue. For example, with a 500-seat primary hall and two breakout rooms of 60 and 80, registration is capped at 500; the breakout rooms are sized by their own expected attendance.
 - Each attendee has one registration record per event. A withdrawn attendee may re-enter only under the agreed policy and receives a new queue position.
-- Capacity changes, registration, withdrawal, offer acceptance and invitation allocation lock the event and recheck capacity.
+- Capacity changes, registration, withdrawal, offer acceptance and invitation allocation lock the event and recheck capacity. Capacity cannot be reduced below confirmed registrations plus active invitation holds.
 - When capacity is full, eligible users join a FIFO waitlist.
 - An invitation reserves a place until accepted, declined, expired or cancelled.
 - Accepting an expired invitation cannot consume capacity even if the expiry job has not yet run.
 - Withdrawal or expiry may invite the next eligible waiting attendee in the same transaction.
 - Attendees can view only their own registration, invitation and queue information.
 
-### 5.7 Significant changes and cancellation
+### 5.7 Changes and cancellation
 
-A proposed significant change never overwrites current confirmed details immediately. Store the proposal against the base event version, assess impact, build a versioned replacement plan naming each affected venue booking and technical request, and obtain the required venue/technical reviews.
+A change request is either an organiser change (date, duration, attendance, venue/layout or equipment requirements) or a venue replacement raised by the coordinator (section 5.4.4).
 
-Approval of a plan is not application. During explicit apply, lock the event and affected resources; recheck event, proposal, plan, review and resource versions; validate all target arrangements; then replace only the arrangements named by the reviewed plan. Any failure rolls back the entire operation and preserves the previous complete arrangement.
+1. The organiser submits a change request with the proposed values and a reason; current details are not changed yet. An event has at most one open change request.
+2. The assigned coordinator reviews it and accepts or rejects it, with a reason.
+3. On rejection, nothing changes.
+4. On acceptance, one transaction updates the event's requirements, increases the arrangement version, invalidates any safety approval and moves the event to `PLANNING`. Existing venue bookings and technical arrangements are **not** reset automatically; the coordinator reviews them and decides which to keep, revise, replace or release. New or revised requests go through Venue Staff and Technical Support approval as usual, then the event goes through safety review and confirmation again.
+5. While the event is back in planning, attendees see the last confirmation snapshot and are notified only when the event is reconfirmed with changed attendee-facing details.
 
-After application, the safety approval is invalid and the event returns to `PLANNING`. It must pass the safety review again before preparation and reconfirmation. Notify attendees only about applied changes, not proposed dates or venues. Retain registrations under the provisional policy, but block capacity reduction below confirmed registrations plus active invitation holds.
+The Event Organiser may request cancellation at any time; the assigned coordinator approves or rejects the request. While the event is still in the unassigned queue, the organiser withdraws it directly. The assigned coordinator may also cancel an event directly with a recorded reason. Cancellation releases active holds, venue bookings and equipment commitments, closes registrations and offers, closes open change requests and safety reviews, records history and notifies the organiser, relevant staff and affected registered or waitlisted attendees. A never-confirmed request may be rejected; a previously confirmed event must use cancellation rather than rejection.
 
-The Event Organiser may request cancellation at any time; the assigned coordinator approves or rejects the request. The assigned coordinator may also cancel an event directly with a recorded reason. An organiser's withdrawal before confirmation is handled as a cancellation request (Q9). Cancellation releases active holds, venue bookings and equipment commitments, closes registrations and offers, closes pending changes and open safety reviews, records history and sends audience-appropriate notifications. A never-confirmed request may be rejected; a previously confirmed event must use cancellation rather than rejection.
+### 5.8 Coordinator assignment and Lead supervision
 
-### 5.8 Coordinator assignment
-
-- Submitted events enter the unassigned queue, ordered oldest first. Events are not assigned automatically.
-- An Event Coordinator Lead reviews basic event information and assigns exactly one active coordinator. An event has at most one coordinator at any time.
-- A Lead may reassign the coordinator in any non-terminal state. Coordinators cannot reassign events; a coordinator who needs reassignment asks a Lead through a comment or offline.
+- Submitted events enter one shared unassigned queue, ordered oldest first, visible to every Lead. Events are never assigned automatically.
+- Any Lead may assign a queued event to exactly one active coordinator. The assigning Lead becomes the event's **supervising Lead**. An event has at most one coordinator and one supervising Lead at any time.
+- A Lead sees the unassigned queue and the active events they supervise. Only the supervising Lead can reassign an event, in any non-terminal state after `SUBMITTED`.
+- A Lead never acts as a coordinator: a user cannot hold both roles, and a Lead cannot assign an event to themselves or make lifecycle decisions.
+- A coordinator cannot hand an event over directly. They request a transfer, with a reason, which notifies the supervising Lead; the Lead decides and performs any reassignment.
+- On reassignment, all event-linked records (pending venue and equipment requests, holds, comments and history) stay with the event and become available to the new coordinator.
+- A Lead may hand some or all of their supervised events to another Lead, for example before leave. The receiving Lead becomes the supervising Lead, and both are notified. Every supervision change is recorded.
+- Before deactivation, a coordinator's active events must be reassigned, and a Lead's supervised active events must be handed to another Lead. The backend refuses to deactivate a user who still holds active work.
 - Resubmission after clarification returns the event to its existing coordinator, not to the unassigned queue.
-- Every Lead sees every coordinator, assignment and active event (Q7).
-- Every assignment and reassignment writes an assignment-history row and notifies the new coordinator, the previous coordinator where there is one, and the owner.
-- Events assigned before v0.8 keep their current coordinators.
+- Assignment notifies the new coordinator and the organiser. Reassignment notifies the new coordinator, the previous coordinator and the organiser.
+- Events assigned before v0.8 keep their coordinators. They have no supervising Lead and appear to every Lead under "Unsupervised" until a Lead takes over supervision.
 
 ### 5.9 Operational safety check
 
-- The assigned coordinator submits an event for safety review from `PLANNING` once the preconditions in section 5.2 hold. An event without technical needs can be submitted once all its venue bookings are approved.
-- Open reviews form a shared queue. Any active Safety Officer may claim one; each review round has one claimant.
-- The review considers expected attendance, the capacity and layout of every booked venue, emergency access, accessibility requirements, equipment placement, crowd movement and known venue restrictions. Emergency-access information and known restrictions are recorded in `venue_details` for this purpose; if MongoDB is unavailable, the review cannot be decided until the detail can be read. The completed checklist is stored with the round.
-- Outcomes: `APPROVED` moves the event to `PREPARATION` (Q6). `CHANGES_REQUESTED` returns the event to `PLANNING` with the arrangements that need rework named. `REJECTED` returns the event to `PLANNING` and means the whole safety arrangement must be reworked (Q5); ending the event still uses rejection or cancellation. Revised venue bookings or technical requests go through Venue Staff or Technical Support review again.
+- The assigned coordinator submits an event for safety review from `PLANNING` once the readiness conditions in section 5.3 hold, apart from safety approval. An event without technical needs can be submitted once all its venue bookings are approved.
+- Open reviews form a shared queue. Any active Safety Officer may claim one; each review round has one claimant, who is recorded. A Safety Officer sees only events in the queue or claimed by them, with the details and change history the review needs (attendance, venues and layout, access and equipment changes). They see attendance counts but not participant personal data.
+- The review is a structured checklist with one entry per factor: attendance and capacity, layout, emergency access, accessibility, equipment placement and known venue restrictions. Each entry records a result and a comment. Emergency-access information and known restrictions are read from `venue_details`; if MongoDB is unavailable, the review cannot be decided until the detail can be read.
+- Each round ends with one outcome:
+  - `APPROVED`: the coordinator may confirm the event.
+  - `CHANGES_REQUESTED`: the event returns to `PLANNING` with the requested changes listed.
+  - `REJECTED`: the safety arrangement is rejected for named venue booking(s), meaning those venues are unsuitable for this event as arranged. The event returns to `PLANNING` with the issue and reason visible to the coordinator; the event itself is not rejected.
+- After `CHANGES_REQUESTED` or `REJECTED`, nothing is reset automatically. The coordinator decides what to revise or replace; revised requests go through normal approval, followed by another safety review. Rejecting or cancelling the event remains a separate coordinator decision.
+- Each round stores organiser-visible comments separately from internal notes. The organiser sees the outcome and the organiser-visible comments; staff on the event see both.
 - The Safety Officer always gives a response; there is no review timeout.
-- Any change to the event's venue bookings, technical arrangements or expected attendance invalidates a safety approval. An open review whose arrangement version is no longer current is closed as `SUPERSEDED` and the event returns to `PLANNING`, except for the replacement path in section 5.4.4, which opens a new round.
-- All review rounds are preserved. Safety Officers see attendance counts but not participant personal data.
+- Any change to the event's venue bookings, technical arrangements or expected attendance invalidates a safety approval. An open review whose arrangement version is no longer current is closed as `SUPERSEDED` and the event returns to `PLANNING`.
+- All review rounds are preserved.
 
 ## 6. Data Ownership and Persistence
 
@@ -851,7 +903,7 @@ PostgreSQL is the system of record. MongoDB holds descriptive detail that no blo
 
 In PostgreSQL, use UUID primary keys, `timestamptz` instants and positive integer versions for mutable aggregates. Auth owns passwords; the application profile ID links to the Auth user. Draft-only mandatory fields may be null; submitted events require their mandatory data, while the coordinator stays null until a Lead assigns one.
 
-Status and state columns use `text` with check constraints, not PostgreSQL enum types, so that lifecycle changes, including resolution of provisional decisions, remain small migrations.
+Status and state columns use `text` with check constraints, not PostgreSQL enum types, so that lifecycle changes remain small migrations.
 
 Retain events, bookings, requests, registrations, assignments, safety reviews and activity after closure. Restrict deletion of referenced business records. Do not cascade deletion of an Auth account into event or audit history. JSON requirement/plan/checklist fields require bounded documented schemas and cannot replace foreign keys or allocation constraints.
 
@@ -860,26 +912,27 @@ Retain events, bookings, requests, registrations, assignments, safety reviews an
 | Table | Ownership and key constraints |
 | --- | --- |
 | `profiles` | Auth-linked user ID, name, phone, active state and timestamps; no password |
-| `user_roles` | Unique user/role pairs for the seven application roles; staff assignment is trusted only |
+| `user_roles` | Unique user/role pairs for the seven application roles; `COORDINATOR_LEAD` and `COORDINATOR` never on the same user; staff assignment is trusted only |
 | `organisations`, `organisation_memberships` | Verified memberships; never infer membership from editable email/domain text |
-| `events` | Owner, optional organization, nullable coordinator, lifecycle, requirements, timing, attendance, registration policy, publication, versions including `arrangement_version`, and confirmation history |
-| `event_assignments` | Assignment history: event, coordinator, assigning Lead, assigned and ended times, optional reason |
+| `events` | Owner, optional organization, nullable coordinator, nullable supervising Lead, open transfer request (requester, reason, time), lifecycle, requirements, timing, attendance, registration policy, publication, versions including `arrangement_version`, previously-confirmed flag and confirmation snapshot |
+| `event_assignments` | Coordinator assignment history: event, coordinator, assigning Lead, assigned and ended times, optional reason |
+| `event_supervision` | Supervising-Lead history: event, Lead, started and ended times, reason (assignment, handover or takeover) |
 | `clarifications` | Preserved question/response rounds with state and timestamps |
 | `event_comments` | Event conversation with organizer-shared or internal visibility; not a formal approval |
 | `venues` | Rule-bearing venue fields: name, location, capacity, operating hours, non-negative `setup_minutes` and `turnaround_minutes`, active state and version. Descriptive detail lives in MongoDB `venue_details` (section 6.4). |
 | `venue_blocks` | Reason, time-bounded operational unavailability, note, creator, and lift/shorten history |
-| `venue_bookings` | Event, venue, label, per-booking expected attendance/layout/requirements, main-space flag, event interval, stored setup/turnaround minutes, occupied range, state (`HELD` to `CANCELLED`), hold expiry/extension/reminder times, `replaces_booking_id`, requirement version, decision and preparation states |
-| `equipment` | Rule-bearing equipment fields: name, category, location, nonnegative total quantity, active state and version. Specifications live in MongoDB `equipment_details`. |
+| `venue_bookings` | Event, venue, label, booking window within the event interval, per-booking expected attendance/layout/requirements, primary-venue flag, occupied range, state (`HELD` to `CANCELLED`), hold expiry/extension/reminder times, `replaces_booking_id`, safety-rejection reason, requirement version, decision and preparation states |
+| `equipment` | Rule-bearing equipment fields: name, category, storage location (reference only), nonnegative total quantity, active state and version. Specifications live in MongoDB `equipment_details`. |
 | `equipment_unavailability` | Time-bounded damaged/maintenance/other unavailable quantities |
 | `technical_requests` | Event requirement version, assigned reviewer, support need, decision/preparation state and version |
 | `technical_request_lines` | Unique equipment lines and positive requested quantities within a technical request |
 | `equipment_reservations` | Active/released interval allocations tied to a request line and event |
-| `safety_reviews` | Event, round number, reviewed arrangement version, claiming Safety Officer, outcome (`OPEN`, `APPROVED`, `CHANGES_REQUESTED`, `REJECTED`, `SUPERSEDED`), bounded checklist, notes, named arrangements needing rework and timestamps |
+| `safety_reviews` | Event, round number, reviewed arrangement version, claiming Safety Officer, outcome (`OPEN`, `APPROVED`, `CHANGES_REQUESTED`, `REJECTED`, `SUPERSEDED`), bounded checklist with one result and comment per factor, organiser-visible comments, internal notes, rejected venue booking IDs, requested changes and timestamps |
 | `registrations` | Unique event/attendee record, state, queue order, registration/withdrawal/attendance data and version |
 | `waitlist_offers` | One active offer per registration with offer, expiry and response times |
-| `event_change_requests` | Base event version, typed proposed values, impact, versioned replacement plan, reviews and application state |
+| `event_change_requests` | Type (`ORGANISER_CHANGE`, `VENUE_REPLACEMENT`), requester, base event version, typed proposed values, reason, affected booking for replacements, decision (`OPEN`, `ACCEPTED`, `REJECTED`, `WITHDRAWN`), reviewer and timestamps |
 | `event_cancellation_requests` | Requester/reviewer, reason, decision state and timestamps |
-| `resource_incidents` | Type (`VENUE_BLOCK`, `BUFFER_CONFLICT`, `EQUIPMENT_UNAVAILABLE`), linked bookings, block or equipment, open/resolved state and resolution detail |
+| `resource_incidents` | Type (`VENUE_BLOCK`, `EQUIPMENT_UNAVAILABLE`), linked booking, block or equipment, open/resolved state and resolution (`RESTORED`, `REPLACED`, `RELEASED`, `EVENT_CANCELLED`) |
 | `notifications` | Safe durable message plus unique originating domain-action key |
 | `notification_recipients` | Unique notification/recipient pair and nullable `read_at` |
 | `activity_logs` | Append-only actor, entity, action, safe before/after detail, request ID and time |
@@ -895,24 +948,28 @@ The initial draft diagrams include names such as `User`, `Registration`, `Event`
 
 | Invariant | Enforcement expectation |
 | --- | --- |
-| At most one coordinator per event; required from `UNDER_REVIEW` onward | Nullable coordinator, check constraint on state, and locked assignment/reassignment |
+| No coordinator in `SUBMITTED`; exactly one from `UNDER_REVIEW` onward while active | Check constraint on state and coordinator, and locked assignment/reassignment |
+| A user is never both Lead and Coordinator | Trigger on `user_roles` |
+| A user with active work is not deactivated | Check in the deactivation operation: no active assigned or supervised events |
 | At most one active booking per event and venue | Partial unique constraint on event and venue for `HELD`, `PENDING` and `APPROVED` |
 | No active occupied-range overlap per venue | PostgreSQL range/exclusion constraint on venue and occupied range, using half-open intervals, for `HELD`, `PENDING` and `APPROVED` |
-| Every hold has an expiry | Check constraint: `HELD` requires `hold_expires_at` |
-| At most one main-space booking per event | Partial unique constraint on active bookings with the main-space flag |
+| Every hold has an expiry no later than 24 hours before its occupied range starts | Check constraint on `HELD` rows |
+| A booking window lies within its event's interval | Trigger, rechecked when event timing changes |
+| At most one primary venue per event | Partial unique constraint on active bookings with the primary flag |
+| Setup/turnaround change only without future active bookings | Check in the venue update operation under the venue lock |
 | No equipment reservation beyond usable stock | Locked stock/commitment rows and segment-based calculation in one transaction |
 | One active canonical technical request per event | Partial unique constraint and explicit versioned replacement |
 | At most one open safety review per event | Partial unique constraint on `OPEN` reviews |
 | One registration per event and attendee | Unique pair; re-entry updates the record under policy |
 | One active waitlist offer per registration | Partial unique constraint |
 | Capacity never exceeded | Event lock around every allocation-changing operation |
-| One active significant change per event | Partial unique constraint across active change states |
+| At most one open change request per event | Partial unique constraint on `OPEN` change requests |
 | Replayed command does not duplicate work | Unique actor/operation/idempotency key |
 | One pending outbox entry per document and version | Unique target collection, document ID and version |
 | One delivery per notification, recipient and channel | Unique triple |
 | Audit and inbox recipient history remains stable | Append-only audit permissions and unique recipient pairs |
 
-Index event owner/organization/coordinator and status (including the unassigned queue: `SUBMITTED` with null coordinator); venue-booking occupied ranges and hold expiry; venue-block intervals; equipment reservation and unavailability intervals; open safety reviews; pending outbox entries and deliveries by next attempt time; registration event/state/queue order; notification recipient/read state; and activity event/time/ID. Add indexes only from real query needs and verify them with query plans when performance matters.
+Index event owner/organization/coordinator/supervising Lead and status (including the unassigned queue: `SUBMITTED`); venue-booking occupied ranges and hold expiry; venue-block intervals; equipment reservation and unavailability intervals; open safety reviews; pending outbox entries and deliveries by next attempt time; registration event/state/queue order; notification recipient/read state; and activity event/time/ID. Add indexes only from real query needs and verify them with query plans when performance matters.
 
 ### 6.4 MongoDB collections
 
@@ -942,25 +999,29 @@ Every collection has a JSON Schema validator with bounded field sizes. Documents
 
 Use one checked-out PostgreSQL client for `BEGIN`, every related query, `COMMIT` and `ROLLBACK`. Separate client/pool calls do not form one transaction. Cross-domain work stays in the single monolith and shares the same transaction context. MongoDB is never written inside that transaction (section 7.3).
 
-Use an explicit lock order: event IDs, then venue IDs, then equipment IDs, each in stable order. Operations that start from a venue, such as block creation or a setup/turnaround change, first read the affected event IDs, then acquire locks in the standard order and re-read the affected set; if the set has changed, the operation restarts. Scarce-resource operations should use appropriate isolation and bounded retry for serialization/deadlock failures. A retry must re-run every validation; a genuine resource conflict returns a business conflict instead of being retried blindly.
+Use an explicit lock order: event IDs, then venue IDs, then equipment IDs, each in stable order. Operations that start from a venue, such as block creation, first read the affected event IDs, then acquire locks in the standard order and re-read the affected set; if the set has changed, the operation restarts. Scarce-resource operations should use appropriate isolation and bounded retry for serialization/deadlock failures. A retry must re-run every validation; a genuine resource conflict returns a business conflict instead of being retried blindly.
 
 ### 7.1 Atomic operations
 
 | Operation | Changes that commit together |
 | --- | --- |
 | Event submission | Required-field check, lifecycle/version, activity and notification to Leads |
-| Coordinator assignment/reassignment | Current state and assignee role check, coordinator change, assignment history, permission handover, activity and notification |
+| Coordinator assignment/reassignment | Current state, assignee role and supervising-Lead checks, coordinator change, `UNDER_REVIEW` on first assignment, assignment and supervision history, transfer-request closure, permission handover, activity and notification |
+| Transfer request / Lead handover | Request or supervision change, history, activity and notification |
+| User deactivation | Check for active assigned or supervised events, profile state, activity |
 | Clarification/resubmission | Round, response/amendments, lifecycle, activity and notification |
 | Hold create/extend/convert/expire | Overdue-hold expiry for the venue, suitability and occupied-range checks, hold state, arrangement version, activity and notification |
-| Venue decision/replacement | Overdue-hold expiry, current event/venue checks, new commitment, explicit release of the replaced booking, incident resolution, arrangement version, any lifecycle move, activity and notification |
-| Venue block create/lift | Block, overlap scan, incident creation or resolution, arrangement versions, safety-review supersession, activity and notification |
-| Setup/turnaround change | Venue values, recomputed overlap scan for future active bookings, `BUFFER_CONFLICT` incidents, activity and notification |
+| Venue decision | Overdue-hold expiry, current event/venue checks, new commitment, release of the replaced booking when the decision approves a replacement, incident resolution, arrangement version, activity and notification |
+| Booking restoration | Block no longer overlapping, Venue Staff confirmation, incident resolution, withdrawal of an open replacement request where chosen, activity and notification |
+| Venue block create/lift | Block, overlap scan, incident creation, arrangement versions, safety-review supersession, activity and notifications to coordinator, Venue Staff and organiser |
+| Setup/turnaround change | Venue lock, check for future active holds/bookings (refuse and list them if any), venue values, activity |
 | Technical approval | Every availability check, every reservation, support decision, request state, arrangement version, activity and notification |
-| Safety submission/decision | Preconditions, review round, outcome, lifecycle, activity and notification |
+| Safety submission/decision | Preconditions, review round, checklist and outcome, lifecycle, activity and notification |
+| Confirm / start preparation | Readiness and safety checks, lifecycle, confirmation snapshot, preparation unlock, activity and notification |
 | Registration/withdrawal/offer | Policy/capacity, registration, offer allocation/release, next invitation, activity and notification |
-| Significant-change apply | Current versions/reviews, all resource checks, complete replacement, event update, safety invalidation, registration impact, activity and notification |
-| Cancellation | Event state, hold/booking/equipment releases, registration/offer closure, pending-change and safety-review closure, activity and notification |
-| Venue or equipment detail edit | Rule-bearing field changes and their scans, version increase, outbox entry for the detail document, activity and notification |
+| Change acceptance | Open request, requirement update, arrangement version, safety invalidation, lifecycle to `PLANNING`, registration pause, activity and notification |
+| Cancellation | Event state, hold/booking/equipment releases, registration/offer closure, open change-request and safety-review closure, activity and notification |
+| Venue or equipment detail edit | Rule-bearing field changes and their checks, version increase, outbox entry for the detail document, activity and notification |
 
 Never publish a success notification or response before commit. Any failure rolls back the complete operation. Notification rows and their delivery rows are created inside the transaction; email and SMS are sent only after commit (section 8).
 
@@ -994,14 +1055,18 @@ Email and SMS are additional channels. The originating transaction creates one `
 
 | Trigger | Required audience behavior |
 | --- | --- |
-| Submission | Notify owner and every Event Coordinator Lead |
-| Assignment or reassignment | Notify new coordinator, previous coordinator where there is one, and owner; previous coordinator loses mutation rights |
+| Submission or withdrawal from the queue | Notify owner and every Event Coordinator Lead |
+| Assignment | Notify the new coordinator and the owner |
+| Reassignment | Notify the new coordinator, the previous coordinator and the owner; the previous coordinator loses mutation rights |
+| Transfer request or Lead handover | Notify the supervising Lead (transfer request) or both Leads (handover) |
 | Clarification, response, feasibility or rejection | Notify owner/coordinator with role-appropriate wording |
 | Venue or technical decision | Notify responsible queue/staff, coordinator and safe owner summary |
 | Hold reminder or expiry | Notify coordinator and Venue Staff 24 hours before expiry and at expiry |
-| Venue block or buffer conflict affecting a booking | Notify the affected event's coordinator and Venue Staff that alternative arrangements are required |
-| Safety review submitted or decided | Notify Safety Officers on submission; notify coordinator and relevant staff of the outcome |
-| Confirmation or applied significant change | Notify owner/staff and affected participants using published-safe details |
+| Venue block affecting a booking | Notify the coordinator and Venue Staff; tell the owner their venue arrangement is affected and what happens next; do not notify attendees |
+| Safety review submitted or decided | Notify Safety Officers on submission; notify the coordinator and relevant staff of the outcome; show the owner the outcome and organiser-visible comments |
+| Change request submitted or decided | Notify the coordinator on submission and the owner on decision |
+| Confirmation or reconfirmation | Notify owner and staff; notify registered attendees only when attendee-facing details changed since the last confirmation |
+| Start of preparation | Notify Venue Staff and Technical Support on the event |
 | Registration, withdrawal or waitlist offer | Notify the acting attendee without exposing other users' data |
 | Cancellation | Notify owner, relevant staff and affected registered/waitlisted users |
 | Resource incident | Notify responsible staff and coordinator; attendee wording contains only approved operational information |
@@ -1027,18 +1092,18 @@ The frontend must not duplicate lifecycle or allocation truth. It may use types 
 
 ### 9.2 Ticket workflow
 
-1. As soon as the prompt is received, run the design reference gate in section 10.5 and the start-of-task check of the provisional decision gate in section 10.6. For a task that creates or changes UI, do not plan, start servers or edit files until the design gate is satisfied.
+1. As soon as the prompt is received, run the design reference gate in section 10.5. For a task that creates or changes UI, do not plan, start servers or edit files until the design gate is satisfied.
 2. Read the repository's `AGENTS.md` or equivalent instructions, README, this master, relevant source files and current git status.
 3. Pass the startup gate in section 2.7.7 for both repositories, including the environment file check in section 2.7.6. Do not continue until it passes.
 4. Read the Jira ticket, acceptance criteria, linked test cases, dependencies and relevant comments.
 5. Identify the owning repository and whether coordinated work is needed in the other repository.
 6. Verify current package versions, scripts, PostgreSQL schema/migrations, MongoDB collections/validators and existing implementation before designing the change.
-7. After planning and before editing any file, run the plan-time check of the provisional decision gate in section 10.6 and settle any match with the developer.
+7. If the code being changed contains `// PROVISIONAL Qn` markers or `[Qn]` test prefixes from v0.8, align that code with the 1.0 rules (see "Changes from 0.8") and remove the markers in the same work item.
 8. Implement within the file-placement rules in section 2. Keep business decisions in the backend.
 9. Add or update PostgreSQL migrations or MongoDB schema scripts before applying schema changes. Use namespaced synthetic fixtures.
 10. Run the real repository's lint/test/build commands and the relevant role journeys.
 11. Update the README if setup, scripts, environment variables or actual structure changed. Update this master if an enduring architecture or business rule changed.
-12. Report the startup gate result, including the environment check; the design reference used (Figma frame and frame-to-URL mapping, existing reference page, or developer override and reason) or that the design gate did not apply; the provisional gate result (`Provisional gate: none matched`, or each matched question with the developer's choice); what changed; commands/results; database mutations; unresolved gaps; and counterpart work still required.
+12. Report the startup gate result, including the environment check; the design reference used (Figma frame and frame-to-URL mapping, existing reference page, or developer override and reason) or that the design gate did not apply; any v0.8 provisional markers found and how they were resolved; what changed; commands/results; database mutations; unresolved gaps; and counterpart work still required.
 
 If Jira acceptance criteria or linked tests are inaccessible, report the exact gap. Do not invent them and do not mark the ticket complete based only on assumptions in this document.
 
@@ -1180,105 +1245,96 @@ Run the gate once per task. Follow-up prompts in the same task reuse the referen
 
 Add a row when the team creates another design file or library. Screenshot URLs returned by the Figma MCP are short-lived and private; do not paste them into Jira or committed files.
 
-### 10.6 Provisional decision gate
-
-Some business rules are marked **provisional** in section 12.1.1: the baseline is usable for development but awaits customer or team confirmation, and it shapes tables or the event lifecycle. This gate prevents an agent from silently building on, or silently departing from, a provisional rule. Do not add or change Jira labels for this gate; detect affected work from the ticket and the plan.
-
-#### 10.6.1 When to check
-
-Check twice per task:
-
-1. **At the start**, alongside section 10.5: compare the ticket title, description and acceptance criteria with the trigger table in section 10.6.4.
-2. **After planning, before editing any file**: compare the planned files, tables, columns, states and operations with the trigger table. This check catches tickets whose wording does not mention the affected rule.
-
-If it is unclear whether a trigger applies, treat it as a match and ask.
-
-#### 10.6.2 On a match
-
-1. State the question and its provisional baseline in one or two sentences.
-2. Ask the developer to choose: proceed on the baseline, supply a team decision, or defer the affected part of the ticket. Do not choose silently.
-3. Record the choice in the ticket report. A developer's choice is recorded as a team decision; the question stays provisional until section 12.1 is updated.
-4. Ask once per task. Follow-up prompts reuse the answer unless they introduce a new trigger.
-
-#### 10.6.3 Building on a provisional rule
-
-- Mark each dependent code location with a single comment line, `// PROVISIONAL Qn: <rule>`, and prefix dependent test names with `[Qn]`. These markers are how affected work is found when the question is resolved.
-- Keep provisional rules cheap to change: `text` columns with check constraints rather than enums (section 6.1), event transitions in one transition table in `eventModel.js`, and registration capacity computed in one function in `registrationModel.js`.
-- Applying a migration that encodes a provisional rule to the shared development database requires explicit developer confirmation, even after the developer has chosen to proceed on the baseline.
-
-#### 10.6.4 Trigger table
-
-| Q | Provisional baseline | Triggers |
-| --- | --- | --- |
-| Q1 | Venue Staff create holds at the coordinator's request; the coordinator submitting the booking request before expiry converts the hold (section 5.4.3) | `HELD` state or `hold_expires_at` in `venue_bookings`; hold create, convert, extend, release or expire operations in `venueModel.js`; the hold reminder or expiry job |
-| Q3 | A block affecting a `PREPARATION` or `CONFIRMED` event leaves its state unchanged with a blocking incident; an approved replacement moves the event to `SAFETY_REVIEW` (section 5.4.4) | `venue_blocks` inserts or lifts that scan overlapping bookings; `VENUE_BLOCK` incidents; `replaces_booking_id`; any event state change caused by a block or replacement |
-| Q4 | Every booking uses the full event interval; one booking is the main space and caps registration (section 5.4.2) | Registration capacity checks in `registrationModel.js`; per-booking interval, requirement or main-space columns in `venue_bookings`; readiness checks on the main space |
-| Q6 | `PREPARATION` sits between `SAFETY_REVIEW` and `CONFIRMED`; confirmation requires preparation status `READY` (sections 5.2, 5.3) | The event state check constraint; the transition table; safety approval; the confirm action; preparation-status updates in `venue_bookings` or `technical_requests` |
-
-#### 10.6.5 On resolution
-
-When a provisional question is resolved: update the affected rules in sections 5 to 8 and move the question to section 12.1.4; delete its row from section 10.6.4; search both repositories for `PROVISIONAL Qn` and `[Qn]` to find dependent code and tests; raise any rework as tickets; and add a changelog entry. Remove this section when the trigger table is empty.
-
 ## 11. Verification Requirements
 
 Jira contains ticket-specific acceptance criteria and test cases. The matrix below defines architectural regression coverage; it does not replace those ticket tests.
 
 | Area | Minimum checks |
 | --- | --- |
-| Identity/access | Seven roles, multi-role user scoped per role, private draft, unrelated organization, same-organization read-only boundary, Lead sees basic queue information only, and removed access after reassignment |
-| Assignment | Submission enters the unassigned queue without failing, Lead-only assignment, assignee must be an active coordinator, reassignment in non-terminal states, resubmission keeps the coordinator, assignment history and notifications |
+| Identity/access | Seven roles, multi-role user scoped per role, Lead and Coordinator roles refused on one user, private draft, unrelated organization, same-organization read-only boundary, Lead sees basic queue information only, removed access after reassignment, deactivation refused while active work remains |
+| Assignment and supervision | Submission enters the queue without failing, organiser withdrawal from the queue, any Lead assigns, assignment moves the event to `UNDER_REVIEW`, assignee must be an active coordinator, Lead cannot assign to self, only the supervising Lead reassigns, transfer request does not change the coordinator, handover moves supervision, resubmission keeps the coordinator, history and notifications |
 | Draft/review | Incomplete save/reopen, required submission fields, unassigned events cannot be reviewed, repeated clarification rounds and rejection boundaries |
-| Lifecycle | Feasibility enters planning, safety review required before preparation, missing readiness blocks confirmation, coordinator-only confirmation, completion after end and cancellation for previously confirmed events |
-| Venues | Validation, suitability per booking, occupied range with setup/turnaround (adjacent at 12:45 allowed, 12:44 conflict), one-second overlap, buffer change flags conflicts without removing bookings, blocks never refused and never delete bookings, block incidents and replacement, rejection release, concurrent conflict attempts |
-| Multiple venues | Several bookings per event, duplicate venue rejected, independent suitability and rejection, one main space, event cancellation releases all |
-| Holds | Expiry required, overlapping holds rejected, conversion before expiry, overdue hold cannot convert even before the job runs, in-transaction expiry frees the venue, single extension cap, reminders |
-| Safety | Submission preconditions, single claimant, approve/request changes/reject outcomes, arrangement change invalidates approval, superseded rounds, rounds preserved, no participant data exposed |
-| Equipment | Segment availability, no venue buffers on equipment, overlapping/non-overlapping commitments, unavailable stock, multi-line rollback and concurrent last-stock approval |
-| Registration | Window/capacity checks, capacity capped by main space, registration paused outside `CONFIRMED`, duplicate attempt, concurrent last place, FIFO invitations, expiry, withdrawal/re-entry and participant privacy |
-| Changes/cancellation | Current values preserved during proposal, stale review rejection, atomic apply rollback, safety re-review after apply, capacity-reduction conflict and cancellation release |
+| Lifecycle | Feasibility enters planning, safety submission requires every readiness condition, confirmation requires a current safety approval, coordinator-only confirmation, preparation only after confirmation and only by the coordinator's action, preparation updates refused before `PREPARATION`, completion from `CONFIRMED` or `PREPARATION` after the end, cancellation for previously confirmed events, organiser labels for every state |
+| Venues | Validation, suitability per booking, occupied range with setup/turnaround (adjacent at 12:45 allowed, 12:44 conflict), one-second overlap, operating-hours warning on the whole occupied range, buffer change refused while future active bookings exist (with the list returned) and allowed otherwise, blocks never refused and never delete bookings, organiser told of affected venue but attendees not, restoration needs Venue Staff confirmation, replacement returns the event to planning, rejection release, concurrent conflict attempts |
+| Multiple venues | Several bookings per event, duplicate venue rejected, booking window outside the event refused, independent suitability and rejection, per-booking capacity, exactly one primary before confirmation, approved bookings kept when another is rejected, event cancellation releases all |
+| Holds | Expiry required, 7-day default, expiry capped at 24 hours before setup, no hold within 24 hours of setup, one extension only, overlapping holds rejected, conversion before expiry, overdue hold cannot convert even before the job runs, in-transaction expiry frees the venue, reminders |
+| Safety | Submission preconditions, single claimant, checklist per factor, approve/request changes/reject outcomes, rejection names venue bookings and leaves the event in planning, nothing reset automatically, organiser sees outcome and organiser comments but not internal notes, arrangement change invalidates approval, superseded rounds, rounds preserved, no participant data exposed |
+| Equipment | Segment availability, no venue buffers on equipment, location does not affect availability, overlapping/non-overlapping commitments, unavailable stock, multi-line rollback and concurrent last-stock approval |
+| Registration | Window/capacity checks, capacity capped by the primary venue and rechecked when the primary changes, registration open only in `CONFIRMED` and `PREPARATION`, paused during reconfirmation, duplicate attempt, concurrent last place, FIFO invitations, expiry, withdrawal/re-entry and participant privacy |
+| Changes/cancellation | Current values unchanged while a request is open, one open request per event, acceptance moves the event to planning and invalidates safety approval, arrangements not reset automatically, attendees see the confirmation snapshot until reconfirmation, capacity-reduction conflict and cancellation release |
 | Notifications/history | Correct audiences, no proposed-change announcement, durability, deduplication and filtered history |
 | Cross-store | PostgreSQL commits before any MongoDB write, rollback leaves MongoDB untouched, MongoDB down after commit is retried, stale or repeated entries are ignored, stale detail is flagged, new records stay inactive until detail exists, blocking checks never read MongoDB, search falls back to PostgreSQL-only results |
 | Notification delivery | Email/SMS sent only after commit, one delivery per recipient and channel, retry with backoff, provider failure keeps the in-app notification, SMS only for urgent triggers |
 | Database/security | Frontend cannot bypass backend or reach either store, runtime cannot grant roles/alter schema/delete audit, MongoDB validators reject rule-bearing or oversized fields, migrations and schema scripts remain compatible and fixtures in both stores clean up safely |
 | UI | Loading/empty/error/conflict states, preserved form input, role-aware controls, keyboard use, mobile usability and live backend journeys |
 
-Use unit tests for pure rules, real PostgreSQL integration tests for constraints/locks/transactions and focused Playwright journeys for complete user flows. Automated tests that need MongoDB run against a local in-memory MongoDB (`mongodb-memory-server`) locally and in CI, never against Atlas: CI runners have changing IP addresses that the Atlas Network Access list will not accept (M7). Concurrency tests require separate connections. Tests that depend on a provisional rule carry its `[Qn]` prefix (section 10.6.3). Record the actual commands, environment and results. Never claim a check ran when it did not.
+Use unit tests for pure rules, real PostgreSQL integration tests for constraints/locks/transactions and focused Playwright journeys for complete user flows. Automated tests that need MongoDB run against a local in-memory MongoDB (`mongodb-memory-server`) locally and in CI, never against Atlas: CI runners have changing IP addresses that the Atlas Network Access list will not accept (M7). Concurrency tests require separate connections. Record the actual commands, environment and results. Never claim a check ran when it did not.
 
 ## 12. Open Decisions and Change Control
 
-### 12.1 Decisions awaiting customer/team confirmation
+### 12.1 Decision record
 
-Customer clarifications come from the Week 1 briefing, the Week 4 project instructions, the customer clarification workbook (tabs "Session 1 Instructors version" and "Session 2" only) and the Week 7 customer changes. The customer does not expect further Release 1 changes after Week 7. Where the customer has left a matter to the team, the team's choice needs a recorded rationale.
+Requirements come from the Week 1 briefing, the Week 4 project instructions, the Week 7 customer changes and the customer clarification workbook (tabs "Session 1 Instructors version", "Session 2" and "Session 3 Instructors version" only). The customer does not expect further Release 1 changes. Where the customer has left a matter to the team, the team's choice is recorded here with its rationale.
 
-IDs: `D` items predate v0.8, `Q` items are questions raised during the Week 7 review, `T` items are team decisions adopted in v0.8, and `M` items are MongoDB and delivery defaults adopted in v0.8 that the team has not yet confirmed.
+IDs: `D` items predate v0.8, `Q` items were raised during the Week 7 review, `T` items are team decisions and `M` items are MongoDB and delivery defaults. Retired IDs are not reused.
 
-#### 12.1.1 Provisional decisions (gated by section 10.6)
+#### 12.1.1 Decided by the customer
 
-These shape tables or the event lifecycle. Development may proceed on the baseline only through the provisional decision gate.
-
-| ID | Question | Provisional baseline |
+| ID | Decision | Resolution and source |
 | --- | --- | --- |
-| Q1 | What action stops a tentative hold expiring, and who creates holds? | Venue Staff create holds at the coordinator's request; the coordinator submitting the booking request before expiry converts the hold |
-| Q3 | What happens to a confirmed or preparing event when a block affects its venue? Must the organiser agree to the replacement? | State unchanged with a blocking incident; the coordinator chooses the replacement and informs the organiser; an approved replacement moves the event to `SAFETY_REVIEW` for reconfirmation |
-| Q4 | Which capacity caps registration when an event has several venues? Can a booking cover only part of the event? | One active booking is the main space and caps registration; every booking uses the full event interval |
-| Q6 | Is preparation a stage before or after confirmation? | `PREPARATION` sits between `SAFETY_REVIEW` and `CONFIRMED`; confirmation requires every active booking and technical request to be `READY` |
+| D01 | Cancellation | The organiser may request cancellation at any time and the coordinator approves or rejects it (Session 1); the coordinator may cancel directly with a reason (Session 2); with no alternative venue, the coordinator may cancel (Session 3) |
+| D03 | Venue suitability | Capacity and availability (including setup/turnaround and blocks) are blocking; layout, facilities, accessibility and operating hours are warnings for Venue Staff to decide (Session 1, Session 2, Week 7 change #1) |
+| D06 | Disabled registration | Attendees can view the event but cannot attend without registering; the organiser decides whether registration is enabled (Session 2) |
+| D08 | Multi-session or multi-room | Multiple venues per event are in scope (Week 7 change #3); multi-session and recurring events remain out of baseline |
+| D09 | Changes after planning has started | The coordinator accepts or rejects a change request; acceptance returns the event to planning and the standard lifecycle; arrangements are not reset automatically (Session 2, Session 3) |
+| Q1 | Converting a hold | The coordinator confirms the held venue and Venue Staff approve it; holds apply to venues only; the event stays in planning (Session 3) |
+| Q3 | Venue becomes unavailable | The coordinator decides; a replacement goes through full approval and the event returns to planning; the organiser is told, attendees only once a replacement is confirmed; restoration needs Venue Staff confirmation; no automatic cancel or reject (Session 3) |
+| Q4 | Multi-venue timing and display | Each booking has its own window within the event; every booking must be approved; one primary venue chosen by the coordinator is shown to attendees; no venue exceeds its capacity (Session 3) |
+| Q5 | Safety outcomes | Structured checklist; rejection applies to named venues, not the event; the event stays in planning and nothing is reset automatically; the organiser sees the outcome and actionable comments, not internal notes (Session 3) |
+| Q6 | Preparation | Confirmed comes after safety approval; Preparation is a separate stage after Confirmed; preparation updates unlock only in Preparation (Session 3) |
+| Q7 | Lead scope | One or more Leads with recorded scope; a Lead sees the queue and the events they assigned; a Lead is not a coordinator; only the Lead reassigns; coordinators may request a transfer; active work is reassigned before deactivation (Session 3) |
+| Q9 | Organiser cancellation before confirmation | Allowed "at any point" as a request the coordinator reviews (Session 1) |
+| T9 | Reassignment | Only the Lead reassigns; coordinators request a transfer (confirmed in Session 3) |
+| T10 | Existing assignments | Events assigned before v0.8 keep their coordinators (confirmed in Session 3) |
+| T13 | Equipment and buffers | Equipment uses the event interval without venue buffers; location is reference only (confirmed in Session 3) |
 
-#### 12.1.2 Temporary baselines
+#### 12.1.2 Decided by the team
 
-These do not require the gate. Change them through section 12.2.
+| ID | Decision | Rationale |
+| --- | --- | --- |
+| Q2 | Holds last 7 days, or until 24 hours before setup if earlier; no hold within 24 hours of setup; one extension of up to 7 days by Venue Staff | The customer left the values to the team (Session 3). A week gives the coordinator time to gather details; a single extension stops one event blocking a venue indefinitely; the 24-hour margin leaves Venue Staff time to approve |
+| Q8 | The whole occupied range is checked against operating hours, and any part outside produces a warning | Session 1 treats operating hours as a suitability factor, not an absolute limit; Session 3 says the venue is occupied from setup start to turnaround end |
+| T3 | Setup and turnaround are per venue only, with no per-event override | Week 7 change #1 and Session 3 |
+| T4 | Block reasons follow Week 7 change #2; blocks have no buffers | A block already describes the unavailable period |
+| T5 | Hold reminders 24 hours before expiry (immediately if the hold is shorter) and at expiry, to the coordinator and Venue Staff | Session 3: inform the coordinator before or when the hold expires; the timing was left to the team |
+| T6 | Safety reviews form a shared queue claimed by one Safety Officer, who is recorded | Session 3 allows a queue or assignment; a claim prevents duplicate reviews |
+| T7 | Any change to venue bookings, technical arrangements or expected attendance invalidates safety approval | These are the review factors in Week 7 change #6 |
+| T8 | Events without technical needs can be submitted for safety review once all venue bookings are approved | There is no technical arrangement to wait for |
+| T11 | Completion runs automatically after the event end, and the coordinator may also complete manually | Session 2 defines completed as the event date/time having passed |
+| T12 | New pages use `/assignments` and `/safety-reviews` | Follows the URL style in section 10.5.4 |
+| T14 | The coordinator explicitly submits an event for safety review | Keeps lifecycle moves explicit, as with feasibility and confirmation |
+| T15 | New holds, bookings and technical requests are created only in `PLANNING` | Prevents arrangement changes from bypassing the safety review |
+| T16 | Setup and turnaround times can be changed only while the venue has no future active holds or bookings; otherwise the change is refused and the blocking bookings are listed | Reconciles Week 7 change #1 (identify affected bookings) with Session 3 (times cannot be changed once set or once the venue is confirmed) |
+| T17 | The coordinator moves a confirmed event into `PREPARATION` with an explicit "Start preparation" action | Session 3 makes Preparation a separate stage after Confirmed but does not say what triggers it |
+| T18 | Registration capacity is capped by the primary venue's capacity | Session 2 caps registration at venue capacity; the primary venue is where attendees are told to go; summing venues double-counts people who move between rooms |
+| T19 | The Lead who assigns an event becomes its supervising Lead; only that Lead reassigns it; Leads hand events over before leave or deactivation | Session 3 requires recorded scope per Lead; without one owner per event, an event could be left with nobody able to act on it |
+| T20 | Assigning a coordinator moves the event straight to `UNDER_REVIEW`; resubmission returns it to `UNDER_REVIEW` | Session 3 groups "Assigned / Under Review"; `SUBMITTED` then always means "in the unassigned queue" |
+| T21 | Organiser pages show eight status labels mapped by the backend (section 3.5) | Matches the dashboard design while keeping detailed states for workflow rules |
+| T22 | An organiser withdraws an event directly while it is still in the unassigned queue | No coordinator exists yet to review a cancellation request |
+| T23 | Events assigned before v0.8 have no supervising Lead and are visible to every Lead until one takes over supervision | Keeps existing work visible without inventing a supervision history |
+
+Retired: T1 and T2 (buffer conflict scan and per-booking stored buffers), replaced by T16.
+
+#### 12.1.3 Temporary baselines still open
+
+These have not been confirmed by the customer or the whole team. Change them through section 12.2.
 
 | ID | Decision | Temporary baseline |
 | --- | --- | --- |
-| Q2 | Hold duration and extension | 7 days by default, never past the start of the occupied range; one extension by Venue Staff within the same cap |
-| Q5 | Safety "reject" versus "request changes" | Both return the event to `PLANNING`; reject means the whole safety arrangement is reworked, request changes names specific arrangements; ending the event still uses rejection or cancellation |
-| Q7 | Lead supervision scope | One pool: every Lead sees every coordinator, assignment and active event |
-| Q8 | Setup and turnaround versus operating hours | The event interval must be within operating hours; buffers are not constrained |
-| Q9 | Organiser cancellation before confirmation | Allowed as a cancellation request that the assigned coordinator approves |
 | D02 | Attendee publication | Explicit coordinator-controlled publication at confirmation; default unpublished |
 | D04 | No technical requirements | Use `NOT_REQUIRED` only when no equipment or on-site support is requested |
 | D05 | Waitlist and withdrawal | FIFO with invitation to apply rather than automatic promotion (Session 1); configurable invitation period capped at registration close; expiry withdraws; re-entry receives a new queue position |
 | D07 | Organization onboarding | Trusted invitation or pre-provisioning; users cannot self-assert membership |
-| D09 | Significant changes | Versioned proposal/plan reviews, explicit atomic apply, safety re-review and coordinator reconfirmation |
 | D10 | Repository alignment | Confirm actual packages, scripts, environment names, migration layout and implemented routes as work proceeds |
 | D11 | Jira test visibility | Resolve custom-field/test-management permissions or obtain an export before claiming ticket completion |
 | M1 | MongoDB driver | Native `mongodb` driver; collection validators enforce structure, so no second schema layer (Mongoose) |
@@ -1290,47 +1346,19 @@ These do not require the gate. Change them through section 12.2.
 | M7 | MongoDB in automated tests | `mongodb-memory-server` locally and in CI; Atlas is for development and demos only |
 | M8 | MongoDB schema history | Numbered Node scripts in `mongodb/migrations` using the native driver, recorded in `_schema_migrations`; no extra migration library |
 
-#### 12.1.3 Team decisions adopted in v0.8
+#### 12.1.4 Superseded customer clarifications
 
-| ID | Decision | Rationale |
-| --- | --- | --- |
-| T1 | Holds and bookings store the setup/turnaround minutes in effect at creation; buffer changes trigger a conflict scan | Keeps the exclusion constraint valid while still identifying problem bookings, as Week 7 change #1 requires |
-| T2 | Existing bookings are backfilled with zero buffers before venue values are set | Makes the migration surface conflicts through the normal scan instead of failing |
-| T3 | Buffers are per venue only, with no per-event override | Week 7 change #1 specifies per-venue configuration |
-| T4 | Block reasons follow Week 7 change #2; blocks have no buffers | Matches the customer's listed reasons; a block already describes the unavailable period |
-| T5 | Hold reminders 24 hours before expiry and at expiry | Week 7 change #4 asks for notice before or when a hold expires |
-| T6 | Safety reviews form a shared queue claimed by one Safety Officer | No assignment rule was given; a claim prevents duplicate reviews |
-| T7 | Any change to venue bookings, technical arrangements or expected attendance invalidates safety approval | Week 7 change #6 lists these as review factors |
-| T8 | Events without technical needs can be submitted for safety review once all venue bookings are approved | Week 7 change #6 requires review after arrangements are confirmed; no technical arrangement exists to wait for |
-| T9 | Only Leads reassign; coordinators may ask a Lead; reassignment allowed in any non-terminal state | Week 7 change #5 gives reassignment to the Lead |
-| T10 | Events assigned before v0.8 keep their coordinators | Avoids disrupting work in progress |
-| T11 | Completion runs automatically after the event end, and the coordinator may also complete manually | Session 2 defines completed as the event date/time having passed |
-| T12 | New pages use `/assignments` and `/safety-reviews` | Follows the URL style in section 10.5.4 |
-| T13 | Equipment reservations use the event interval without venue buffers | Session 1 set equipment transit and setup time to zero |
-| T14 | The coordinator explicitly submits an event for safety review | Keeps lifecycle moves explicit, as with feasibility and confirmation |
-| T15 | New holds, bookings and technical requests are created only in `PLANNING`, except replacements and significant-change plans | Prevents arrangement changes from bypassing the safety review |
-
-#### 12.1.4 Resolved in v0.8
-
-| ID | Decision | Resolution and source |
-| --- | --- | --- |
-| D01 | Cancellation lifecycle boundaries | The organiser may request cancellation at any time and the coordinator approves or rejects it (Session 1); the coordinator may cancel directly with a reason (Session 2); pre-confirmation withdrawal is Q9 |
-| D03 | Venue suitability | Capacity and availability, including setup/turnaround and blocks, are blocking; layout, facilities, accessibility and hours are warnings for Venue Staff to decide (Session 1, Session 2, Week 7 change #1) |
-| D06 | Disabled registration | Attendees can view the event but cannot attend without registering; the organiser decides whether registration is enabled (Session 2) |
-| D08 | Multi-session or multi-room | Multiple venues per event are in scope (Week 7 change #3); multi-session and recurring events remain out of baseline |
-
-#### 12.1.5 Superseded customer clarifications
-
-Do not implement these earlier answers; the Week 7 changes replace them.
+Do not implement these earlier answers; later customer input replaces them.
 
 | Earlier clarification | Superseded by |
 | --- | --- |
 | Turnaround time is assumed zero or ignored (Session 1) | Week 7 change #1: configurable setup and turnaround time per venue |
 | For simplicity, one venue per event (Session 1) | Week 7 change #3: multiple venues per event |
 | Hold duration limits are not enforced (Sessions 1 and 2) | Week 7 change #4: every hold has an expiry |
-| Coordinators are assigned automatically by the system (Sessions 1 and 2) | Week 7 change #5: unassigned queue and assignment by the Event Coordinator Lead |
-| Reassignment is initiated by the assigned coordinator (Session 2) | Week 7 change #5: the Lead reassigns |
-| "Approved" and "confirmed" refer to the same thing (Session 1) | Week 7 change #6: safety approval and preparation sit between resource approval and confirmation |
+| Coordinators are assigned automatically by the system (Sessions 1 and 2) | Week 7 change #5 and Session 3: unassigned queue and manual assignment by a Lead |
+| Reassignment is initiated by the assigned coordinator (Session 2) | Week 7 change #5 and Session 3: only the Lead reassigns |
+| "Approved" and "confirmed" refer to the same thing (Session 1) | Week 7 change #6 and Session 3: safety approval comes before confirmation, and preparation after it |
+| A user may hold any combination of roles (Session 2) | Session 3: a Lead does not act as a coordinator |
 
 ### 12.2 Change procedure
 
@@ -1341,7 +1369,7 @@ For an accepted customer change:
 3. Update the active sections of this master in place. Remove superseded instructions rather than leaving contradictory rules.
 4. Update implementation, migrations, READMEs and tests together where applicable.
 5. State whether the change is proposed, accepted or implemented. Implemented changes require code/database identifiers and actual verification evidence.
-6. When a provisional decision is resolved, also follow section 10.6.5.
+6. After 1.0, a change to a business rule increases the minor version (1.1, 1.2 …) and is summarised for the team in the changelog.
 
 If this master, Jira, a repository README and implemented code disagree, surface the conflict. Jira controls the ticket's accepted behavior; this master controls enduring architecture/business intent; the code and migrations show current implementation; the README controls runnable repository setup. A design reference (section 10.5) controls visual presentation only. Do not silently select whichever source is easiest.
 
@@ -1349,6 +1377,7 @@ If this master, Jira, a repository README and implemented code disagree, surface
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 1.0 | 2026-10-14 | Release 1 baseline | Applied the customer's Session 3 answers and the team's remaining decisions; see "Changes from 0.8" at the top of this document. Lifecycle reordered to safety review → confirmed → preparation, with explicit "Start preparation" (5.2, 5.3); assignment moves events to `UNDER_REVIEW` and organisers can withdraw unassigned events (5.2); supervising Lead per event, Lead/Coordinator role exclusion, transfer requests, Lead handover and the deactivation rule (3.1, 5.8); per-booking time windows and a coordinator-chosen primary venue (5.4.2); setup/turnaround changes refused while future bookings exist (5.4.1); operating hours checked on the whole occupied range as a warning (5.4); hold limits (5.4.3); venue unavailability handled by restoration, replacement as a change request, or cancellation (5.4.4); per-venue safety rejection, organiser-visible comments and no automatic resets (5.9); simplified change workflow (5.7); registration open in `CONFIRMED` and `PREPARATION` and capped by the primary venue (5.6); organiser status labels (3.5). Also updated sections 3, 4.2, 6, 7.1, 8, 9.2, 11 and 12; removed the provisional decision gate (former 10.6). Jira request: none recorded (Customer Clarification Session 3; team decisions of 14 October 2026). Compatibility: changes 0.8 schema plans — event state order and check constraint; `events` gains supervising Lead, transfer request and previously-confirmed flag; new `event_supervision` table; `venue_bookings` gains a booking window and primary flag and drops stored setup/turnaround minutes and the main-space flag; `safety_reviews` gains organiser comments, internal notes and rejected booking IDs; `event_change_requests` simplified; `BUFFER_CONFLICT` incident type removed; role-exclusion trigger. No migrations or schema scripts written yet. Verified implementation/database version: none (documentation only) |
 | 0.8 | 2026-10-07 | Week 7 customer changes; MongoDB Atlas detail store; provisional decision gate | Applied the six Week 7 customer changes: configurable venue setup/turnaround time with occupied-range conflict checks and conflict flagging (5.4.1); venue blocks after booking with incidents and replacement (5.4.4); multiple venues per event (5.4.2); expiring tentative holds with in-transaction expiry (5.4.3); the Event Coordinator Lead role with an unassigned queue replacing round-robin assignment (5.8); and the Safety Officer role with the `SAFETY_REVIEW` and provisional `PREPARATION` states (5.2, 5.3, 5.9). Added MongoDB Atlas as a second data store for descriptive venue and equipment detail, with PostgreSQL remaining the system of record: rewrote section 1 (two stores, engines as backend modules, C4 alignment in 1.3); added `config/mongodb.js`, `mongodb/`, `jobs/` and detail/conflict/outbox models (2.2, 2.3); added Atlas prerequisites, environment variables and troubleshooting, and a new environment file check that reports only names and pass/fail (2.7.6; startup gate and troubleshooting renumbered to 2.7.7 and 2.7.8); split section 6 into PostgreSQL and MongoDB catalogues with cross-store rules (6.4, 6.5); added the outbox write path (7.3); added email/SMS delivery after commit (8); added the MongoDB MCP server and Atlas write rules (10.1–10.4). Also updated sections 3, 4.2, 4.3, 5, 9, 11, 12.1 and 12.2; added section 10.6 (provisional decision gate for Q1, Q3, Q4, Q6); recorded temporary baselines (including M1–M8), team decisions, resolved decisions (D01, D03, D06, D08) and superseded clarifications in 12.1. Jira request: none recorded (Week 7 Customer Changes document; team MongoDB setup). Compatibility: schema changes required in PostgreSQL (new `event_assignments`, `safety_reviews`, `outbox_entries` and `notification_deliveries` tables; new `venue_bookings` columns; descriptive venue and equipment fields move out of `venues` and `equipment`; occupied-range exclusion constraint replaces the event-interval constraint; one-primary-booking constraint removed; `staff_assignment_cursors` retired; seven roles) and a new MongoDB database `connectsphere_dev`. New backend variables `MONGODB_URI` and `MONGODB_DB_NAME`. No migrations or schema scripts written yet. Verified implementation/database version: none (documentation only) |
 | 0.7 | 2026-09-30 | Design reference gate added | Added section 10.5: a design reference gate for UI tasks covering Figma frame links, fallback to existing pages, developer override, purpose-based page URLs, design authority, follow-up prompts and the team design reference list. Added Figma to sections 10.1 and 10.2, made the gate step 1 of the section 9.2 ticket workflow and added design precedence to section 12.2. Jira request: none (direct developer request). Compatibility: documentation only; no code or database change |
 | 0.6 | 2026-09-23 | Startup gate added | Rewrote section 2.7 with the actual backend (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_ANON_KEY`, `PORT`) and frontend (`BACKEND_URL`) environment variables, backend and end-to-end startup checks, a mandatory startup gate before ticket work and troubleshooting; added the gate to the section 9.2 ticket workflow |
