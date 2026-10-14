@@ -12,15 +12,14 @@ const POSTGREST_TIMESTAMP = "2026-10-07T07:14:14.406209+00:00";
 
 const queryReturning = (result) => {
   const query = {};
-<<<<<<< HEAD
-  for (const method of ["select", "eq", "or", "order", "in"]) {
-=======
   for (const method of ["select", "eq", "neq", "or", "order", "in", "is", "not"]) {
->>>>>>> 37c91eb ([SR][SPM-180][FIX] Amended endpoints to follow the ticket rules)
     query[method] = jest.fn(() => query);
   }
   query.limit = jest.fn().mockResolvedValue(result);
   query.maybeSingle = jest.fn().mockResolvedValue(result);
+  if (result && typeof result.then === "function") {
+    query.then = jest.fn((resolve) => result.then(resolve));
+  }
   return query;
 };
 
@@ -157,7 +156,7 @@ describe("reads", () => {
     await expect(eventModel.findVisibleEvent(42, { user_id: 17, organisation_ids: [] })).resolves.toBeNull();
 
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
-    expect(query.or).toHaveBeenCalledWith("organiser_id.eq.17");
+    expect(query.or).toHaveBeenCalledWith("organiser_id.eq.17", "coordinator_id.eq.17");
   });
 
   test("[TC-AUTH-013] should_filter_by_owner_when_loading_a_request_to_edit", async () => {
@@ -255,8 +254,6 @@ describe("reads", () => {
     expect(supabase.from).not.toHaveBeenCalled();
     expect(context.allowedLayouts).toEqual(["NO_PREFERENCE"]);
   });
-<<<<<<< HEAD
-=======
 
   test("[SPM-180-AC3] should_scope_coordinator_event_reads_to_the_current_assignee", async () => {
     const query = queryReturning({ data: null, error: null });
@@ -365,5 +362,4 @@ describe("SPM-180 reassignment RPC", () => {
       });
     }
   );
->>>>>>> 37c91eb ([SR][SPM-180][FIX] Amended endpoints to follow the ticket rules)
 });
