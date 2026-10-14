@@ -229,6 +229,29 @@ const listMyEventRequests = async (req, res, next) => {
   }
 };
 
+const listAttendeeDiscovery = async (req, res, next) => {
+  try {
+    const { events, nextCursor } = await eventModel.findPublishedAttendeeEvents(req.user, { ...req.pagination });
+    return res.status(200).json({ events, nextCursor });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+const getAttendeeEventDetail = async (req, res, next) => {
+  try {
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return eventNotFound(res);
+
+    const event = await eventModel.findPublishedAttendeeEvent(eventId);
+    if (!event) return eventNotFound(res);
+
+    return res.status(200).json({ event });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
 // GET /api/events/:id — load one request (e.g. to prefill "Edit Draft")
 const getEventRequest = async (req, res, next) => {
   try {
@@ -343,6 +366,8 @@ module.exports = {
   updateDraft,
   submitDraft,
   listMyEventRequests,
+  listAttendeeDiscovery,
+  getAttendeeEventDetail,
   getEventRequest,
   listAssignedEvents,
   assignCoordinator,

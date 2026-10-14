@@ -153,6 +153,68 @@ const toListItem = (row, viewerUserId) => ({
   updatedAt: row.updated_at,
 });
 
+const computeRegistrationAvailability = ({
+  status,
+  is_registration_enabled,
+  registration_capacity,
+  registration_open_at,
+  registration_close_at,
+  registeredCount = 0,
+  now = new Date(),
+}) => {
+  if (!is_registration_enabled) return "NOT_ENABLED";
+  if (status !== "CONFIRMED") return "CLOSED";
+
+  const currentTime = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const openAt = registration_open_at ? new Date(registration_open_at).getTime() : null;
+  const closeAt = registration_close_at ? new Date(registration_close_at).getTime() : null;
+
+  if (openAt !== null && currentTime < openAt) return "CLOSED";
+  if (closeAt !== null && currentTime > closeAt) return "CLOSED";
+
+  if (registration_capacity == null) return "OPEN";
+  if (registeredCount >= registration_capacity) return "FULL_WAITLIST";
+  return "OPEN";
+};
+
+const LIST_ATTENDEE_DISCOVERY_SELECT =
+  "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name)";
+
+const ATTENDEE_DISCOVERY_PUBLISH_FILTER = 'is_published.eq.true,status.in.(CONFIRMED,PREPARATION),end_datetime.gt."' + new Date().toISOString() + '"';
+
+const toAttendeeDiscoveryItem = (row) => {
+  const location = null;
+  const availability = computeRegistrationAvailability({
+    status: row.status,
+    is_registration_enabled: row.is_registration_enabled,
+    registration_capacity: row.registration_capacity,
+    registration_open_at: row.registration_open_at,
+    registration_close_at: row.registration_close_at,
+    registeredCount: row.registered_count ?? 0,
+  });
+
+  return {
+    eventId: row.event_id,
+    title: row.title,
+    description: row.description,
+    startDatetime: row.start_datetime,
+    endDatetime: row.end_datetime,
+    organisationName: row.organisation ? row.organisation.name : null,
+    location,
+    registrationAvailability: availability,
+  };
+};
+
+const toAttendeeDetail = (row) => {
+  const item = toAttendeeDiscoveryItem(row);
+  return {
+    ...item,
+    organisationName: row.organisation ? row.organisation.name : null,
+    registrationOpenAt: row.registration_open_at,
+    registrationCloseAt: row.registration_close_at,
+  };
+};
+
 // ---------- errors ----------
 
 // Domain failures carry a stable code; the controller decides the HTTP response.
@@ -562,6 +624,52 @@ const findOrganiserEventRequests = async (user, { limit, cursor = null, status =
   };
 };
 
+const findPublishedAttendeeEvents = async (user, { limit, cursor = null }) => {
+  const after = decodeCursor(cursor);
+  let query = supabase.from("event").select(LIST_ATTENDEE_DISCOVERY_SELECT).eq("is_published", true).in("status", ["CONFIRMED", "PREPARATION"]).gt("end_datetime", new Date().toISOString());
+  if (after) {
+    query = query.or(
+      `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`
+    );
+  }
+  const { data, error } = await query
+    .order("updated_at", { ascending: false })
+    .order("event_id", { ascending: false })
+    .limit(limit + 1);
+  if (error) throw dbError(error);
+
+  const page = data.slice(0, limit);
+  return {
+    events: page.map((row) => toAttendeeDiscoveryItem(row)),
+    nextCursor: data.length > limit ? encodeCursor(page[page.length - 1]) : null,
+  };
+};
+
+const findPublishedAttendeeEvent = async (eventId) => {
+  const { data, error } = await supabase
+    .from("event")
+    .select(`${LIST_ATTENDEE_DISCOVERY_SELECT},registered_count:registration(count)`) 
+    .eq("is_published", true)
+    .in("status", ["CONFIRMED", "PREPARATION"])
+    .eq("event_id", eventId)
+    .maybeSingle();
+  if (error) throw dbError(error);
+  if (!data) return null;
+
+  const registeredCount = Array.isArray(data.registration) && data.registration.length > 0 ? data.registration[0].count : 0;
+  return {
+    ...toAttendeeDetail({ ...data, registered_count: registeredCount }),
+    registrationAvailability: computeRegistrationAvailability({
+      status: data.status,
+      is_registration_enabled: data.is_registration_enabled,
+      registration_capacity: data.registration_capacity,
+      registration_open_at: data.registration_open_at,
+      registration_close_at: data.registration_close_at,
+      registeredCount,
+    }),
+  };
+};
+
 const toLookupIds = (values) =>
   Array.isArray(values)
     ? [...new Set(values.map(toWholeNumber))]
@@ -624,6 +732,9 @@ module.exports = {
   reassignCoordinator,
   findOwnEvent,
   findOrganiserEventRequests,
+  findPublishedAttendeeEvents,
+  findPublishedAttendeeEvent,
+  computeRegistrationAvailability,
   encodeCursor,
   decodeCursor,
   findValidationContext,

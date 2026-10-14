@@ -277,6 +277,71 @@ describe("reads", () => {
   });
 });
 
+describe("Attendee discovery and registration availability", () => {
+  test("[SPM-34-AC3] should_treat_null_capacity_and_window_values_as_open_and_unlimited_when_registration_is_enabled", () => {
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: null,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 0,
+    })).toBe("OPEN");
+  });
+
+  test("[SPM-34-AC3] should_return_closed_when_registration_window_is_outside_the_open_range", () => {
+    const now = new Date().toISOString();
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 20,
+      registration_open_at: new Date(Date.now() + 60_000).toISOString(),
+      registration_close_at: new Date(Date.now() + 120_000).toISOString(),
+      registeredCount: 0,
+      now,
+    })).toBe("CLOSED");
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 20,
+      registration_open_at: new Date(Date.now() - 120_000).toISOString(),
+      registration_close_at: new Date(Date.now() - 60_000).toISOString(),
+      registeredCount: 0,
+      now,
+    })).toBe("CLOSED");
+  });
+
+  test("[SPM-34-AC3] should_return_full_waitlist_only_when_the_confirmed_event_reaches_capacity", () => {
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 3,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 3,
+    })).toBe("FULL_WAITLIST");
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 3,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 2,
+    })).toBe("OPEN");
+  });
+
+  test("[SPM-34-AC3] should_return_closed_for_preparation_events_even_when_the_window_is_open", () => {
+    expect(eventModel.computeRegistrationAvailability({
+      status: "PREPARATION",
+      is_registration_enabled: true,
+      registration_capacity: 10,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 0,
+    })).toBe("CLOSED");
+  });
+});
+
 describe("Lead assignment reads", () => {
   test("should_list_only_submitted_unassigned_events_in_queue_order", async () => {
     const query = queryReturning({ data: [], error: null });
