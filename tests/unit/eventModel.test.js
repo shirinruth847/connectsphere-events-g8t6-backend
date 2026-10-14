@@ -15,6 +15,7 @@ const queryReturning = (result) => {
   for (const method of ["select", "eq", "neq", "or", "order", "in", "is", "not"]) {
     query[method] = jest.fn(() => query);
   }
+  query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   query.limit = jest.fn().mockResolvedValue(result);
   query.maybeSingle = jest.fn().mockResolvedValue(result);
   if (result && typeof result.then === "function") {
@@ -153,7 +154,7 @@ describe("reads", () => {
     const query = queryReturning({ data: null, error: null });
     supabase.from.mockReturnValue(query);
 
-    await expect(eventModel.findVisibleEvent(42, { user_id: 17, organisation_ids: [] })).resolves.toBeNull();
+    await expect(eventModel.findVisibleEvent(42, { user_id: 17, role: "ORGANISER", organisation_ids: [] })).resolves.toBeNull();
 
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
     expect(query.or).toHaveBeenCalledWith("organiser_id.eq.17", "coordinator_id.eq.17");
