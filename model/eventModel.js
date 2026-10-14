@@ -2,8 +2,15 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
-const { NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require("../config/eventConstants");
-const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
+const {
+  NO_LAYOUT_PREFERENCE,
+  STATUS_LABELS,
+} = require("../config/eventConstants");
+const {
+  MESSAGES,
+  MAX_INTEGER,
+  toWholeNumber,
+} = require("../validators/eventValidator");
 
 // Allowlist: the ONLY fields a client may set. status, organiser_id, coordinator_id etc.
 // are set by the server, so a user cannot send { status: "CONFIRMED" } themselves.
@@ -22,7 +29,10 @@ const FIELD_MAP = Object.freeze({
 
 const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
-const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
+const INPUT_FIELDS = new Set([
+  ...Object.keys(FIELD_MAP),
+  ...REQUIREMENT_FIELDS,
+]);
 const EVENT_SELECT =
   "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
@@ -38,7 +48,9 @@ const MAX_LOOKUP_IDS = 50;
 // ---------- input mapping ----------
 
 const getUnsupportedInputFields = (body = {}, { allowAutoSave = false } = {}) =>
-  Object.keys(body).filter((key) => !INPUT_FIELDS.has(key) && !(allowAutoSave && key === "isAutoSave"));
+  Object.keys(body).filter(
+    (key) => !INPUT_FIELDS.has(key) && !(allowAutoSave && key === "isAutoSave"),
+  );
 
 const pickEventInput = (body = {}) => {
   const input = {};
@@ -57,7 +69,8 @@ const toRow = (input) => {
     if (value === "") value = null;
     if (NUMERIC_FIELDS.includes(key) && value !== null) value = Number(value);
     // accessibility_needs is a text column; multi-select values are stored as a JSON string.
-    if (key === "accessibilityNeeds" && Array.isArray(value)) value = JSON.stringify(value);
+    if (key === "accessibilityNeeds" && Array.isArray(value))
+      value = JSON.stringify(value);
     row[column] = value;
   }
   return row;
@@ -80,7 +93,13 @@ const toRequirementPayload = (input) => ({
 const hashRequest = (row, requirements) =>
   crypto
     .createHash("sha256")
-    .update(JSON.stringify([row, requirements.venuePreferences ?? null, requirements.equipmentRequirements ?? null]))
+    .update(
+      JSON.stringify([
+        row,
+        requirements.venuePreferences ?? null,
+        requirements.equipmentRequirements ?? null,
+      ]),
+    )
     .digest("hex");
 
 // ---------- output mapping ----------
@@ -97,11 +116,14 @@ const parseAccessibility = (value) => {
 };
 
 const toOrganisation = (organisation) =>
-  organisation ? { organisationId: organisation.organisation_id, name: organisation.name } : null;
+  organisation
+    ? { organisationId: organisation.organisation_id, name: organisation.name }
+    : null;
 
 const toApi = (row, viewerUserId) => {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
-  const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
+  const equipmentRequirements =
+    row.equipment_requirements || row.event_equipment_requirement;
   return {
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
@@ -118,7 +140,10 @@ const toApi = (row, viewerUserId) => {
     venuePreferences: Array.isArray(venuePreferences)
       ? venuePreferences
           .slice()
-          .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
+          .sort(
+            (left, right) =>
+              (left.preference_order || 0) - (right.preference_order || 0),
+          )
           .map((item) => (typeof item === "number" ? item : item.venue_id))
       : [],
     equipmentRequirements: Array.isArray(equipmentRequirements)
@@ -131,9 +156,13 @@ const toApi = (row, viewerUserId) => {
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
+    ...(row.organisation === undefined
+      ? {}
+      : { organisation: toOrganisation(row.organisation) }),
     isAssignedToCoordinator: row.coordinator_id != null,
-    ...(viewerUserId === undefined ? {} : { isOwner: row.organiser_id === viewerUserId }),
+    ...(viewerUserId === undefined
+      ? {}
+      : { isOwner: row.organiser_id === viewerUserId }),
   };
 };
 
@@ -192,20 +221,38 @@ const SUBMISSION_FAILURES = Object.freeze({
 
 const RPC_FIELD_ERRORS = Object.freeze({
   DRAFT_TITLE_REQUIRED: { title: MESSAGES.titleRequired },
-  INVALID_VENUE_PREFERENCES: { venuePreferences: MESSAGES.venuePreferencesInvalid },
-  INVALID_EQUIPMENT_REQUIREMENTS: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
+  INVALID_VENUE_PREFERENCES: {
+    venuePreferences: MESSAGES.venuePreferencesInvalid,
+  },
+  INVALID_EQUIPMENT_REQUIREMENTS: {
+    equipmentRequirements: MESSAGES.equipmentRequirementsInvalid,
+  },
 });
 
 // Constraints are the final check (e.g. a stale draft merge); report them against the field.
 const CONSTRAINT_FIELD_ERRORS = Object.freeze({
-  event_expected_attendance_positive_check: { expectedAttendance: MESSAGES.attendanceInvalid },
-  event_registration_capacity_positive_check: { registrationCapacity: MESSAGES.registrationCapacityInvalid },
-  event_registration_enabled_capacity_check: { registrationCapacity: MESSAGES.registrationCapacityRequired },
+  event_expected_attendance_positive_check: {
+    expectedAttendance: MESSAGES.attendanceInvalid,
+  },
+  event_registration_capacity_positive_check: {
+    registrationCapacity: MESSAGES.registrationCapacityInvalid,
+  },
+  event_registration_enabled_capacity_check: {
+    registrationCapacity: MESSAGES.registrationCapacityRequired,
+  },
   event_datetime_order_check: { endDatetime: MESSAGES.endBeforeStart },
-  event_venue_preference_pkey: { venuePreferences: MESSAGES.venuePreferencesInvalid },
-  event_venue_preference_venue_id_fkey: { venuePreferences: MESSAGES.venuePreferencesInvalid },
-  event_equipment_requirement_pkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
-  event_equipment_requirement_equipment_id_fkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
+  event_venue_preference_pkey: {
+    venuePreferences: MESSAGES.venuePreferencesInvalid,
+  },
+  event_venue_preference_venue_id_fkey: {
+    venuePreferences: MESSAGES.venuePreferencesInvalid,
+  },
+  event_equipment_requirement_pkey: {
+    equipmentRequirements: MESSAGES.equipmentRequirementsInvalid,
+  },
+  event_equipment_requirement_equipment_id_fkey: {
+    equipmentRequirements: MESSAGES.equipmentRequirementsInvalid,
+  },
 });
 
 const toEventRequestError = (error) => {
@@ -216,18 +263,25 @@ const toEventRequestError = (error) => {
   if (message === "INVALID_EVENT_SUBMISSION") {
     const fields = {};
     for (const failure of String(error.details || "").split(",")) {
-      if (SUBMISSION_FAILURES[failure]) fields[failure.split(":")[0]] = SUBMISSION_FAILURES[failure];
+      if (SUBMISSION_FAILURES[failure])
+        fields[failure.split(":")[0]] = SUBMISSION_FAILURES[failure];
     }
     return eventRequestError("VALIDATION_FAILED", fields);
   }
-  if (RPC_FIELD_ERRORS[message]) return eventRequestError("VALIDATION_FAILED", RPC_FIELD_ERRORS[message]);
+  if (RPC_FIELD_ERRORS[message])
+    return eventRequestError("VALIDATION_FAILED", RPC_FIELD_ERRORS[message]);
 
   const constraint = /constraint "([^"]+)"/.exec(message);
   if (constraint && CONSTRAINT_FIELD_ERRORS[constraint[1]]) {
-    return eventRequestError("VALIDATION_FAILED", CONSTRAINT_FIELD_ERRORS[constraint[1]]);
+    return eventRequestError(
+      "VALIDATION_FAILED",
+      CONSTRAINT_FIELD_ERRORS[constraint[1]],
+    );
   }
   if (code === "23502" && /column "title"/.test(message)) {
-    return eventRequestError("VALIDATION_FAILED", { title: MESSAGES.titleRequired });
+    return eventRequestError("VALIDATION_FAILED", {
+      title: MESSAGES.titleRequired,
+    });
   }
   // Data exceptions (bad casts, out-of-range values) are client input the validator missed.
   if (code.startsWith("22") || message === "INVALID_EVENT_PATCH") {
@@ -255,7 +309,13 @@ const callEventRpc = async (name, args) => {
 };
 
 // Creating a draft (eventId null) needs an idempotency key; updates are naturally idempotent.
-const saveDraft = async ({ organiserId, eventId = null, input, isAutoSave = false, idempotencyKey = null }) => {
+const saveDraft = async ({
+  organiserId,
+  eventId = null,
+  input,
+  isAutoSave = false,
+  idempotencyKey = null,
+}) => {
   const row = toRow(input);
   const requirements = toRequirementPayload(input);
   return callEventRpc("save_event_draft", {
@@ -272,7 +332,12 @@ const saveDraft = async ({ organiserId, eventId = null, input, isAutoSave = fals
 
 // Creating and submitting (eventId null) needs an idempotency key; a second submit
 // of the same draft already fails with EVENT_NOT_DRAFT.
-const submitEvent = async ({ organiserId, eventId = null, input, idempotencyKey = null }) => {
+const submitEvent = async ({
+  organiserId,
+  eventId = null,
+  input,
+  idempotencyKey = null,
+}) => {
   const row = toRow(input);
   const requirements = toRequirementPayload(input);
   return callEventRpc("submit_event_request", {
@@ -301,7 +366,10 @@ const buildOrganiserVisibilityFilter = (user) => {
 };
 
 const findVisibleEvent = async (eventId, user) => {
-  let query = supabase.from("event").select(EVENT_SELECT).eq("event_id", eventId);
+  let query = supabase
+    .from("event")
+    .select(EVENT_SELECT)
+    .eq("event_id", eventId);
   if (user.role === "COORDINATOR") {
     query = query.eq("coordinator_id", user.user_id).neq("status", "DRAFT");
   } else if (user.role === "ORGANISER") {
@@ -322,7 +390,8 @@ const findCoordinatorEvents = async (coordinatorId) => {
     .neq("status", "DRAFT")
     .order("start_datetime", { ascending: true });
   if (error) throw dbError(error);
-  return data.map((row) => ({
+  const dataRows = data || [];
+  return dataRows.map((row) => ({
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
     status: row.status,
@@ -362,7 +431,8 @@ const mapLeadAssignment = (row, coordinatorNames) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   coordinatorId: row.coordinator_id,
-  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
+  coordinatorName:
+    coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
 });
 
 const mapCalendarEvent = (row, coordinatorNames) => ({
@@ -384,7 +454,10 @@ const mapCalendarEvent = (row, coordinatorNames) => ({
   venuePreferences: Array.isArray(row.event_venue_preference)
     ? row.event_venue_preference
         .slice()
-        .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
+        .sort(
+          (left, right) =>
+            (left.preference_order || 0) - (right.preference_order || 0),
+        )
         .map((item) => (typeof item === "number" ? item : item.venue_id))
     : [],
   equipmentRequirements: Array.isArray(row.event_equipment_requirement)
@@ -396,11 +469,15 @@ const mapCalendarEvent = (row, coordinatorNames) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   coordinatorId: row.coordinator_id,
-  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
+  coordinatorName:
+    coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
 });
 
 const findLeadAssignments = async () => {
-  const [{ data: events, error: eventsError }, { data: users, error: usersError }] = await Promise.all([
+  const [
+    { data: events, error: eventsError },
+    { data: users, error: usersError },
+  ] = await Promise.all([
     supabase
       .from("event")
       .select(LIST_SELECT)
@@ -412,12 +489,19 @@ const findLeadAssignments = async () => {
   ]);
   if (eventsError) throw dbError(eventsError);
   if (usersError) throw dbError(usersError);
-  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
-  return events.map((event) => mapLeadAssignment(event, coordinatorNames));
+  const coordinatorNames = new Map(
+    users.map(({ user_id, name }) => [user_id, name]),
+  );
+  return (events || []).map((event) =>
+    mapLeadAssignment(event, coordinatorNames || new Map()),
+  );
 };
 
 const findCoordinatorAvailability = async () => {
-  const [{ data: users, error: usersError }, { data: events, error: eventsError }] = await Promise.all([
+  const [
+    { data: users, error: usersError },
+    { data: events, error: eventsError },
+  ] = await Promise.all([
     supabase
       .from("user")
       .select("user_id,name")
@@ -433,9 +517,12 @@ const findCoordinatorAvailability = async () => {
   ]);
   if (usersError) throw dbError(usersError);
   if (eventsError) throw dbError(eventsError);
-
-  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
-  return users.map((user) => ({
+  const usersData = users || [];
+  const eventsData = events || [];
+  const coordinatorNames = new Map(
+    usersData.map(({ user_id, name }) => [user_id, name]),
+  );
+  return usersData.map((user) => ({
     coordinatorId: user.user_id,
     name: user.name,
     events: events
@@ -452,16 +539,28 @@ const assignCoordinator = async ({ eventId, coordinatorId, leadId }) => {
   });
   if (error) {
     const code = error.message;
-    if (["EVENT_NOT_FOUND", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT"].includes(code)) {
+    if (
+      [
+        "EVENT_NOT_FOUND",
+        "INVALID_COORDINATOR",
+        "COORDINATOR_CONFLICT",
+      ].includes(code)
+    ) {
       throw eventRequestError(code);
     }
     throw dbError(error);
   }
-  if (!data || !data.event) throw new Error("assign_event_coordinator returned no event.");
+  if (!data || !data.event)
+    throw new Error("assign_event_coordinator returned no event.");
   return data.event;
 };
 
-const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinatorId, leadId }) => {
+const reassignCoordinator = async ({
+  eventId,
+  coordinatorId,
+  expectedCoordinatorId,
+  leadId,
+}) => {
   const { data, error } = await supabase.rpc("reassign_event_coordinator", {
     p_event_id: eventId,
     p_coordinator_id: coordinatorId,
@@ -481,7 +580,9 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
     throw dbError(error);
   }
   if (!data || !data.event || !data.coordinator) {
-    throw new Error("reassign_event_coordinator returned an incomplete result.");
+    throw new Error(
+      "reassign_event_coordinator returned an incomplete result.",
+    );
   }
   return {
     event: {
@@ -512,10 +613,13 @@ const findOwnEvent = async (eventId, organiserId) => {
 
 // PostgREST timestamptz text, e.g. 2026-10-07T07:14:14.406209+00:00. The cursor keeps the
 // exact text: converting through Date would drop microseconds and skip or repeat rows.
-const CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::\d{2})?)$/;
+const CURSOR_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::\d{2})?)$/;
 
 const encodeCursor = (row) =>
-  Buffer.from(JSON.stringify({ updatedAt: row.updated_at, eventId: row.event_id })).toString("base64url");
+  Buffer.from(
+    JSON.stringify({ updatedAt: row.updated_at, eventId: row.event_id }),
+  ).toString("base64url");
 
 const decodeCursor = (value) => {
   if (value === undefined || value === null) return null;
@@ -540,13 +644,19 @@ const decodeCursor = (value) => {
 
 // Newest edit first (SPM-37). Keyset paging stays stable while auto-save keeps
 // moving updated_at; event_id breaks ties between equal timestamps.
-const findOrganiserEventRequests = async (user, { limit, cursor = null, status = null }) => {
+const findOrganiserEventRequests = async (
+  user,
+  { limit, cursor = null, status = null },
+) => {
   const after = decodeCursor(cursor);
-  let query = supabase.from("event").select(LIST_SELECT).or(buildOrganiserVisibilityFilter(user));
+  let query = supabase
+    .from("event")
+    .select(LIST_SELECT)
+    .or(buildOrganiserVisibilityFilter(user));
   if (status) query = query.eq("status", status);
   if (after) {
     query = query.or(
-      `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`
+      `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`,
     );
   }
   const { data, error } = await query
@@ -558,7 +668,8 @@ const findOrganiserEventRequests = async (user, { limit, cursor = null, status =
   const page = data.slice(0, limit);
   return {
     events: page.map((row) => toListItem(row, user.user_id)),
-    nextCursor: data.length > limit ? encodeCursor(page[page.length - 1]) : null,
+    nextCursor:
+      data.length > limit ? encodeCursor(page[page.length - 1]) : null,
   };
 };
 
@@ -574,21 +685,35 @@ const NO_ROWS = { data: [], error: null };
 // Looks up only the layout, venues and equipment this request mentions, so an
 // auto-save does not read whole catalogue tables.
 const findValidationContext = async (input) => {
-  const layout = typeof input.preferredLayoutType === "string" ? input.preferredLayoutType.trim() : "";
+  const layout =
+    typeof input.preferredLayoutType === "string"
+      ? input.preferredLayoutType.trim()
+      : "";
   const venueIds = toLookupIds(input.venuePreferences);
   const equipmentIds = toLookupIds(
     Array.isArray(input.equipmentRequirements)
-      ? input.equipmentRequirements.map((item) => (item && typeof item === "object" ? item.equipmentId : null))
-      : []
+      ? input.equipmentRequirements.map((item) =>
+          item && typeof item === "object" ? item.equipmentId : null,
+        )
+      : [],
   );
 
   const [layouts, venues, equipment] = await Promise.all([
     layout && layout !== NO_LAYOUT_PREFERENCE
-      ? supabase.from("room").select("layout_type").eq("layout_type", layout).limit(1)
+      ? supabase
+          .from("room")
+          .select("layout_type")
+          .eq("layout_type", layout)
+          .limit(1)
       : NO_ROWS,
-    venueIds.length ? supabase.from("venue").select("venue_id").in("venue_id", venueIds) : NO_ROWS,
+    venueIds.length
+      ? supabase.from("venue").select("venue_id").in("venue_id", venueIds)
+      : NO_ROWS,
     equipmentIds.length
-      ? supabase.from("equipment").select("equipment_id").in("equipment_id", equipmentIds)
+      ? supabase
+          .from("equipment")
+          .select("equipment_id")
+          .in("equipment_id", equipmentIds)
       : NO_ROWS,
   ]);
   for (const result of [layouts, venues, equipment]) {
@@ -596,7 +721,10 @@ const findValidationContext = async (input) => {
   }
 
   return {
-    allowedLayouts: [NO_LAYOUT_PREFERENCE, ...layouts.data.map((room) => room.layout_type)],
+    allowedLayouts: [
+      NO_LAYOUT_PREFERENCE,
+      ...layouts.data.map((room) => room.layout_type),
+    ],
     venueIds: venues.data.map(({ venue_id }) => venue_id),
     equipmentIds: equipment.data.map(({ equipment_id }) => equipment_id),
   };

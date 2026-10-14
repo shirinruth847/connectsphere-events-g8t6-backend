@@ -18,6 +18,9 @@ const queryReturning = (result) => {
   query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   query.limit = jest.fn().mockResolvedValue(result);
   query.maybeSingle = jest.fn().mockResolvedValue(result);
+  if (result && typeof result.then === "function") {
+    query.then = jest.fn((resolve) => result.then(resolve));
+  }
   return query;
 };
 
@@ -154,7 +157,7 @@ describe("reads", () => {
     await expect(eventModel.findVisibleEvent(42, { user_id: 17, role: "ORGANISER", organisation_ids: [] })).resolves.toBeNull();
 
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
-    expect(query.or).toHaveBeenCalledWith("organiser_id.eq.17");
+    expect(query.or).toHaveBeenCalledWith("organiser_id.eq.17", "coordinator_id.eq.17");
   });
 
   test("[TC-AUTH-013] should_filter_by_owner_when_loading_a_request_to_edit", async () => {
