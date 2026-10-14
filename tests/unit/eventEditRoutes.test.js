@@ -296,9 +296,8 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
     expect(eventModel.saveDraft).not.toHaveBeenCalled();
   });
 
-  // PROVISIONAL Q6: SAFETY_REVIEW and PREPARATION are editable statuses.
-  test.each(["SUBMITTED", "UNDER_REVIEW", "PLANNING", "SAFETY_REVIEW", "PREPARATION", "CONFIRMED"])(
-    "[Q6][SPM-33-AC4] should_allow_the_edit_when_the_event_is_%s",
+  test.each(["UNDER_REVIEW", "PLANNING", "SAFETY_REVIEW", "CONFIRMED", "PREPARATION"])(
+    "[SPM-33-AC4] should_allow_the_edit_when_the_event_is_%s",
     async (status) => {
       eventModel.findEventForViewer.mockResolvedValue(eventRow({ status }));
       eventModel.updateEventDetails.mockResolvedValue({ event: eventRow({ status, version: 4 }), replayed: false });
@@ -309,7 +308,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
     }
   );
 
-  test.each(["AWAITING_CLARIFICATION", "COMPLETED", "REJECTED", "CANCELLED", "APPROVED"])(
+  test.each(["SUBMITTED", "AWAITING_CLARIFICATION", "COMPLETED", "REJECTED", "CANCELLED", "APPROVED"])(
     "[SPM-33-TC-12] should_return_403_without_saving_when_the_event_is_%s",
     async (status) => {
       eventModel.findEventForViewer.mockResolvedValue(eventRow({ status }));

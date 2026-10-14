@@ -70,7 +70,7 @@ Any signed-in user may call these routes; what they get depends on their role **
 | --- | --- | --- |
 | Organiser who owns the event | Always | Every draft field while `DRAFT`; nothing after submission (request a change, SPM-170) |
 | Organiser in the same organisation | Once submitted, read-only | Never |
-| Coordinator assigned to the event | Full coordination view, and history from submission onwards | `title`, `purpose`, `description` in `SUBMITTED`, `UNDER_REVIEW`, `PLANNING`, `SAFETY_REVIEW`, `PREPARATION`, `CONFIRMED` |
+| Coordinator assigned to the event | Full coordination view, and history from submission onwards | `title`, `purpose`, `description` in `UNDER_REVIEW`, `PLANNING`, `SAFETY_REVIEW`, `CONFIRMED`, `PREPARATION` |
 | Venue Staff, Technical Support, Coordinator Lead, Attendee, unassigned coordinator | Nothing through these routes | Never |
 
 | Method & path | Input | Success | Errors |
@@ -87,14 +87,14 @@ Saves are checked in this order, and a failed check changes nothing:
 | Event outside the user's viewing scope | `404 EVENT_NOT_FOUND` |
 | Owner edits after submission | `403 EDIT_REQUIRES_CHANGE_REQUEST` |
 | Same-organisation organiser edits | `403 EVENT_READ_ONLY` |
-| Status allows no direct edit (`AWAITING_CLARIFICATION`, `COMPLETED`, `REJECTED`, `CANCELLED`, or a status not in the coordinator list) | `403 EVENT_NOT_EDITABLE_IN_STATUS` |
+| Status allows no direct edit (`SUBMITTED`, `AWAITING_CLARIFICATION`, `COMPLETED`, `REJECTED`, `CANCELLED`, or any other status not in the coordinator list) | `403 EVENT_NOT_EDITABLE_IN_STATUS` |
 | Body contains an event field this user may not change (significant, registration or system fields) | `403 FIELD_NOT_EDITABLE` with `fields`; the whole request is rejected |
 | Missing or invalid value, missing `version` or `Idempotency-Key`, unknown key | `400 VALIDATION_FAILED` with `fields` |
 | Event changed since it was loaded | `409 EVENT_VERSION_CONFLICT` with the current `event` to review |
 | `Idempotency-Key` reused with a different body | `409 IDEMPOTENCY_KEY_REUSED` |
 
 - **Stale saves:** every change to an event raises its `version`. Send back the `version` you loaded; a save made against an older one is refused.
-- **Retries:** re-sending the same request with the same `Idempotency-Key` returns the original result with `Idempotent-Replayed: true` and writes nothing new (no second history entry or notification). A retry that arrives after the event stopped being editable gets the `403` instead. On `PUT /api/events/:id/draft` both `version` and the key are optional, so existing clients keep working.
+- **Retries:** re-sending the same request with the same `Idempotency-Key` returns the original result with `Idempotent-Replayed: true` and writes nothing new (no second history entry or notification). A retry that arrives after the user can no longer make that edit (the status changed, or the coordinator was reassigned) gets the `403` or `404` like any other edit, and nothing is saved twice; the client should reload the event to see whether the first attempt was saved. On `PUT /api/events/:id/draft` both `version` and the key are optional, so existing clients keep working.
 - **Draft route alignment:** `PUT /api/events/:id/draft` now answers `403 EDIT_REQUIRES_CHANGE_REQUEST` (it used to be `409 EVENT_NOT_DRAFT`) when the request is no longer a draft, and `403 EVENT_READ_ONLY` to a same-organisation organiser. `PUT /api/events/:id/submit` still answers `409 EVENT_NOT_DRAFT`.
 - **History:** every manual draft save and coordinator edit adds an entry with the actor, their role and the before/after values; auto-saves and failed saves add none. Each entry has one audience, and the filter is applied in the database query:
 
@@ -107,7 +107,7 @@ Saves are checked in this order, and a failed check changes nothing:
   Nobody but the owner could see the draft, so nobody else may read what it used to say. Entries cannot be changed or removed: there is no route for it and the backend's database role has no `UPDATE`, `DELETE` or `TRUNCATE` on `activity_log`.
 - **History format for other tickets:** when a database function inserts into `activity_log` without the new columns, a trigger fills `actor_role` from the user's role and sets `audience` to `STAFF_ONLY`, unless the action is a known draft or organiser-safe one. To show an entry to organisers, pass `audience => 'ORGANISER_SAFE'` and a `changes` object keyed by API field name (`{ "title": { "before": ..., "after": ... } }`).
 - **Notification:** when the assigned coordinator's edit changes something, the owner gets one in-app notification ("Event details updated", type `STATUS_CHANGE`) written in the same transaction. It names the changed fields, not their values. Draft saves, unchanged saves, failed saves and retries send none.
-- **Provisional:** `SAFETY_REVIEW` and `PREPARATION` are in the coordinator list ahead of the status model being settled (Master Q6), and SPM-39's `APPROVED` is not. The list is one constant, `COORDINATOR_EDITABLE_STATUSES` in `config/eventConstants.js`.
+- **Coordinator statuses:** the list follows the Master 1.0 lifecycle (section 5.2): `SUBMITTED` is excluded because an event in it has no coordinator, and there is no `APPROVED` state. `SAFETY_REVIEW` and `PREPARATION` are not in the live `event_status` enum yet, so they take effect once that migration lands. The list is one constant, `COORDINATOR_EDITABLE_STATUSES` in `config/eventConstants.js`, passed to the database function, so changing it needs no migration.
 
 ### Authentication (SPM-32)
 

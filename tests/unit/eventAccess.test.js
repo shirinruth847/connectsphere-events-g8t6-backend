@@ -90,10 +90,9 @@ describe("getEventAccess (field edit matrix)", () => {
     }
   });
 
-  // PROVISIONAL Q6: SAFETY_REVIEW and PREPARATION are part of the editable list.
-  test("[Q6][SPM-33-TC-10] should_let_the_assigned_coordinator_edit_ordinary_fields_only_in_the_matrix_statuses", () => {
+  test("[SPM-33-TC-10] should_let_the_assigned_coordinator_edit_ordinary_fields_only_in_the_matrix_statuses", () => {
     expect([...COORDINATOR_EDITABLE_STATUSES]).toEqual([
-      "SUBMITTED", "UNDER_REVIEW", "PLANNING", "SAFETY_REVIEW", "PREPARATION", "CONFIRMED",
+      "UNDER_REVIEW", "PLANNING", "SAFETY_REVIEW", "CONFIRMED", "PREPARATION",
     ]);
     for (const status of ALL_STATUSES.filter((value) => value !== "DRAFT")) {
       const access = getEventAccess(staff("COORDINATOR", 21), event({ status }));

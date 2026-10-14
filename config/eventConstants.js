@@ -73,17 +73,16 @@ const OWNER_DRAFT_FIELDS = Object.freeze([
   "registrationCapacity",
 ]);
 
-// Statuses in which the assigned coordinator may edit ordinary fields. Listed by
-// name because two of them are not in the live event_status enum yet; SPM-39's
-// APPROVED is left out until its statuses are mapped at integration.
-// PROVISIONAL Q6: SAFETY_REVIEW and PREPARATION sit between PLANNING and CONFIRMED.
+// Statuses in which the assigned coordinator may edit ordinary fields, in Master
+// section 5.2 lifecycle order. Listed by name because SAFETY_REVIEW and PREPARATION
+// are not in the live event_status enum yet. SUBMITTED is absent because an event
+// in it has no coordinator, and there is no APPROVED state.
 const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
-  "SUBMITTED",
   "UNDER_REVIEW",
   "PLANNING",
   "SAFETY_REVIEW",
-  "PREPARATION",
   "CONFIRMED",
+  "PREPARATION",
 ]);
 
 module.exports = {
