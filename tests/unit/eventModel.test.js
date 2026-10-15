@@ -295,9 +295,9 @@ describe("Lead assignment reads", () => {
       event_id: 42, coordinator_id: 20, status: "PLANNING", title: "Conference",
       start_datetime: "2026-11-01T09:00:00.000Z", end_datetime: "2026-11-01T10:00:00.000Z",
       expected_attendance: 100, organisation: { organisation_id: 3, name: "Org" },
+      coordinator: { user_id: 20, name: "Coordinator Two" },
     }], error: null });
-    const userQuery = queryReturning({ data: [{ user_id: 20, name: "Coordinator Two" }], error: null });
-    supabase.from.mockImplementation((table) => table === "event" ? eventQuery : userQuery);
+    supabase.from.mockImplementation((table) => table === "event" ? eventQuery : queryReturning({ data: [], error: null }));
 
     await expect(eventModel.findLeadAssignments()).resolves.toEqual([expect.objectContaining({
       eventId: 42, coordinatorId: 20, coordinatorName: "Coordinator Two", status: "PLANNING",
@@ -312,6 +312,7 @@ describe("Lead assignment reads", () => {
       event_id: 42, coordinator_id: 20, status: "PLANNING", title: "Conference",
       start_datetime: "2026-11-01T09:00:00.000Z", end_datetime: "2026-11-01T10:00:00.000Z",
       expected_attendance: 100,
+      coordinator: { user_id: 20, name: "Coordinator Two" },
     }];
     const userQuery = queryReturning({ data: userRows, error: null });
     const eventQuery = queryReturning({ data: eventRows, error: null });

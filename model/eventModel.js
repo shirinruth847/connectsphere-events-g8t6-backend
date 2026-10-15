@@ -2,7 +2,7 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
-const { NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require("../config/eventConstants");
+const { EVENT_STATUS, NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require("../config/eventConstants");
 const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
 
 // Allowlist: the ONLY fields a client may set. status, organiser_id, coordinator_id etc.
@@ -24,14 +24,18 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "*,organisation(organisation_id,name),coordinator:user!coordinator_id(user_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 const LIST_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,coordinator:user!coordinator_id(user_id,name),created_at,updated_at,organisation(organisation_id,name)";
 
 // Calendar events include richer details for coordinators' schedule view.
 const CALENDAR_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,purpose,description,accessibility_needs,preferred_layout_type,is_registration_enabled,registration_capacity,coordinator_id,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,purpose,description,accessibility_needs,preferred_layout_type,is_registration_enabled,registration_capacity,coordinator_id,coordinator:user!coordinator_id(user_id,name),created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+
+// Unassigned queue: only the fields a lead needs to assign a coordinator.
+const QUEUE_SELECT =
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,created_at,organisation(organisation_id,name)";
 
 const MAX_LOOKUP_IDS = 50;
 
@@ -99,9 +103,15 @@ const parseAccessibility = (value) => {
 const toOrganisation = (organisation) =>
   organisation ? { organisationId: organisation.organisation_id, name: organisation.name } : null;
 
+const toCoordinator = (coordinator) =>
+  coordinator && coordinator.user_id
+    ? { coordinatorId: coordinator.user_id, coordinatorName: coordinator.name }
+    : null;
+
 const toApi = (row, viewerUserId) => {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
   const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
+  const coordinator = toCoordinator(row.coordinator);
   return {
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
@@ -132,6 +142,7 @@ const toApi = (row, viewerUserId) => {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
+    ...(coordinator ? coordinator : {}),
     isAssignedToCoordinator: row.coordinator_id != null,
     ...(viewerUserId === undefined ? {} : { isOwner: row.organiser_id === viewerUserId }),
   };
@@ -147,10 +158,25 @@ const toListItem = (row, viewerUserId) => ({
   endDatetime: row.end_datetime,
   expectedAttendance: row.expected_attendance,
   organisation: toOrganisation(row.organisation),
+  ...(toCoordinator(row.coordinator) || {}),
   isAssignedToCoordinator: row.coordinator_id != null,
   isOwner: row.organiser_id === viewerUserId,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+});
+
+// Queue rows: only assignment-relevant fields (SPM-177 queue data minimization).
+const toQueueItem = (row) => ({
+  eventId: row.event_id,
+  requestId: formatRequestId(row.event_id),
+  status: row.status,
+  statusLabel: STATUS_LABELS[row.status] || row.status,
+  title: row.title,
+  startDatetime: row.start_datetime,
+  endDatetime: row.end_datetime,
+  expectedAttendance: row.expected_attendance,
+  organisation: toOrganisation(row.organisation),
+  createdAt: row.created_at,
 });
 
 // ---------- errors ----------
@@ -171,6 +197,8 @@ const DOMAIN_CODES = new Set([
   "IDEMPOTENCY_KEY_REQUIRED",
   "IDEMPOTENCY_KEY_REUSED",
   "IDEMPOTENCY_IN_PROGRESS",
+  "COORDINATOR_CONFLICT",
+  "INVALID_COORDINATOR",
 ]);
 
 // submit_event_request reports "<field>:<reason>" pairs in the error detail.
@@ -208,11 +236,12 @@ const CONSTRAINT_FIELD_ERRORS = Object.freeze({
   event_equipment_requirement_equipment_id_fkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
 });
 
-const toEventRequestError = (error) => {
+const toEventRequestError = (error, fields) => {
+  if (typeof error === "string") return eventRequestError(error, fields);
   const message = error.message || "";
   const code = error.code || "";
 
-  if (DOMAIN_CODES.has(message)) return eventRequestError(message);
+  if (DOMAIN_CODES.has(message)) return eventRequestError(message, error.fields);
   if (message === "INVALID_EVENT_SUBMISSION") {
     const fields = {};
     for (const failure of String(error.details || "").split(",")) {
@@ -322,34 +351,22 @@ const findCoordinatorEvents = async (coordinatorId) => {
     .neq("status", "DRAFT")
     .order("start_datetime", { ascending: true });
   if (error) throw dbError(error);
-  return data.map((row) => ({
-    eventId: row.event_id,
-    requestId: formatRequestId(row.event_id),
-    status: row.status,
-    statusLabel: STATUS_LABELS[row.status] || row.status,
-    title: row.title,
-    startDatetime: row.start_datetime,
-    endDatetime: row.end_datetime,
-    expectedAttendance: row.expected_attendance,
-    organisation: toOrganisation(row.organisation),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
+  return data.map((row) => toListItem(row, coordinatorId));
 };
 
 const findUnassignedSubmittedEvents = async () => {
   const { data, error } = await supabase
     .from("event")
-    .select(LIST_SELECT)
+    .select(QUEUE_SELECT)
     .eq("status", "SUBMITTED")
     .is("coordinator_id", null)
     .order("created_at", { ascending: true })
     .order("event_id", { ascending: true });
   if (error) throw dbError(error);
-  return data;
+  return data.map((row) => toQueueItem(row));
 };
 
-const mapLeadAssignment = (row, coordinatorNames) => ({
+const mapLeadAssignment = (row) => ({
   eventId: row.event_id,
   requestId: formatRequestId(row.event_id),
   status: row.status,
@@ -362,10 +379,10 @@ const mapLeadAssignment = (row, coordinatorNames) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   coordinatorId: row.coordinator_id,
-  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
+  coordinatorName: toCoordinator(row.coordinator)?.coordinatorName || "Inactive Coordinator",
 });
 
-const mapCalendarEvent = (row, coordinatorNames) => ({
+const mapCalendarEvent = (row) => ({
   eventId: row.event_id,
   requestId: formatRequestId(row.event_id),
   status: row.status,
@@ -396,24 +413,19 @@ const mapCalendarEvent = (row, coordinatorNames) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   coordinatorId: row.coordinator_id,
-  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
+  coordinatorName: toCoordinator(row.coordinator)?.coordinatorName || "Inactive Coordinator",
 });
 
 const findLeadAssignments = async () => {
-  const [{ data: events, error: eventsError }, { data: users, error: usersError }] = await Promise.all([
-    supabase
-      .from("event")
-      .select(LIST_SELECT)
-      .not("coordinator_id", "is", null)
-      .not("status", "in", '("COMPLETED","REJECTED","CANCELLED")')
-      .order("start_datetime", { ascending: true })
-      .order("event_id", { ascending: true }),
-    supabase.from("user").select("user_id,name").eq("role", "COORDINATOR"),
-  ]);
+  const { data: events, error: eventsError } = await supabase
+    .from("event")
+    .select(LIST_SELECT)
+    .not("coordinator_id", "is", null)
+    .not("status", "in", '("COMPLETED","REJECTED","CANCELLED")')
+    .order("start_datetime", { ascending: true })
+    .order("event_id", { ascending: true });
   if (eventsError) throw dbError(eventsError);
-  if (usersError) throw dbError(usersError);
-  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
-  return events.map((event) => mapLeadAssignment(event, coordinatorNames));
+  return events.map((event) => mapLeadAssignment(event));
 };
 
 const findCoordinatorAvailability = async () => {
@@ -434,13 +446,12 @@ const findCoordinatorAvailability = async () => {
   if (usersError) throw dbError(usersError);
   if (eventsError) throw dbError(eventsError);
 
-  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
   return users.map((user) => ({
     coordinatorId: user.user_id,
     name: user.name,
     events: events
       .filter((event) => event.coordinator_id === user.user_id)
-      .map((event) => mapCalendarEvent(event, coordinatorNames)),
+      .map((event) => mapCalendarEvent(event)),
   }));
 };
 
@@ -601,6 +612,8 @@ const findValidationContext = async (input) => {
     equipmentIds: equipment.data.map(({ equipment_id }) => equipment_id),
   };
 };
+
+
 
 module.exports = {
   getUnsupportedInputFields,
