@@ -6,6 +6,7 @@ const {
   hasErrors,
 } = require("../validators/eventValidator");
 const { EVENT_STATUS } = require("../config/eventConstants");
+const { USER_ROLES } = require("../config/roles");
 
 const EVENT_STATUSES = Object.values(EVENT_STATUS);
 const MAX_EVENT_ID = 2147483647;
@@ -299,42 +300,6 @@ async function getUnassignedEvents(req, res, next) {
   }
 }
 
-async function getCoordinatorAvailability(req, res, next) {
-  try {
-    const coordinators = await eventModel.findCoordinatorAvailability();
-    return res.status(200).json({ coordinators });
-  } catch (error) {
-    return next(error);
-  }
-}
-
-async function assignCoordinator(req, res, next) {
-  try {
-    const eventId = parseEventId(req.params.id);
-    if (!eventId) return eventNotFound(res);
-    if (
-      !req.body ||
-      !Number.isInteger(req.body.coordinatorId) ||
-      req.body.coordinatorId < 1
-    ) {
-      return sendError(
-        res,
-        DOMAIN_ERRORS.INVALID_COORDINATOR[0],
-        "INVALID_COORDINATOR",
-        DOMAIN_ERRORS.INVALID_COORDINATOR[1],
-      );
-    }
-
-    const event = await eventModel.assignCoordinator({
-      eventId,
-      coordinatorId: req.body.coordinatorId,
-    });
-    return res.status(200).json({ event: eventModel.toApi(event) });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-}
-
 // GET /api/events/:id — load one request (e.g. to prefill "Edit Draft")
 const getEventRequest = async (req, res, next) => {
   try {
@@ -359,35 +324,6 @@ const listAssignedEvents = async (req, res, next) => {
   }
 };
 
-const assignCoordinator = async (req, res, next) => {
-  try {
-    const eventId = parseEventId(req.params.id);
-    if (!eventId) return eventNotFound(res);
-    const body = req.body;
-    if (
-      !body ||
-      typeof body !== "object" ||
-      Array.isArray(body) ||
-      Object.keys(body).length !== 1 ||
-      !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
-      !Number.isSafeInteger(body.coordinatorId) ||
-      body.coordinatorId < 1
-    ) {
-      return validationFailed(res, {
-        coordinatorId: "Send a positive integer coordinatorId.",
-      });
-    }
-    const assignedEvent = await eventModel.assignCoordinator({
-      eventId,
-      coordinatorId: body.coordinatorId,
-      leadId: req.user.user_id,
-    });
-    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-};
-
 const listLeadAssignments = async (req, res, next) => {
   try {
     const assignments = await eventModel.findLeadAssignments();
@@ -417,56 +353,83 @@ const getCoordinatorAvailability = async (req, res, next) => {
   }
 };
 
-const reassignCoordinator = async (req, res, next) => {
+// PATCH /api/events/:id/coordinator — SPM-174 (assign) or SPM-180 (reassign).
+// Single route, coordinatorOperations middleware; the handler decides by body shape
+// and the actor's role so both tickets share one path.
+const patchCoordinator = async (req, res, next) => {
   try {
     const eventId = parseEventId(req.params.id);
     if (!eventId) return eventNotFound(res);
     const body = req.body;
+    const isLead = req.user.role === USER_ROLES.COORDINATOR_LEAD;
+    const isReassign =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? Object.prototype.hasOwnProperty.call(body, "expectedCoordinatorId")
+        : false;
+
+    if (isReassign) {
+      if (!isLead) {
+        return sendError(res, 403, "FORBIDDEN", "Only a coordinator lead may reassign.");
+      }
+      if (
+        Object.keys(body).length !== 2 ||
+        !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
+        !Number.isSafeInteger(body.coordinatorId) ||
+        body.coordinatorId < 1 ||
+        !Number.isSafeInteger(body.expectedCoordinatorId) ||
+        body.expectedCoordinatorId < 1
+      ) {
+        return validationFailed(res, {
+          coordinatorId: "Send a positive integer coordinatorId.",
+          expectedCoordinatorId:
+            "Send the coordinatorId currently shown as assigned.",
+        });
+      }
+      const result = await eventModel.reassignCoordinator({
+        eventId,
+        coordinatorId: body.coordinatorId,
+        expectedCoordinatorId: body.expectedCoordinatorId,
+        leadId: req.user.user_id,
+      });
+      return res.status(200).json({
+        message: "Event coordinator reassigned successfully.",
+        event: result.event,
+        coordinator: result.coordinator,
+      });
+    }
+
+    // SPM-174 assignment: coordinator or lead sends only coordinatorId.
     if (
       !body ||
       typeof body !== "object" ||
       Array.isArray(body) ||
-      Object.keys(body).length !== 2 ||
-      !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
-      !Number.isSafeInteger(body.coordinatorId) ||
-      body.coordinatorId < 1 ||
-      !Object.prototype.hasOwnProperty.call(body, "expectedCoordinatorId") ||
-      !Number.isSafeInteger(body.expectedCoordinatorId) ||
-      body.expectedCoordinatorId < 1
+      Object.keys(body).length !== 1 ||
+      !Object.prototype.hasOwnProperty.call(body, "coordinatorId")
     ) {
       return validationFailed(res, {
         coordinatorId: "Send a positive integer coordinatorId.",
-        expectedCoordinatorId:
-          "Send the coordinatorId currently shown as assigned.",
       });
     }
-
-    const result = await eventModel.reassignCoordinator({
+    if (!Number.isSafeInteger(body.coordinatorId) || body.coordinatorId < 1) {
+      return sendError(
+        res,
+        DOMAIN_ERRORS.INVALID_COORDINATOR[0],
+        "INVALID_COORDINATOR",
+        DOMAIN_ERRORS.INVALID_COORDINATOR[1],
+      );
+    }
+    const assignedEvent = await eventModel.assignCoordinator({
       eventId,
       coordinatorId: body.coordinatorId,
-      expectedCoordinatorId: body.expectedCoordinatorId,
-      leadId: req.user.user_id,
     });
-    return res.status(200).json({
-      message: "Event coordinator reassigned successfully.",
-      event: result.event,
-      coordinator: result.coordinator,
-    });
+    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
   } catch (error) {
     return handleError(error, res, next);
   }
 };
 
-const listAssignedEvents = async (req, res, next) => {
-  try {
-    const events = await eventModel.findCoordinatorEvents(req.user.user_id);
-    return res.status(200).json({ events });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-};
-
-const assignCoordinator = async (req, res, next) => {
+// POST /api/events/:id/coordinator — SPM-180 lead-only initial assignment.
+const assignCoordinatorAsLead = async (req, res, next) => {
   try {
     const eventId = parseEventId(req.params.id);
     if (!eventId) return eventNotFound(res);
@@ -490,75 +453,6 @@ const assignCoordinator = async (req, res, next) => {
       leadId: req.user.user_id,
     });
     return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-};
-
-const listLeadAssignments = async (req, res, next) => {
-  try {
-    const assignments = await eventModel.findLeadAssignments();
-    return res.status(200).json({ assignments });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-};
-
-const listUnassignedEvents = async (req, res, next) => {
-  try {
-    const events = await eventModel.findUnassignedSubmittedEvents();
-    return res
-      .status(200)
-      .json({ events: events.map((event) => eventModel.toApi(event)) });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-};
-
-const getCoordinatorAvailability = async (req, res, next) => {
-  try {
-    const coordinators = await eventModel.findCoordinatorAvailability();
-    return res.status(200).json({ coordinators });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-};
-
-const reassignCoordinator = async (req, res, next) => {
-  try {
-    const eventId = parseEventId(req.params.id);
-    if (!eventId) return eventNotFound(res);
-    const body = req.body;
-    if (
-      !body ||
-      typeof body !== "object" ||
-      Array.isArray(body) ||
-      Object.keys(body).length !== 2 ||
-      !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
-      !Number.isSafeInteger(body.coordinatorId) ||
-      body.coordinatorId < 1 ||
-      !Object.prototype.hasOwnProperty.call(body, "expectedCoordinatorId") ||
-      !Number.isSafeInteger(body.expectedCoordinatorId) ||
-      body.expectedCoordinatorId < 1
-    ) {
-      return validationFailed(res, {
-        coordinatorId: "Send a positive integer coordinatorId.",
-        expectedCoordinatorId:
-          "Send the coordinatorId currently shown as assigned.",
-      });
-    }
-
-    const result = await eventModel.reassignCoordinator({
-      eventId,
-      coordinatorId: body.coordinatorId,
-      expectedCoordinatorId: body.expectedCoordinatorId,
-      leadId: req.user.user_id,
-    });
-    return res.status(200).json({
-      message: "Event coordinator reassigned successfully.",
-      event: result.event,
-      coordinator: result.coordinator,
-    });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -572,12 +466,10 @@ module.exports = {
   listMyEventRequests,
   getUnassignedEvents,
   getCoordinatorAvailability,
-  assignCoordinator,
   getEventRequest,
   listAssignedEvents,
-  assignCoordinator,
   listLeadAssignments,
   listUnassignedEvents,
-  getCoordinatorAvailability,
-  reassignCoordinator,
+  patchCoordinator,
+  assignCoordinatorAsLead,
 };

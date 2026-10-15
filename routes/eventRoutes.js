@@ -9,14 +9,12 @@ const {
   listMyEventRequests,
   getEventRequest,
   listAssignedEvents,
-  assignCoordinator,
+  patchCoordinator,
+  assignCoordinatorAsLead,
   listLeadAssignments,
   listUnassignedEvents,
   getCoordinatorAvailability,
-  reassignCoordinator,
   getUnassignedEvents,
-  getCoordinatorAvailability,
-  assignCoordinator,
 } = require("../controller/eventController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole } = require("../middleware/authorize");
@@ -47,13 +45,16 @@ router.get(
   coordinatorOperations,
   getCoordinatorAvailability,
 );
-router.patch("/:id/coordinator", coordinatorOperations, assignCoordinator);
+router.patch(
+  "/:id/coordinator",
+  [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD)],
+  patchCoordinator,
+);
 router.get("/unassigned", leadOnly, listUnassignedEvents); // must stay above "/:id"
 router.get("/coordinator-availability", leadOnly, getCoordinatorAvailability); // Lead-only cross-coordinator schedule
 router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/:id"
 router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
-router.post("/:id/coordinator", leadOnly, assignCoordinator);
-router.patch("/:id/coordinator", leadOnly, reassignCoordinator);
+router.post("/:id/coordinator", leadOnly, assignCoordinatorAsLead);
 router.get(
   "/:id",
   [requireAuth, requireRole(USER_ROLES.ORGANISER, USER_ROLES.COORDINATOR)],

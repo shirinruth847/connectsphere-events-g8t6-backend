@@ -607,77 +607,7 @@ const findValidationContext = async (input) => {
   };
 };
 
-async function findEventsByOrganiser(organiserId, status) {
-  let query = supabase
-    .from('event')
-    .select('*')
-    .eq('organiser_id', organiserId)
-    .order('updated_at', { ascending: false });
-  if (status) query = query.eq('status', status);
-  const { data, error } = await query;
-  if (error) throw error;
-  return data;
-}
 
-async function findUnassignedSubmittedEvents() {
-  const { data, error } = await supabase
-    .from('event')
-    .select('*')
-    .eq('status', EVENT_STATUS.SUBMITTED)
-    .is('coordinator_id', null)
-    .order('start_datetime', { ascending: true })
-    .order('event_id', { ascending: true });
-  if (error) throw error;
-  return data;
-}
-
-async function findCoordinatorAvailability() {
-  const [{ data: users, error: usersError }, { data: events, error: eventsError }] =
-    await Promise.all([
-      supabase
-        .from("user")
-        .select("user_id,name")
-        .eq("role", "COORDINATOR")
-        .eq("is_active", true)
-        .order("name", { ascending: true }),
-      supabase
-        .from("event")
-        .select("*")
-        .not("coordinator_id", "is", null)
-        .not("status", "in", `("DRAFT","REJECTED","CANCELLED")`)
-        .order("start_datetime", { ascending: true }),
-    ]);
-  if (usersError) throw usersError;
-  if (eventsError) throw eventsError;
-
-  return users.map((user) => ({
-    coordinatorId: user.user_id,
-    name: user.name,
-    events: events
-      .filter((event) => event.coordinator_id === user.user_id)
-      .map(toApi),
-  }));
-}
-
-async function assignCoordinator({ eventId, coordinatorId }) {
-  const { data, error } = await supabase.rpc("assign_event_coordinator", {
-    p_event_id: eventId,
-    p_coordinator_id: coordinatorId,
-  });
-  if (error) throw toEventRequestError(error);
-  if (!data || !data.event) throw new Error("assign_event_coordinator returned no event.");
-  return {
-    ...data.event,
-    coordinator_name: data.coordinator_name,
-  };
-}
-
-// Allowed layout options come from the rooms that actually exist, plus "no preference".
-async function getAllowedLayouts() {
-  const { data, error } = await supabase.from('room').select('layout_type');
-  if (error) throw error;
-  return [NO_LAYOUT_PREFERENCE, ...new Set(data.map((room) => room.layout_type))];
-}
 
 module.exports = {
   getUnsupportedInputFields,
@@ -702,9 +632,6 @@ module.exports = {
   findOwnEvent,
   findOrganiserEventRequests,
   encodeCursor,
-  findUnassignedSubmittedEvents,
-  findCoordinatorAvailability,
-  assignCoordinator,
   decodeCursor,
   findValidationContext,
 };
