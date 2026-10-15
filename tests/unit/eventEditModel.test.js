@@ -127,13 +127,16 @@ describe("eventModel edits", () => {
   });
 });
 
-describe("eventModel.findEventForViewer (AC1)", () => {
+describe("eventModel.findVisibleEvent (AC1)", () => {
   test.each(["VENUE_STAFF", "TECH_SUPPORT", "ATTENDEE", "COORDINATOR_LEAD"])(
-    "[SPM-33-TC-14] should_return_null_without_querying_when_the_user_is_%s",
+    "[SPM-33-TC-14] should_return_null_without_running_a_query_when_the_user_is_%s",
     async (role) => {
-      await expect(eventModel.findEventForViewer(42, staff(role, 21))).resolves.toBeNull();
+      const query = queryReturning({ data: { event_id: 42 }, error: null });
+      supabase.from.mockReturnValue(query);
 
-      expect(supabase.from).not.toHaveBeenCalled();
+      await expect(eventModel.findVisibleEvent(42, staff(role, 21))).resolves.toBeNull();
+
+      expect(query.maybeSingle).not.toHaveBeenCalled();
     }
   );
 
@@ -141,9 +144,10 @@ describe("eventModel.findEventForViewer (AC1)", () => {
     const query = queryReturning({ data: null, error: null });
     supabase.from.mockReturnValue(query);
 
-    await expect(eventModel.findEventForViewer(42, staff("COORDINATOR", 21))).resolves.toBeNull();
+    await expect(eventModel.findVisibleEvent(42, staff("COORDINATOR", 21))).resolves.toBeNull();
 
     expect(supabase.from).toHaveBeenCalledWith("event");
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("organiser:user!event_organiser_id_fkey(user_id,name)"));
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
     expect(query.eq).toHaveBeenCalledWith("coordinator_id", 21);
     expect(query.neq).toHaveBeenCalledWith("status", "DRAFT");
@@ -153,7 +157,7 @@ describe("eventModel.findEventForViewer (AC1)", () => {
     const query = queryReturning({ data: null, error: null });
     supabase.from.mockReturnValue(query);
 
-    await eventModel.findEventForViewer(42, organiser(12, [5]));
+    await eventModel.findVisibleEvent(42, organiser(12, [5]));
 
     expect(query.or).toHaveBeenCalledWith("organiser_id.eq.12,and(organisation_id.in.(5),status.neq.DRAFT)");
   });

@@ -8,7 +8,7 @@ jest.mock("../../model/eventModel", () => {
     ...actual,
     saveDraft: jest.fn(),
     submitEvent: jest.fn(),
-    findEventForViewer: jest.fn(),
+    findVisibleEvent: jest.fn(),
     findOwnEvent: jest.fn(),
     findOrganiserEventRequests: jest.fn(),
     findValidationContext: jest.fn(),
@@ -249,14 +249,14 @@ describe("POST /api/events/drafts (SPM-37)", () => {
 
 describe("PUT /api/events/:id/draft (SPM-37)", () => {
   test("[SPM-37-S3] should_auto_save_with_the_auto_save_flag_and_message", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     eventModel.saveDraft.mockResolvedValue({ event: eventRow({ expected_attendance: 200 }), replayed: false });
 
     const res = await send("put", "/api/events/42/draft", { expectedAttendance: 200, isAutoSave: true });
 
     expect(res.status).toBe(200);
     expect(res.body.message).toBe("Draft auto-saved.");
-    expect(eventModel.findEventForViewer).toHaveBeenCalledWith(42, expect.objectContaining({ user_id: ORGANISER_ID }));
+    expect(eventModel.findVisibleEvent).toHaveBeenCalledWith(42, expect.objectContaining({ user_id: ORGANISER_ID }));
     expect(eventModel.saveDraft).toHaveBeenCalledWith(
       expect.objectContaining({ eventId: 42, isAutoSave: true, input: { expectedAttendance: 200 } })
     );
@@ -269,12 +269,12 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
 
       expect(res.status).toBe(404);
       expect(res.body.code).toBe("EVENT_NOT_FOUND");
-      expect(eventModel.findEventForViewer).not.toHaveBeenCalled();
+      expect(eventModel.findVisibleEvent).not.toHaveBeenCalled();
     }
   );
 
   test("[TC-AUTH-013] should_return_404_when_the_draft_belongs_to_another_organiser", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(null);
+    eventModel.findVisibleEvent.mockResolvedValue(null);
 
     const res = await send("put", "/api/events/42/draft", { title: "Gala" });
 
@@ -284,7 +284,7 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
 
   // SPM-33 AC3 replaces the earlier 409 EVENT_NOT_DRAFT on this route.
   test("[SPM-37-S2] should_return_403_pointing_to_a_change_request_when_the_request_is_no_longer_a_draft", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
 
     const res = await send("put", "/api/events/42/draft", { title: "Gala" });
 
@@ -297,7 +297,7 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
   });
 
   test("[SPM-37-S3] should_return_400_when_the_auto_save_flag_is_not_boolean", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
 
     const res = await send("put", "/api/events/42/draft", { title: "Gala", isAutoSave: "yes" });
 
@@ -306,7 +306,7 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
   });
 
   test("[SPM-37-S1] should_validate_the_merged_draft_when_a_change_conflicts_with_saved_values", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(
+    eventModel.findVisibleEvent.mockResolvedValue(
       eventRow({ start_datetime: "2026-11-01T09:00:00+00:00", end_datetime: "2026-11-01T17:00:00+00:00" })
     );
 
@@ -344,7 +344,7 @@ describe("PUT /api/events/:id/submit (SPM-37)", () => {
 
 describe("GET /api/events/:id and /mine", () => {
   test("[SPM-37-S4] should_return_the_draft_with_ownership_when_prefilling_edit_draft", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ organisation: null }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ organisation: null }));
 
     const res = await send("get", "/api/events/42");
 
@@ -353,7 +353,7 @@ describe("GET /api/events/:id and /mine", () => {
   });
 
   test("[TC-AUTH-013] should_return_404_when_the_request_is_not_visible", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(null);
+    eventModel.findVisibleEvent.mockResolvedValue(null);
 
     const res = await send("get", "/api/events/42");
 

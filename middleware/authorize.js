@@ -89,7 +89,7 @@ const getEditDenial = (access, event) => {
 // viewing scope. Callers answer "not found" for null, never "forbidden", so the
 // response does not confirm that the event exists (SPM-33 AC1, AC6).
 const loadEventForViewer = async (eventId, user) => {
-  const event = await eventModel.findEventForViewer(eventId, user);
+  const event = await eventModel.findVisibleEvent(eventId, user);
   if (!event) return null;
   const access = getEventAccess(user, event);
   return access.relationship ? { event, access } : null;

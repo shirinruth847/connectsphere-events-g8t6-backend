@@ -32,6 +32,11 @@ const DOMAIN_ERRORS = Object.freeze({
   EVENT_READ_ONLY: [403, "You can view this request, but only its owner can ask for changes."],
   EVENT_NOT_EDITABLE_IN_STATUS: [403, "This event cannot be edited in its current status."],
   FIELD_NOT_EDITABLE: [403, "You cannot change some of these fields. Nothing was saved."],
+  INVALID_COORDINATOR: [409, "The selected user is not an active event coordinator."],
+  COORDINATOR_CONFLICT: [409, "The selected coordinator is already assigned to an overlapping event."],
+  COORDINATOR_UNCHANGED: [409, "The selected coordinator is already assigned to this event."],
+  ASSIGNMENT_CHANGED: [409, "This event was reassigned by someone else. Refresh and try again."],
+  EVENT_NOT_REASSIGNABLE: [404, "Event request not found."],
 });
 
 // ---------- helpers ----------
@@ -353,6 +358,101 @@ const getEventHistory = async (req, res, next) => {
   }
 };
 
+const listAssignedEvents = async (req, res, next) => {
+  try {
+    const events = await eventModel.findCoordinatorEvents(req.user.user_id);
+    return res.status(200).json({ events });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+const assignCoordinator = async (req, res, next) => {
+  try {
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return eventNotFound(res);
+    const body = req.body;
+    if (
+      !body || typeof body !== "object" || Array.isArray(body) ||
+      Object.keys(body).length !== 1 ||
+      !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
+      !Number.isSafeInteger(body.coordinatorId) || body.coordinatorId < 1
+    ) {
+      return validationFailed(res, { coordinatorId: "Send a positive integer coordinatorId." });
+    }
+    const assignedEvent = await eventModel.assignCoordinator({ eventId, coordinatorId: body.coordinatorId, leadId: req.user.user_id });
+    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+const listLeadAssignments = async (req, res, next) => {
+  try {
+    const assignments = await eventModel.findLeadAssignments();
+    return res.status(200).json({ assignments });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+const listUnassignedEvents = async (req, res, next) => {
+  try {
+    const events = await eventModel.findUnassignedSubmittedEvents();
+    return res.status(200).json({ events: events.map((event) => eventModel.toApi(event)) });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+const getCoordinatorAvailability = async (req, res, next) => {
+  try {
+    const coordinators = await eventModel.findCoordinatorAvailability();
+    return res.status(200).json({ coordinators });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+const reassignCoordinator = async (req, res, next) => {
+  try {
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return eventNotFound(res);
+    const body = req.body;
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      Object.keys(body).length !== 2 ||
+      !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
+      !Number.isSafeInteger(body.coordinatorId) ||
+      body.coordinatorId < 1 ||
+      !Object.prototype.hasOwnProperty.call(body, "expectedCoordinatorId") ||
+      !Number.isSafeInteger(body.expectedCoordinatorId) ||
+      body.expectedCoordinatorId < 1
+    ) {
+      return validationFailed(res, {
+        coordinatorId: "Send a positive integer coordinatorId.",
+        expectedCoordinatorId: "Send the coordinatorId currently shown as assigned.",
+      });
+    }
+
+    const result = await eventModel.reassignCoordinator({
+      eventId,
+      coordinatorId: body.coordinatorId,
+      expectedCoordinatorId: body.expectedCoordinatorId,
+      leadId: req.user.user_id,
+    });
+    return res.status(200).json({
+      message: "Event coordinator reassigned successfully.",
+      event: result.event,
+      coordinator: result.coordinator,
+    });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
 module.exports = {
   createAndSubmit,
   createDraft,
@@ -362,4 +462,10 @@ module.exports = {
   listMyEventRequests,
   getEventRequest,
   getEventHistory,
+  listAssignedEvents,
+  assignCoordinator,
+  listLeadAssignments,
+  listUnassignedEvents,
+  getCoordinatorAvailability,
+  reassignCoordinator,
 };

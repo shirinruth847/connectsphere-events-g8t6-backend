@@ -9,7 +9,7 @@ jest.mock("../../model/eventModel", () => {
     ...actual,
     saveDraft: jest.fn(),
     updateEventDetails: jest.fn(),
-    findEventForViewer: jest.fn(),
+    findVisibleEvent: jest.fn(),
     findValidationContext: jest.fn(),
   };
 });
@@ -75,7 +75,7 @@ beforeEach(() => {
 describe("GET /api/events/:id (AC1)", () => {
   test("[SPM-33-TC-01] should_return_the_full_draft_with_edit_permissions_when_the_owner_opens_it", async () => {
     asOwner();
-    eventModel.findEventForViewer.mockResolvedValue(draftRow());
+    eventModel.findVisibleEvent.mockResolvedValue(draftRow());
 
     const res = await send("get", "/api/events/42");
 
@@ -91,7 +91,7 @@ describe("GET /api/events/:id (AC1)", () => {
 
   test("[SPM-33-TC-03] should_return_a_read_only_view_without_staff_fields_when_a_colleague_opens_a_submitted_event", async () => {
     asColleague();
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
 
     const res = await send("get", "/api/events/42");
 
@@ -110,7 +110,7 @@ describe("GET /api/events/:id (AC1)", () => {
   });
 
   test("[SPM-33-TC-05] should_return_the_coordination_view_when_the_assigned_coordinator_opens_the_event", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ organiser: { user_id: ORGANISER_ID, name: "Organiser A" } }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ organiser: { user_id: ORGANISER_ID, name: "Organiser A" } }));
 
     const res = await send("get", "/api/events/42");
 
@@ -134,7 +134,7 @@ describe("GET /api/events/:id (AC1)", () => {
     "[SPM-33-TC-06] should_return_404_when_%s_has_no_viewing_scope_for_the_event",
     async (role) => {
       signedInAs(role, 99);
-      eventModel.findEventForViewer.mockResolvedValue(null);
+      eventModel.findVisibleEvent.mockResolvedValue(null);
 
       const res = await send("get", "/api/events/42");
 
@@ -145,7 +145,7 @@ describe("GET /api/events/:id (AC1)", () => {
 
   test("[SPM-33-TC-06] should_return_404_when_a_row_is_returned_for_a_coordinator_who_is_not_assigned", async () => {
     signedInAs("COORDINATOR", 99);
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
 
     const res = await send("get", "/api/events/42");
 
@@ -156,7 +156,7 @@ describe("GET /api/events/:id (AC1)", () => {
 describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
   test("[SPM-33-TC-07] should_save_the_draft_with_the_loaded_version_when_the_owner_saves_manually", async () => {
     asOwner();
-    eventModel.findEventForViewer.mockResolvedValue(draftRow());
+    eventModel.findVisibleEvent.mockResolvedValue(draftRow());
     eventModel.saveDraft.mockResolvedValue({ event: draftRow({ expected_attendance: 200, version: 4 }), replayed: false });
 
     const res = await send("put", "/api/events/42", { expectedAttendance: 200, version: 3 });
@@ -176,7 +176,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
   test("[SPM-33-TC-09] should_return_403_pointing_to_a_change_request_when_the_owner_edits_a_submitted_event", async () => {
     asOwner();
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
 
     const res = await send("put", "/api/events/42", { title: "New title", version: 3 });
 
@@ -188,7 +188,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
   test("[SPM-33-AC3] should_return_403_when_a_same_organisation_organiser_edits_a_submitted_event", async () => {
     asColleague();
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
 
     const res = await send("put", "/api/events/42", { title: "Taken over", version: 3 });
 
@@ -201,7 +201,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
     "[SPM-33-AC6] should_return_403_without_offering_a_change_request_when_the_owner_edits_a_%s_event",
     async (status) => {
       asOwner();
-      eventModel.findEventForViewer.mockResolvedValue(eventRow({ status }));
+      eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status }));
 
       const res = await send("put", "/api/events/42", { title: "New title", version: 3 });
 
@@ -212,7 +212,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
   test("[SPM-33-AC6] should_return_403_when_the_owner_sends_a_system_field_with_a_draft_save", async () => {
     asOwner();
-    eventModel.findEventForViewer.mockResolvedValue(draftRow());
+    eventModel.findVisibleEvent.mockResolvedValue(draftRow());
 
     const res = await send("put", "/api/events/42", { title: "Gala", status: "CONFIRMED", version: 3 });
 
@@ -224,7 +224,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
   test("[SPM-33-AC3] should_return_403_when_the_draft_is_submitted_between_the_read_and_the_write", async () => {
     asOwner();
-    eventModel.findEventForViewer.mockResolvedValue(draftRow());
+    eventModel.findVisibleEvent.mockResolvedValue(draftRow());
     eventModel.saveDraft.mockRejectedValue(domainError("EVENT_NOT_DRAFT"));
 
     const res = await send("put", "/api/events/42", { title: "Gala", version: 3 });
@@ -235,7 +235,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
   test("[SPM-33-AC3] should_return_403_on_the_draft_route_when_a_colleague_edits_a_submitted_event", async () => {
     asColleague();
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
 
     const res = await send("put", "/api/events/42/draft", { title: "Taken over" }, {});
 
@@ -246,7 +246,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
   test("[SPM-33-AC7] should_pass_an_optional_version_and_key_on_the_draft_route", async () => {
     asOwner();
-    eventModel.findEventForViewer.mockResolvedValue(draftRow());
+    eventModel.findVisibleEvent.mockResolvedValue(draftRow());
     eventModel.saveDraft.mockResolvedValue({ event: draftRow({ version: 4 }), replayed: true });
 
     const res = await send("put", "/api/events/42/draft", { purpose: "Reunion", version: "3" });
@@ -260,7 +260,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
   test("[SPM-33-AC7] should_return_400_when_the_draft_route_gets_a_malformed_idempotency_key", async () => {
     asOwner();
-    eventModel.findEventForViewer.mockResolvedValue(draftRow());
+    eventModel.findVisibleEvent.mockResolvedValue(draftRow());
 
     const res = await send("put", "/api/events/42/draft", { purpose: "Reunion" }, { "Idempotency-Key": "short" });
 
@@ -272,7 +272,7 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
 describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () => {
   test("[SPM-33-TC-10] should_save_ordinary_fields_when_the_event_is_under_review", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     eventModel.updateEventDetails.mockResolvedValue({
       event: eventRow({ description: "Updated description.", version: 4 }),
       replayed: false,
@@ -299,7 +299,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   test.each(["UNDER_REVIEW", "PLANNING", "SAFETY_REVIEW", "CONFIRMED", "PREPARATION"])(
     "[SPM-33-AC4] should_allow_the_edit_when_the_event_is_%s",
     async (status) => {
-      eventModel.findEventForViewer.mockResolvedValue(eventRow({ status }));
+      eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status }));
       eventModel.updateEventDetails.mockResolvedValue({ event: eventRow({ status, version: 4 }), replayed: false });
 
       const res = await send("put", "/api/events/42", { title: "Renamed", version: 3 });
@@ -311,7 +311,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   test.each(["SUBMITTED", "AWAITING_CLARIFICATION", "COMPLETED", "REJECTED", "CANCELLED", "APPROVED"])(
     "[SPM-33-TC-12] should_return_403_without_saving_when_the_event_is_%s",
     async (status) => {
-      eventModel.findEventForViewer.mockResolvedValue(eventRow({ status }));
+      eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status }));
 
       const res = await send("put", "/api/events/42", { description: "Updated description.", version: 3 });
 
@@ -322,7 +322,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   );
 
   test("[SPM-33-TC-11] should_reject_the_whole_request_when_a_significant_field_is_sent_with_an_ordinary_one", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
 
     const res = await send("put", "/api/events/42", {
       title: "Renamed",
@@ -343,7 +343,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
     ["coordinatorId", 99, "This field is set by the system."],
     ["isPublished", true, "This field is set by the system."],
   ])("[SPM-33-AC4] should_return_403_when_the_coordinator_sends_%s", async (field, value, message) => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
 
     const res = await send("put", "/api/events/42", { title: "Renamed", [field]: value, version: 3 });
 
@@ -353,7 +353,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   });
 
   test("[SPM-33-TC-16] should_return_the_title_error_without_saving_when_the_title_is_blank", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
 
     const res = await send("put", "/api/events/42", { title: "  ", version: 3 });
 
@@ -367,7 +367,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   });
 
   test("[SPM-33-AC6] should_answer_403_before_400_when_the_status_blocks_an_invalid_edit", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ status: "AWAITING_CLARIFICATION" }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "AWAITING_CLARIFICATION" }));
 
     const res = await send("put", "/api/events/42", { title: "" }, {});
 
@@ -383,7 +383,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
     ["the auto-save flag", { title: "Renamed", isAutoSave: true, version: 3 }, { "Idempotency-Key": KEY }, "isAutoSave"],
     ["no field to change", { version: 3 }, { "Idempotency-Key": KEY }, "body"],
   ])("[SPM-33-AC6] should_return_400_without_saving_when_the_request_has_%s", async (_label, body, headers, field) => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
 
     const res = await send("put", "/api/events/42", body, headers);
 
@@ -394,7 +394,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   });
 
   test("[SPM-33-AC6] should_return_400_when_the_body_is_not_an_object", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
 
     const res = await send("put", "/api/events/42", ["title"]);
 
@@ -403,7 +403,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   });
 
   test("[SPM-33-TC-17] should_return_409_with_the_current_values_when_the_event_changed_since_it_was_loaded", async () => {
-    eventModel.findEventForViewer
+    eventModel.findVisibleEvent
       .mockResolvedValueOnce(eventRow())
       .mockResolvedValueOnce(eventRow({ description: "Saved from the other tab.", version: 4 }));
     eventModel.updateEventDetails.mockRejectedValue(domainError("EVENT_VERSION_CONFLICT"));
@@ -418,7 +418,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   });
 
   test("[SPM-33-TC-13] should_return_404_when_the_coordinator_is_reassigned_between_the_read_and_the_write", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     eventModel.updateEventDetails.mockRejectedValue(domainError("EVENT_NOT_FOUND"));
 
     const res = await send("put", "/api/events/42", { title: "Renamed", version: 3 });
@@ -428,7 +428,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   });
 
   test("[SPM-33-TC-13] should_return_404_without_event_details_when_a_version_conflict_follows_a_reassignment", async () => {
-    eventModel.findEventForViewer.mockResolvedValueOnce(eventRow()).mockResolvedValueOnce(null);
+    eventModel.findVisibleEvent.mockResolvedValueOnce(eventRow()).mockResolvedValueOnce(null);
     eventModel.updateEventDetails.mockRejectedValue(domainError("EVENT_VERSION_CONFLICT"));
 
     const res = await send("put", "/api/events/42", { title: "Renamed", version: 3 });
@@ -438,7 +438,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   });
 
   test("[SPM-33-TC-18] should_mark_the_response_when_the_same_request_is_retried_with_the_same_key", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ version: 4 }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ version: 4 }));
     eventModel.updateEventDetails.mockResolvedValue({ event: eventRow({ version: 4 }), replayed: true });
 
     const res = await send("put", "/api/events/42", { description: "Updated description.", version: 3 });
@@ -450,7 +450,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   // A replay is only reached while the event is still editable, so the permissions in
   // a replayed response can never be staler than the status check that precedes it.
   test("[SPM-33-TC-18] should_answer_403_rather_than_replay_when_a_retry_arrives_after_the_event_stopped_being_editable", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ status: "COMPLETED", version: 6 }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "COMPLETED", version: 6 }));
 
     const res = await send("put", "/api/events/42", { description: "Updated description.", version: 3 });
 
@@ -464,7 +464,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
     ["FIELD_NOT_EDITABLE", 403],
     ["IDEMPOTENCY_KEY_REUSED", 409],
   ])("[SPM-33-AC6] should_return_%s_when_the_database_refuses_the_edit", async (code, status) => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     eventModel.updateEventDetails.mockRejectedValue(domainError(code));
 
     const res = await send("put", "/api/events/42", { title: "Renamed", version: 3 });
@@ -474,7 +474,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
   });
 
   test("[SPM-33-TC-21] should_return_field_errors_when_the_database_rejects_the_values", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     eventModel.updateEventDetails.mockRejectedValue(domainError("VALIDATION_FAILED", { title: MESSAGES.titleTooLong }));
 
     const res = await send("put", "/api/events/42", { title: "Renamed", version: 3 });
@@ -489,7 +489,7 @@ describe("PUT /api/events/:id as other roles (AC5)", () => {
     "[SPM-33-TC-14] should_return_404_without_saving_when_%s_sends_a_direct_update",
     async (role) => {
       signedInAs(role, 99);
-      eventModel.findEventForViewer.mockResolvedValue(null);
+      eventModel.findVisibleEvent.mockResolvedValue(null);
 
       const res = await send("put", "/api/events/42", {
         title: "Renamed",
@@ -513,7 +513,7 @@ describe("PUT /api/events/:id as other roles (AC5)", () => {
 
       expect(res.status).toBe(403);
       expect(res.body.code).toBe("FORBIDDEN");
-      expect(eventModel.findEventForViewer).not.toHaveBeenCalled();
+      expect(eventModel.findVisibleEvent).not.toHaveBeenCalled();
       expectNothingSaved();
     }
   );
@@ -523,7 +523,7 @@ describe("PUT /api/events/:id as other roles (AC5)", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.code).toBe("UNAUTHENTICATED");
-    expect(eventModel.findEventForViewer).not.toHaveBeenCalled();
+    expect(eventModel.findVisibleEvent).not.toHaveBeenCalled();
   });
 });
 
@@ -532,7 +532,7 @@ describe("GET /api/events/:id/history (AC8)", () => {
 
   test("[SPM-33-TC-19] should_ask_for_draft_and_organiser_safe_entries_but_no_staff_entries_when_the_owner_opens_history", async () => {
     asOwner();
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     activityModel.findEventHistory.mockResolvedValue(page);
 
     const res = await send("get", "/api/events/42/history?limit=20");
@@ -548,7 +548,7 @@ describe("GET /api/events/:id/history (AC8)", () => {
 
   test("[SPM-33-TC-03] should_ask_for_organiser_safe_entries_only_when_a_colleague_opens_history", async () => {
     asColleague();
-    eventModel.findEventForViewer.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
     activityModel.findEventHistory.mockResolvedValue(page);
 
     await send("get", "/api/events/42/history");
@@ -557,7 +557,7 @@ describe("GET /api/events/:id/history (AC8)", () => {
   });
 
   test("[SPM-33-TC-05] should_ask_for_history_since_submission_including_staff_entries_when_the_assigned_coordinator_opens_it", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     activityModel.findEventHistory.mockResolvedValue(page);
 
     await send("get", "/api/events/42/history");
@@ -569,7 +569,7 @@ describe("GET /api/events/:id/history (AC8)", () => {
   });
 
   test("[SPM-33-TC-06] should_return_404_without_reading_history_when_the_event_is_not_visible", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(null);
+    eventModel.findVisibleEvent.mockResolvedValue(null);
 
     const res = await send("get", "/api/events/42/history");
 
@@ -578,7 +578,7 @@ describe("GET /api/events/:id/history (AC8)", () => {
   });
 
   test("[SPM-33-AC8] should_return_400_when_the_history_cursor_cannot_be_decoded", async () => {
-    eventModel.findEventForViewer.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     activityModel.findEventHistory.mockRejectedValue(domainError("INVALID_CURSOR"));
 
     const res = await send("get", "/api/events/42/history?cursor=abc");

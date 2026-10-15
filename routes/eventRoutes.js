@@ -10,6 +10,12 @@ const {
   listMyEventRequests,
   getEventRequest,
   getEventHistory,
+  listAssignedEvents,
+  assignCoordinator,
+  listLeadAssignments,
+  listUnassignedEvents,
+  getCoordinatorAvailability,
+  reassignCoordinator,
 } = require("../controller/eventController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
@@ -18,6 +24,8 @@ const { USER_ROLES } = require("../config/roles");
 
 // Applied per route (not router-wide) so coordinator routes can be added here later.
 const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
+const coordinatorOnly = [requireAuth, requireRole(USER_ROLES.COORDINATOR)];
+const leadOnly = [requireAuth, requireRole(USER_ROLES.COORDINATOR_LEAD)];
 // No role gate on these: requireVisibleEvent answers "not found" unless the event is
 // inside the user's viewing scope, rather than a role error that confirms it exists
 // (SPM-33). It runs last in each chain, so earlier checks keep their precedence.
@@ -27,6 +35,12 @@ const anySignedInUser = [requireAuth];
 router.post("/", organiserOnly, createAndSubmit);
 router.post("/drafts", organiserOnly, createDraft);
 router.get("/mine", organiserOnly, validateCursorPagination, listMyEventRequests); // must stay above "/:id"
+router.get("/unassigned", leadOnly, listUnassignedEvents); // must stay above "/:id"
+router.get("/coordinator-availability", leadOnly, getCoordinatorAvailability); // Lead-only cross-coordinator schedule
+router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/:id"
+router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
+router.post("/:id/coordinator", leadOnly, assignCoordinator);
+router.patch("/:id/coordinator", leadOnly, reassignCoordinator);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
