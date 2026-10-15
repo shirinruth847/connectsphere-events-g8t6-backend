@@ -180,7 +180,8 @@ const computeRegistrationAvailability = ({
 const LIST_ATTENDEE_DISCOVERY_SELECT =
   "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name)";
 
-const ATTENDEE_DISCOVERY_PUBLISH_FILTER = 'is_published.eq.true,status.in.(CONFIRMED,PREPARATION),end_datetime.gt."' + new Date().toISOString() + '"';
+// PROVISIONAL Q6: add PREPARATION once the event_status migration includes it.
+const ATTENDEE_DISCOVERY_STATUSES = ["CONFIRMED"];
 
 const toAttendeeDiscoveryItem = (row) => {
   const location = null;
@@ -626,7 +627,12 @@ const findOrganiserEventRequests = async (user, { limit, cursor = null, status =
 
 const findPublishedAttendeeEvents = async (user, { limit, cursor = null }) => {
   const after = decodeCursor(cursor);
-  let query = supabase.from("event").select(LIST_ATTENDEE_DISCOVERY_SELECT).eq("is_published", true).in("status", ["CONFIRMED", "PREPARATION"]).gt("end_datetime", new Date().toISOString());
+  let query = supabase
+    .from("event")
+    .select(LIST_ATTENDEE_DISCOVERY_SELECT)
+    .eq("is_published", true)
+    .in("status", ATTENDEE_DISCOVERY_STATUSES)
+    .gt("end_datetime", new Date().toISOString());
   if (after) {
     query = query.or(
       `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`
@@ -646,17 +652,28 @@ const findPublishedAttendeeEvents = async (user, { limit, cursor = null }) => {
 };
 
 const findPublishedAttendeeEvent = async (eventId) => {
-  const { data, error } = await supabase
-    .from("event")
-    .select(`${LIST_ATTENDEE_DISCOVERY_SELECT},registered_count:registration(count)`) 
-    .eq("is_published", true)
-    .in("status", ["CONFIRMED", "PREPARATION"])
-    .eq("event_id", eventId)
-    .maybeSingle();
+  const [eventResult, registrationResult] = await Promise.all([
+    supabase
+      .from("event")
+      .select(LIST_ATTENDEE_DISCOVERY_SELECT)
+      .eq("is_published", true)
+      .in("status", ATTENDEE_DISCOVERY_STATUSES)
+      .gt("end_datetime", new Date().toISOString())
+      .eq("event_id", eventId)
+      .eq("registration.registration_status", "REGISTERED")
+      .maybeSingle(),
+    supabase
+      .from("registration")
+      .select("event_id", { count: "exact", head: true })
+      .eq("event_id", eventId)
+      .eq("registration_status", "REGISTERED"),
+  ]);
+
+  const { data, error } = eventResult;
   if (error) throw dbError(error);
   if (!data) return null;
 
-  const registeredCount = Array.isArray(data.registration) && data.registration.length > 0 ? data.registration[0].count : 0;
+  const registeredCount = registrationResult?.data?.length ?? 0;
   return {
     ...toAttendeeDetail({ ...data, registered_count: registeredCount }),
     registrationAvailability: computeRegistrationAvailability({
