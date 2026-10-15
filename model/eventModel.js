@@ -660,7 +660,6 @@ const findPublishedAttendeeEvent = async (eventId) => {
       .in("status", ATTENDEE_DISCOVERY_STATUSES)
       .gt("end_datetime", new Date().toISOString())
       .eq("event_id", eventId)
-      .eq("registration.registration_status", "REGISTERED")
       .maybeSingle(),
     supabase
       .from("registration")
@@ -673,7 +672,7 @@ const findPublishedAttendeeEvent = async (eventId) => {
   if (error) throw dbError(error);
   if (!data) return null;
 
-  const registeredCount = registrationResult?.data?.length ?? 0;
+  const registeredCount = registrationResult?.count ?? 0;
   return {
     ...toAttendeeDetail({ ...data, registered_count: registeredCount }),
     registrationAvailability: computeRegistrationAvailability({

@@ -293,7 +293,8 @@ describe("Attendee discovery and registration availability", () => {
 
     await eventModel.findPublishedAttendeeEvent(42);
 
-    expect(query.eq).toHaveBeenCalledWith("registration.registration_status", "REGISTERED");
+    expect(query.eq).toHaveBeenCalledWith("event_id", 42);
+    expect(query.eq).toHaveBeenCalledWith("registration_status", "REGISTERED");
   });
 
   test("[SPM-34-AC3] should_report_not_enabled_when_registration_is_disabled", () => {
