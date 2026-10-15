@@ -97,6 +97,23 @@ describe("activityModel (AC8)", () => {
     expect(() => activityModel.decodeHistoryCursor(cursor)).toThrow(expect.objectContaining({ code: "INVALID_CURSOR" }));
   });
 
+  test("[SPM-33-AC8] should_raise_a_cursor_error_the_controller_answers_with_400", () => {
+    // handleError maps only errors named EventRequestError to a 400.
+    expect(() => activityModel.decodeHistoryCursor("not-a-cursor")).toThrow(
+      expect.objectContaining({ name: "EventRequestError", code: "INVALID_CURSOR", message: "INVALID_CURSOR" })
+    );
+  });
+
+  test.each([
+    ["plain text from older rows", "Ramp access", "Ramp access"],
+    ["text that only looks like a list", "[Ramp access", "[Ramp access"],
+    ["no value", null, null],
+    ["a missing value", undefined, null],
+  ])("[SPM-33-AC8] should_show_accessibility_needs_saved_as_%s_unchanged", (_label, stored, shown) => {
+    const [change] = activityModel.toChangeList({ accessibilityNeeds: { before: stored, after: "[]" } });
+    expect(change).toEqual({ field: "accessibilityNeeds", before: shown, after: [] });
+  });
+
   test("[SPM-33-TC-07] should_show_changed_values_in_api_shapes_and_a_stable_order", () => {
     const changes = activityModel.toChangeList({
       equipmentRequirements: { before: [], after: [{ equipment_id: 3, quantity: 2 }] },

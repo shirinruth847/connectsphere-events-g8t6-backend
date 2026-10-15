@@ -3,6 +3,7 @@
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
 const {
+  EVENT_STATUS,
   NO_LAYOUT_PREFERENCE,
   STATUS_LABELS,
   STATUS_NOTES,
@@ -107,7 +108,7 @@ const formatRequestId = (eventId) => `REQ-${String(eventId).padStart(6, "0")}`;
 // What a request is waiting for, when that is worth telling the organiser. A
 // submitted request waits in the unassigned queue until a Lead assigns it.
 const toStatusNote = (row) =>
-  row.status === "SUBMITTED" && row.coordinator_id == null ? STATUS_NOTES.WAITING_FOR_COORDINATOR : null;
+  row.status === EVENT_STATUS.SUBMITTED && row.coordinator_id == null ? STATUS_NOTES.WAITING_FOR_COORDINATOR : null;
 
 const parseAccessibility = (value) => {
   if (typeof value !== "string" || !value.startsWith("[")) return value;
@@ -715,6 +716,8 @@ module.exports = {
   toListItem,
   formatRequestId,
   toStatusNote,
+  parseAccessibility,
+  eventRequestError,
   hashRequest,
   toRequirementPayload,
   toEventRequestError,

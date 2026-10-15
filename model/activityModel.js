@@ -1,6 +1,7 @@
 // Reads of the append-only change history (activity_log). Entries are written
 // inside the database functions that make each change, never from here.
 const supabase = require("../config/supabase");
+const { parseAccessibility, eventRequestError } = require("./eventModel");
 
 const HISTORY_SELECT = "log_id,user_id,action,details,timestamp,actor_role,changes,audience,actor:user(name)";
 const MAX_LOG_ID = 2147483647;
@@ -21,13 +22,6 @@ const FIELD_ORDER = [
   "registrationCapacity",
 ];
 
-const invalidCursor = () => {
-  const error = new Error("INVALID_CURSOR");
-  error.name = "EventRequestError";
-  error.code = "INVALID_CURSOR";
-  return error;
-};
-
 const encodeHistoryCursor = (row) => Buffer.from(JSON.stringify({ logId: row.log_id })).toString("base64url");
 
 const decodeHistoryCursor = (value) => {
@@ -39,20 +33,14 @@ const decodeHistoryCursor = (value) => {
     decoded = null;
   }
   if (!decoded || !Number.isSafeInteger(decoded.logId) || decoded.logId < 1 || decoded.logId > MAX_LOG_ID) {
-    throw invalidCursor();
+    throw eventRequestError("INVALID_CURSOR");
   }
   return decoded.logId;
 };
 
 // Stored values use database shapes; history shows them the way the event API does.
 const toApiValue = (field, value) => {
-  if (field === "accessibilityNeeds" && typeof value === "string" && value.startsWith("[")) {
-    try {
-      return JSON.parse(value);
-    } catch {
-      return value;
-    }
-  }
+  if (field === "accessibilityNeeds") return parseAccessibility(value) ?? null;
   if (field === "equipmentRequirements" && Array.isArray(value)) {
     return value.map((item) => ({ equipmentId: item.equipment_id, quantity: item.quantity }));
   }

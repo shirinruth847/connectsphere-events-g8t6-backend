@@ -249,6 +249,18 @@ describe("viewing by role and relationship (AC1)", () => {
       expect((await call("get", `/api/events/${eventId}/history`, key)).status).toBe(404);
     }
   );
+
+  test("[SPM-33-AC8] should_answer_400_for_a_history_cursor_the_api_did_not_issue", async () => {
+    // Well-formed base64url, so it passes the route's format check and reaches the model.
+    const cursor = Buffer.from(JSON.stringify({ logId: "8" })).toString("base64url");
+
+    const res = await call("get", `/api/events/${fixtures.events.ownSubmitted}/history?cursor=${cursor}`, "coordinator");
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual(
+      expect.objectContaining({ code: "VALIDATION_FAILED", fields: { cursor: "Invalid page cursor." } })
+    );
+  });
 });
 
 describe("organiser edits (AC2, AC3, AC7)", () => {
