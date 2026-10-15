@@ -5,6 +5,7 @@ const supabase = require("../config/supabase");
 const {
   NO_LAYOUT_PREFERENCE,
   STATUS_LABELS,
+  STATUS_NOTES,
   EVENT_RELATIONSHIP,
   HISTORY_AUDIENCE,
   EVENT_FIELD_GROUPS,
@@ -103,6 +104,11 @@ const hashRequest = (row, requirements, scope = []) =>
 
 const formatRequestId = (eventId) => `REQ-${String(eventId).padStart(6, "0")}`;
 
+// What a request is waiting for, when that is worth telling the organiser. A
+// submitted request waits in the unassigned queue until a Lead assigns it.
+const toStatusNote = (row) =>
+  row.status === "SUBMITTED" && row.coordinator_id == null ? STATUS_NOTES.WAITING_FOR_COORDINATOR : null;
+
 const parseAccessibility = (value) => {
   if (typeof value !== "string" || !value.startsWith("[")) return value;
   try {
@@ -123,6 +129,7 @@ const toApi = (row, viewerUserId) => {
     requestId: formatRequestId(row.event_id),
     status: row.status,
     statusLabel: STATUS_LABELS[row.status] || row.status,
+    statusNote: toStatusNote(row),
     title: row.title,
     purpose: row.purpose,
     description: row.description,
@@ -180,6 +187,7 @@ const toListItem = (row, viewerUserId) => ({
   requestId: formatRequestId(row.event_id),
   status: row.status,
   statusLabel: STATUS_LABELS[row.status] || row.status,
+  statusNote: toStatusNote(row),
   title: row.title,
   startDatetime: row.start_datetime,
   endDatetime: row.end_datetime,
@@ -706,6 +714,7 @@ module.exports = {
   toEventView,
   toListItem,
   formatRequestId,
+  toStatusNote,
   hashRequest,
   toRequirementPayload,
   toEventRequestError,

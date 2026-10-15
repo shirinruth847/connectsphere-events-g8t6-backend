@@ -105,7 +105,7 @@ describe("authentication and role checks", () => {
 });
 
 describe("POST /api/events (SPM-35)", () => {
-  test("[SPM-35-TC-001] should_return_201_with_request_id_and_pending_approval_when_request_is_valid", async () => {
+  test("[SPM-35-TC-001] should_return_201_with_request_id_and_submitted_label_when_request_is_valid", async () => {
     eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED", title: "Tech Conference 2026" }), replayed: false });
 
     const res = await send("post", "/api/events", validRequest(), { "Idempotency-Key": KEY });
@@ -113,7 +113,13 @@ describe("POST /api/events (SPM-35)", () => {
     expect(res.status).toBe(201);
     expect(res.body.message).toBe("Your event request has been submitted successfully.");
     expect(res.body.event).toEqual(
-      expect.objectContaining({ eventId: 42, requestId: "REQ-000042", status: "SUBMITTED", statusLabel: "Pending Approval" })
+      expect.objectContaining({
+        eventId: 42,
+        requestId: "REQ-000042",
+        status: "SUBMITTED",
+        statusLabel: "Submitted",
+        statusNote: "Waiting for a coordinator",
+      })
     );
     expect(res.headers["idempotent-replayed"]).toBeUndefined();
     expect(eventModel.submitEvent).toHaveBeenCalledWith(
@@ -337,7 +343,7 @@ describe("PUT /api/events/:id/submit (SPM-37)", () => {
     const res = await send("put", "/api/events/42/submit", validRequest());
 
     expect(res.status).toBe(200);
-    expect(res.body.event.statusLabel).toBe("Pending Approval");
+    expect(res.body.event.statusLabel).toBe("Submitted");
     expect(eventModel.submitEvent).toHaveBeenCalledWith(expect.objectContaining({ eventId: 42, organiserId: ORGANISER_ID }));
   });
 });

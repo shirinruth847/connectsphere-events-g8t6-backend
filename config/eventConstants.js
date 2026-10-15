@@ -11,10 +11,18 @@ const EVENT_STATUS = Object.freeze({
   CANCELLED: "CANCELLED",
 });
 
-// What the frontend shows for each stored status (SPM-35: dashboard shows "Pending Approval").
+// Organiser-facing label for each stored status (Master section 3.5).
 const STATUS_LABELS = Object.freeze({
   DRAFT: "Draft",
-  SUBMITTED: "Pending Approval",
+  SUBMITTED: "Submitted",
+  UNDER_REVIEW: "Under Review",
+});
+
+// Organiser-facing notes that explain what a request is waiting for, in the
+// spirit of the "flag" column of Master section 3.5 (this note is an SPM-33
+// addition the Master does not list yet). Shown only while the note is true.
+const STATUS_NOTES = Object.freeze({
+  WAITING_FOR_COORDINATOR: "Waiting for a coordinator",
 });
 
 const NO_LAYOUT_PREFERENCE = "NO_PREFERENCE";
@@ -88,6 +96,7 @@ const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
 module.exports = {
   EVENT_STATUS,
   STATUS_LABELS,
+  STATUS_NOTES,
   NO_LAYOUT_PREFERENCE,
   MIN_LEAD_TIME_HOURS,
   EVENT_RELATIONSHIP,

@@ -146,6 +146,29 @@ describe("toEventRequestError (database failures become client errors)", () => {
   });
 });
 
+describe("organiser status note (SPM-33)", () => {
+  test("[SPM-33-REVIEW] should_say_a_submitted_request_is_waiting_for_a_coordinator_until_one_is_assigned", () => {
+    expect(eventModel.toStatusNote({ status: "SUBMITTED", coordinator_id: null })).toBe("Waiting for a coordinator");
+    expect(eventModel.toApi({ event_id: 7, status: "SUBMITTED", coordinator_id: null })).toEqual(
+      expect.objectContaining({ statusLabel: "Submitted", statusNote: "Waiting for a coordinator" })
+    );
+  });
+
+  test.each([
+    ["a submitted request with a coordinator", { status: "SUBMITTED", coordinator_id: 5 }],
+    ["a draft", { status: "DRAFT", coordinator_id: null }],
+    ["a request under review", { status: "UNDER_REVIEW", coordinator_id: 5 }],
+  ])("[SPM-33-REVIEW] should_not_add_a_note_for_%s", (_label, row) => {
+    expect(eventModel.toStatusNote(row)).toBeNull();
+  });
+
+  test("[SPM-33-REVIEW] should_label_an_assigned_request_under_review", () => {
+    expect(eventModel.toApi({ event_id: 7, status: "UNDER_REVIEW", coordinator_id: 5 })).toEqual(
+      expect.objectContaining({ statusLabel: "Under Review", statusNote: null })
+    );
+  });
+});
+
 describe("reads", () => {
   test("[TC-AUTH-013] should_filter_by_event_and_visibility_when_loading_one_request", async () => {
     const query = queryReturning({ data: null, error: null });
@@ -192,7 +215,8 @@ describe("reads", () => {
       expect.objectContaining({
         eventId: 42,
         requestId: "REQ-000042",
-        statusLabel: "Pending Approval",
+        statusLabel: "Submitted",
+        statusNote: "Waiting for a coordinator",
         isOwner: false,
         organisation: { organisationId: 3, name: "Org" },
       })

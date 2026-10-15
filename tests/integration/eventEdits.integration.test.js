@@ -2,7 +2,8 @@
 // development database. They cover what mocks cannot: the row lock that decides
 // between two saves, reassignment racing an edit, idempotent retries, the history
 // columns filled by the database and the privileges that keep history append-only.
-// Needs both spm33 migrations (event_edit_history, owner_history_and_edit_notice).
+// Needs the four spm33 migrations (event_edit_history, owner_history_and_edit_notice,
+// request_organisation_and_history_retention, assignment_enters_under_review).
 // Tests share fixture events and run
 // in file order; every record is listed in the run manifest and removed afterwards.
 const crypto = require("crypto");
@@ -184,6 +185,37 @@ describe("viewing by role and relationship (AC1)", () => {
     expect(res.status).toBe(404);
   });
 
+  // The fixtures above are placed in an organisation directly; this one goes through
+  // the API, so it proves the database files a real request under the organiser's
+  // organisation (SPM-33 review finding: nothing set organisation_id before).
+  test("[SPM-33-TC-03] should_show_a_request_submitted_through_the_api_to_a_same_organisation_organiser", async () => {
+    const created = await call(
+      "post",
+      "/api/events",
+      "organiserA",
+      {
+        title: titled("submitted through the API"),
+        purpose: "Shared with the organisation once submitted.",
+        description: "Created by the SPM-33 organisation test.",
+        startDatetime: inDays(8),
+        endDatetime: inDays(8.1),
+        expectedAttendance: 30,
+        preferredLayoutType: "NO_PREFERENCE",
+      },
+      newKey()
+    );
+    expect(created.status).toBe(201);
+    const { eventId } = created.body.event;
+    recordFixtureIds(runId, "eventIds", [eventId]);
+
+    const stored = await rows(supabase.from("event").select("organisation_id").eq("event_id", eventId).single(), "organisation lookup");
+    expect(stored.organisation_id).toBe(fixtures.organisations.A);
+    expect(await loadEvent("organiserA2", eventId)).toEqual(
+      expect.objectContaining({ isOwner: false, viewerRelationship: "ORGANISATION_MEMBER" })
+    );
+    expect((await call("get", `/api/events/${eventId}`, "organiserB")).status).toBe(404);
+  });
+
   test("[SPM-33-TC-05] should_give_the_assigned_coordinator_the_coordination_view_and_history", async () => {
     const eventId = fixtures.events.ownSubmitted;
 
@@ -197,9 +229,11 @@ describe("viewing by role and relationship (AC1)", () => {
         purpose: "Internal planning purpose that attendees must not see",
       })
     );
+    // ownSubmitted is still SUBMITTED, where coordinators may not edit (Master v1.0
+    // section 5.2, ead807c); TC-10 covers the editable UNDER_REVIEW case.
     expect(event.permissions).toEqual({
-      canEdit: true,
-      editableFields: ["title", "purpose", "description"],
+      canEdit: false,
+      editableFields: [],
       canViewDraftHistory: false,
       canViewStaffHistory: true,
     });
@@ -296,16 +330,18 @@ describe("organiser edits (AC2, AC3, AC7)", () => {
       preferredLayoutType: "NO_PREFERENCE",
     });
     expect(submitted.status).toBe(200);
-    // Fixture setup: requests created through the API have no organisation or coordinator yet.
-    await rows(
+    // The database files the request under organiserA's only organisation. Fixture
+    // setup still places the coordinator: assignment through the API is SPM-177's.
+    const [placed] = await rows(
       supabase
         .from("event")
-        .update({ organisation_id: fixtures.organisations.A, coordinator_id: userId("coordinator") })
+        .update({ coordinator_id: userId("coordinator") })
         .eq("event_id", eventId)
         .like("title", `spm32-${runId}%`)
-        .select("event_id"),
+        .select("event_id,organisation_id"),
       "place submitted event"
     );
+    expect(placed.organisation_id).toBe(fixtures.organisations.A);
 
     const ownerHistory = await historyFor("organiserA", eventId);
     expect(ownerHistory.map((entry) => entry.action)).toEqual(["EVENT_SUBMITTED", "DRAFT_UPDATED", "DRAFT_CREATED"]);
