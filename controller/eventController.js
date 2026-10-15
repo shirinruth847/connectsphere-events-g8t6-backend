@@ -291,10 +291,10 @@ const listMyEventRequests = async (req, res, next) => {
 // GET /api/events/unassigned — coordinator lead assignment queue.
 async function getUnassignedEvents(req, res, next) {
   try {
-    const rows = await eventModel.findUnassignedSubmittedEvents();
+    const events = await eventModel.findUnassignedSubmittedEvents();
     return res
       .status(200)
-      .json({ events: rows.map((row) => eventModel.toApi(row)) });
+      .json({ events });
   } catch (err) {
     return next(err);
   }

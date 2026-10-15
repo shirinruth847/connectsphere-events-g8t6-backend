@@ -111,13 +111,17 @@ describe("authentication and role checks", () => {
     test("should_list_unassigned_requests_for_a_coordinator_lead", async () => {
       signedInAs("COORDINATOR_LEAD");
       eventModel.findUnassignedSubmittedEvents.mockResolvedValue([
-        eventRow({
-          event_id: 42,
+        {
+          eventId: 42,
+          requestId: "REQ-000042",
           status: "SUBMITTED",
-          coordinator_id: null,
-          start_datetime: "2026-11-01T09:00:00.000Z",
-          end_datetime: "2026-11-01T10:00:00.000Z",
-        }),
+          title: "SMU Alumni Gala 2026",
+          startDatetime: "2026-11-01T09:00:00.000Z",
+          endDatetime: "2026-11-01T10:00:00.000Z",
+          expectedAttendance: 100,
+          organisation: { organisationId: 11, name: "Org A" },
+          createdAt: "2026-10-07T07:14:14.406209+00:00",
+        },
       ]);
 
       const res = await send("get", "/api/events/unassigned");
