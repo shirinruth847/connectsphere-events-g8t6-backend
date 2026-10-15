@@ -12,7 +12,7 @@ const POSTGREST_TIMESTAMP = "2026-10-07T07:14:14.406209+00:00";
 
 const queryReturning = (result) => {
   const query = {};
-  for (const method of ["select", "eq", "neq", "or", "order", "in", "is", "not"]) {
+  for (const method of ["select", "eq", "neq", "or", "order", "in", "is", "not", "gt"]) {
     query[method] = jest.fn(() => query);
   }
   query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
@@ -278,6 +278,35 @@ describe("reads", () => {
 });
 
 describe("Attendee discovery and registration availability", () => {
+  test("[SPM-126] should_exclude_past_events_from_attendee_detail_lookup", async () => {
+    const query = queryReturning({ data: null, error: null });
+    supabase.from.mockReturnValue(query);
+
+    await eventModel.findPublishedAttendeeEvent(42);
+
+    expect(query.gt).toHaveBeenCalledWith("end_datetime", expect.any(String));
+  });
+
+  test("[SPM-126] should_count_only_registered_attendees_when_computing_capacity", async () => {
+    const query = queryReturning({ data: null, error: null });
+    supabase.from.mockReturnValue(query);
+
+    await eventModel.findPublishedAttendeeEvent(42);
+
+    expect(query.eq).toHaveBeenCalledWith("registration.registration_status", "REGISTERED");
+  });
+
+  test("[SPM-34-AC3] should_report_not_enabled_when_registration_is_disabled", () => {
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: false,
+      registration_capacity: 10,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 10,
+    })).toBe("NOT_ENABLED");
+  });
+
   test("[SPM-34-AC3] should_treat_null_capacity_and_window_values_as_open_and_unlimited_when_registration_is_enabled", () => {
     expect(eventModel.computeRegistrationAvailability({
       status: "CONFIRMED",
@@ -330,7 +359,7 @@ describe("Attendee discovery and registration availability", () => {
     })).toBe("OPEN");
   });
 
-  test("[SPM-34-AC3] should_return_closed_for_preparation_events_even_when_the_window_is_open", () => {
+  test("[SPM-34-AC3] should_allow_registration_during_preparation_when_enabled_and_window_is_open", () => {
     expect(eventModel.computeRegistrationAvailability({
       status: "PREPARATION",
       is_registration_enabled: true,
@@ -338,7 +367,7 @@ describe("Attendee discovery and registration availability", () => {
       registration_open_at: null,
       registration_close_at: null,
       registeredCount: 0,
-    })).toBe("CLOSED");
+    })).toBe("OPEN");
   });
 });
 
