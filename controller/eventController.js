@@ -231,7 +231,7 @@ const listMyEventRequests = async (req, res, next) => {
 
 const listAttendeeDiscovery = async (req, res, next) => {
   try {
-    const { events, nextCursor } = await eventModel.findPublishedAttendeeEvents(req.user, { ...req.pagination });
+    const { events, nextCursor } = await eventModel.findPublishedAttendeeEvents({ ...req.pagination });
     return res.status(200).json({ events, nextCursor });
   } catch (error) {
     return handleError(error, res, next);

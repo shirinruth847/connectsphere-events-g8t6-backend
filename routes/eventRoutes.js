@@ -26,13 +26,14 @@ const { USER_ROLES } = require("../config/roles");
 const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
 const coordinatorOnly = [requireAuth, requireRole(USER_ROLES.COORDINATOR)];
 const leadOnly = [requireAuth, requireRole(USER_ROLES.COORDINATOR_LEAD)];
+const attendeeOnly = [requireAuth, requireRole(USER_ROLES.ATTENDEE)];
 
 // GET / is left free for event discovery (Master section 3.4).
 router.post("/", organiserOnly, createAndSubmit);
 router.post("/drafts", organiserOnly, createDraft);
 router.get("/mine", organiserOnly, validateCursorPagination, listMyEventRequests); // must stay above "/:id"
-router.get("/discovery", [requireAuth, requireRole(USER_ROLES.ATTENDEE)], validateCursorPagination, listAttendeeDiscovery);
-router.get("/discovery/:id", [requireAuth, requireRole(USER_ROLES.ATTENDEE)], getAttendeeEventDetail);
+router.get("/discovery", attendeeOnly, validateCursorPagination, listAttendeeDiscovery);
+router.get("/discovery/:id", attendeeOnly, getAttendeeEventDetail);
 router.get("/unassigned", leadOnly, listUnassignedEvents); // must stay above "/:id"
 router.get("/coordinator-availability", leadOnly, getCoordinatorAvailability); // Lead-only cross-coordinator schedule
 router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/:id"

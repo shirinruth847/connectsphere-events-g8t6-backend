@@ -331,8 +331,8 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     expect(listItem.registrationAvailability).toBe("OPEN");
   });
 
-  test.skip("[Q6][SPM-126] should_list_published_preparation_events_and_follow_master_registration_rules", async () => {
-    // PROVISIONAL Q6: add PREPARATION once the event_status migration includes it.
+  test.skip("[SPM-126] should_list_published_preparation_events_and_follow_master_registration_rules", async () => {
+    // Skipped: add PREPARATION once the event_status migration includes it.
     const { data, error } = await supabase.from("event").insert({
       title: `spm34-${runId}-preparation`,
       description: "Published preparation event",

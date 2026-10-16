@@ -169,8 +169,9 @@ const computeRegistrationAvailability = ({
   const openAt = registration_open_at ? new Date(registration_open_at).getTime() : null;
   const closeAt = registration_close_at ? new Date(registration_close_at).getTime() : null;
 
+  // The window is half-open, [open, close): it closes at registration_close_at itself.
   if (openAt !== null && currentTime < openAt) return "CLOSED";
-  if (closeAt !== null && currentTime > closeAt) return "CLOSED";
+  if (closeAt !== null && currentTime >= closeAt) return "CLOSED";
 
   if (registration_capacity == null) return "OPEN";
   if (registeredCount >= registration_capacity) return "FULL_WAITLIST";
@@ -183,7 +184,7 @@ const LIST_ATTENDEE_DISCOVERY_SELECT =
   "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name),registration(count)";
 const REGISTERED_SEATS_FILTER = ["registration.registration_status", "REGISTERED"];
 
-// PROVISIONAL Q6: add PREPARATION once the event_status migration includes it.
+// Add PREPARATION once the event_status migration includes it.
 const ATTENDEE_DISCOVERY_STATUSES = ["CONFIRMED"];
 
 const toAttendeeDiscoveryItem = (row) => {
@@ -213,7 +214,6 @@ const toAttendeeDetail = (row) => {
   const item = toAttendeeDiscoveryItem(row);
   return {
     ...item,
-    organisationName: row.organisation ? row.organisation.name : null,
     registrationOpenAt: row.registration_open_at,
     registrationCloseAt: row.registration_close_at,
   };
@@ -645,7 +645,7 @@ const attendeeDiscoveryQuery = () =>
     .gt("end_datetime", new Date().toISOString());
 
 // Soonest start first; event_id breaks ties between equal start times.
-const findPublishedAttendeeEvents = async (user, { limit, cursor = null }) => {
+const findPublishedAttendeeEvents = async ({ limit, cursor = null }) => {
   const after = decodeDiscoveryCursor(cursor);
   let query = attendeeDiscoveryQuery();
   if (after) {
