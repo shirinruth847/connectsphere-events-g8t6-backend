@@ -12,7 +12,7 @@ const POSTGREST_TIMESTAMP = "2026-10-07T07:14:14.406209+00:00";
 
 const queryReturning = (result) => {
   const query = {};
-  for (const method of ["select", "eq", "neq", "or", "order", "in", "is", "not"]) {
+  for (const method of ["select", "eq", "neq", "or", "order", "in", "is", "not", "gt"]) {
     query[method] = jest.fn(() => query);
   }
   query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
@@ -274,6 +274,212 @@ describe("reads", () => {
     expect(query.eq).toHaveBeenCalledWith("coordinator_id", 21);
     expect(query.neq).toHaveBeenCalledWith("status", "DRAFT");
     expect(query.order).toHaveBeenCalledWith("start_datetime", { ascending: true });
+  });
+});
+
+describe("Attendee discovery and registration availability", () => {
+  test("[SPM-126] should_exclude_past_events_from_attendee_detail_lookup", async () => {
+    const query = queryReturning({ data: null, error: null });
+    supabase.from.mockReturnValue(query);
+
+    await eventModel.findPublishedAttendeeEvent(42);
+
+    expect(query.gt).toHaveBeenCalledWith("end_datetime", expect.any(String));
+  });
+
+  test("[SPM-126] should_count_only_registered_attendees_when_computing_capacity", async () => {
+    const query = queryReturning({ data: null, error: null });
+    supabase.from.mockReturnValue(query);
+
+    await eventModel.findPublishedAttendeeEvent(42);
+
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("registration(count)"));
+    expect(query.eq).toHaveBeenCalledWith("event_id", 42);
+    expect(query.eq).toHaveBeenCalledWith("registration.registration_status", "REGISTERED");
+  });
+
+  const discoveryRow = (overrides = {}) => ({
+    event_id: 7,
+    title: "Gala",
+    description: "Public description",
+    start_datetime: POSTGREST_TIMESTAMP,
+    end_datetime: "2026-10-07T09:14:14.406209+00:00",
+    status: "CONFIRMED",
+    is_registration_enabled: true,
+    registration_capacity: 2,
+    registration_open_at: null,
+    registration_close_at: null,
+    organisation: { organisation_id: 1, name: "Org" },
+    registration: [{ count: 2 }],
+    ...overrides,
+  });
+
+  test("[SPM-34-AC3] should_report_the_same_availability_in_the_list_and_the_detail", async () => {
+    const row = discoveryRow();
+    const listQuery = queryReturning({ data: [row], error: null });
+    const detailQuery = queryReturning({ data: row, error: null });
+    supabase.from.mockReturnValueOnce(listQuery).mockReturnValueOnce(detailQuery);
+
+    const { events } = await eventModel.findPublishedAttendeeEvents({ limit: 10 });
+    const detail = await eventModel.findPublishedAttendeeEvent(7);
+
+    expect(events[0].registrationAvailability).toBe("FULL_WAITLIST");
+    expect(detail.registrationAvailability).toBe("FULL_WAITLIST");
+    expect(listQuery.select).toHaveBeenCalledWith(expect.stringContaining("registration(count)"));
+    expect(listQuery.eq).toHaveBeenCalledWith("registration.registration_status", "REGISTERED");
+    expect(Object.keys(events[0])).not.toContain("registration");
+    expect(Object.keys(detail)).not.toContain("registration");
+  });
+
+  test("[SPM-34-AC1] should_list_soonest_start_first_with_event_id_as_the_tie_breaker", async () => {
+    const query = queryReturning({ data: [], error: null });
+    supabase.from.mockReturnValue(query);
+
+    const result = await eventModel.findPublishedAttendeeEvents({ limit: 10 });
+
+    expect(query.order.mock.calls).toEqual([
+      ["start_datetime", { ascending: true }],
+      ["event_id", { ascending: true }],
+    ]);
+    expect(query.limit).toHaveBeenCalledWith(11);
+    expect(query.or).not.toHaveBeenCalled();
+    expect(result).toEqual({ events: [], nextCursor: null });
+  });
+
+  test("[SPM-34-AC1] should_page_after_the_last_start_time_and_event_id", async () => {
+    const rows = [discoveryRow({ event_id: 3 }), discoveryRow({ event_id: 9 }), discoveryRow({ event_id: 12 })];
+    supabase.from.mockReturnValue(queryReturning({ data: rows, error: null }));
+
+    const { events, nextCursor } = await eventModel.findPublishedAttendeeEvents({ limit: 2 });
+    expect(events.map(({ eventId }) => eventId)).toEqual([3, 9]);
+    expect(eventModel.decodeDiscoveryCursor(nextCursor)).toEqual({ startDatetime: POSTGREST_TIMESTAMP, eventId: 9 });
+
+    const next = queryReturning({ data: [], error: null });
+    supabase.from.mockReturnValue(next);
+    await eventModel.findPublishedAttendeeEvents({ limit: 2, cursor: nextCursor });
+
+    expect(next.or).toHaveBeenCalledWith(
+      `start_datetime.gt."${POSTGREST_TIMESTAMP}",and(start_datetime.eq."${POSTGREST_TIMESTAMP}",event_id.gt.9)`
+    );
+  });
+
+  test("[SPM-34-AC1] should_list_an_event_that_has_started_but_not_ended", async () => {
+    const inProgress = discoveryRow({
+      start_datetime: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      end_datetime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      registration: [{ count: 0 }],
+    });
+    const query = queryReturning({ data: [inProgress], error: null });
+    supabase.from.mockReturnValue(query);
+
+    const { events } = await eventModel.findPublishedAttendeeEvents({ limit: 10 });
+
+    expect(query.gt.mock.calls).toEqual([["end_datetime", expect.any(String)]]);
+    expect(events).toEqual([expect.objectContaining({ eventId: 7, registrationAvailability: "OPEN" })]);
+  });
+
+  test("[SPM-34-AC1] should_reject_a_cursor_that_does_not_carry_a_start_time", async () => {
+    const organiserCursor = eventModel.encodeCursor({ updated_at: POSTGREST_TIMESTAMP, event_id: 9 });
+
+    await expect(
+      eventModel.findPublishedAttendeeEvents({ limit: 2, cursor: organiserCursor })
+    ).rejects.toEqual(expect.objectContaining({ code: "INVALID_CURSOR" }));
+    expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-34-AC3] should_report_not_enabled_when_registration_is_disabled", () => {
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: false,
+      registration_capacity: 10,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 10,
+    })).toBe("NOT_ENABLED");
+  });
+
+  test("[SPM-34-AC3] should_treat_null_capacity_and_window_values_as_open_and_unlimited_when_registration_is_enabled", () => {
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: null,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 0,
+    })).toBe("OPEN");
+  });
+
+  test("[SPM-34-AC3] should_return_closed_when_registration_window_is_outside_the_open_range", () => {
+    const now = new Date().toISOString();
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 20,
+      registration_open_at: new Date(Date.now() + 60_000).toISOString(),
+      registration_close_at: new Date(Date.now() + 120_000).toISOString(),
+      registeredCount: 0,
+      now,
+    })).toBe("CLOSED");
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 20,
+      registration_open_at: new Date(Date.now() - 120_000).toISOString(),
+      registration_close_at: new Date(Date.now() - 60_000).toISOString(),
+      registeredCount: 0,
+      now,
+    })).toBe("CLOSED");
+  });
+
+  test("[SPM-34-AC3] should_open_registration_at_the_open_instant_and_close_it_at_the_close_instant", () => {
+    const openAt = "2026-10-20T09:00:00.000Z";
+    const closeAt = "2026-10-21T09:00:00.000Z";
+    const availabilityAt = (now) => eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 20,
+      registration_open_at: openAt,
+      registration_close_at: closeAt,
+      registeredCount: 0,
+      now,
+    });
+    const millisecondBefore = (instant) => new Date(Date.parse(instant) - 1).toISOString();
+
+    expect(availabilityAt(millisecondBefore(openAt))).toBe("CLOSED");
+    expect(availabilityAt(openAt)).toBe("OPEN");
+    expect(availabilityAt(millisecondBefore(closeAt))).toBe("OPEN");
+    expect(availabilityAt(closeAt)).toBe("CLOSED");
+  });
+
+  test("[SPM-34-AC3] should_return_full_waitlist_only_when_the_confirmed_event_reaches_capacity", () => {
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 3,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 3,
+    })).toBe("FULL_WAITLIST");
+    expect(eventModel.computeRegistrationAvailability({
+      status: "CONFIRMED",
+      is_registration_enabled: true,
+      registration_capacity: 3,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 2,
+    })).toBe("OPEN");
+  });
+
+  test.skip("[SPM-34-AC3] should_allow_registration_during_preparation_when_enabled_and_window_is_open", () => {
+    // Skipped: add PREPARATION once the event_status migration includes it.
+    expect(eventModel.computeRegistrationAvailability({
+      status: "PREPARATION",
+      is_registration_enabled: true,
+      registration_capacity: 10,
+      registration_open_at: null,
+      registration_close_at: null,
+      registeredCount: 0,
+    })).toBe("OPEN");
   });
 });
 
