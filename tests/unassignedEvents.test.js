@@ -50,7 +50,7 @@ describe("[SPM-174] unassigned event queue", () => {
     expect(supabase.from).toHaveBeenCalledWith("event");
     expect(query.eq).toHaveBeenCalledWith("status", "SUBMITTED");
     expect(query.is).toHaveBeenCalledWith("coordinator_id", null);
-    expect(query.order).toHaveBeenNthCalledWith(1, "start_datetime", { ascending: true });
+    expect(query.order).toHaveBeenNthCalledWith(1, "created_at", { ascending: true });
     expect(query.order).toHaveBeenNthCalledWith(2, "event_id", { ascending: true });
   });
 
@@ -69,7 +69,7 @@ describe("[SPM-174] unassigned event queue", () => {
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({
-      events: [eventModel.toApi(event)],
+      events: [eventModel.toListItem(event)],
     });
   });
 
@@ -223,24 +223,26 @@ describe("[SPM-174] unassigned event queue", () => {
     supabase.from.mockReturnValueOnce(event).mockReturnValueOnce(coordinator);
     const res = makeResponse();
 
-    await eventController.assignCoordinator({ params: { id: "42" }, body: { coordinatorId: 999 } }, res, jest.fn());
+    await eventController.patchCoordinator({ params: { id: "42" }, body: { coordinatorId: 999 } }, res, jest.fn());
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({
-      error: "Select an active Event Coordinator.",
-      code: "INVALID_COORDINATOR",
+      error: "Please correct the highlighted fields.",
+      code: "VALIDATION_FAILED",
+      fields: { coordinatorId: "Send a positive integer coordinatorId." }
     });
   });
 
   test("[SPM-174-AC2] rejects malformed assignment input before querying the database", async () => {
     const res = makeResponse();
 
-    await eventController.assignCoordinator({ params: { id: "42" }, body: { coordinatorId: "7" } }, res, jest.fn());
+    await eventController.patchCoordinator({ params: { id: "42" }, body: { coordinatorId: "7" } }, res, jest.fn());
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({
-      error: "Select an active Event Coordinator.",
-      code: "INVALID_COORDINATOR",
+      error: "Please correct the highlighted fields.",
+      code: "VALIDATION_FAILED",
+      fields: { coordinatorId: "Send a positive integer coordinatorId." },
     });
     expect(supabase.from).not.toHaveBeenCalled();
   });

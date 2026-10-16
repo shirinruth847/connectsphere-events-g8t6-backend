@@ -13,6 +13,7 @@ const USER_ROLES = Object.freeze({
 const ROLE_HOME_PATHS = Object.freeze({
   ORGANISER: "/dashboard",
   COORDINATOR: "/dashboard",
+  COORDINATOR_LEAD: "/dashboard",
   VENUE_STAFF: "/dashboard",
   TECH_SUPPORT: "/dashboard",
   ATTENDEE: "/my-registrations",

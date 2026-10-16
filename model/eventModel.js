@@ -27,7 +27,12 @@ const EVENT_SELECT =
   "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 const LIST_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+
+// Calendar events include richer details for coordinators' schedule view.
+const CALENDAR_SELECT =
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,purpose,description,accessibility_needs,preferred_layout_type,is_registration_enabled,registration_capacity,coordinator_id,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+
 const MAX_LOOKUP_IDS = 50;
 
 // ---------- input mapping ----------
@@ -127,6 +132,7 @@ const toApi = (row, viewerUserId) => {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
+    isAssignedToCoordinator: row.coordinator_id != null,
     ...(viewerUserId === undefined ? {} : { isOwner: row.organiser_id === viewerUserId }),
   };
 };
@@ -141,6 +147,7 @@ const toListItem = (row, viewerUserId) => ({
   endDatetime: row.end_datetime,
   expectedAttendance: row.expected_attendance,
   organisation: toOrganisation(row.organisation),
+  isAssignedToCoordinator: row.coordinator_id != null,
   isOwner: row.organiser_id === viewerUserId,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -297,14 +304,202 @@ const buildOrganiserVisibilityFilter = (user) => {
 };
 
 const findVisibleEvent = async (eventId, user) => {
+  let query = supabase.from("event").select(EVENT_SELECT).eq("event_id", eventId);
+  if (user.role === "COORDINATOR") {
+    query = query.eq("coordinator_id", user.user_id).neq("status", "DRAFT");
+  } else if (user.role === "ORGANISER") {
+    query = query.or(buildOrganiserVisibilityFilter(user));
+  } else {
+    return null;
+  }
+  const { data, error } = await query.maybeSingle();
+  if (error) throw dbError(error);
+  if (!data) return null;
+  return toListItem(data, user && user.user_id);
+};
+
+const findCoordinatorEvents = async (coordinatorId) => {
   const { data, error } = await supabase
     .from("event")
-    .select(EVENT_SELECT)
-    .eq("event_id", eventId)
-    .or(buildOrganiserVisibilityFilter(user))
-    .maybeSingle();
+    .select(LIST_SELECT)
+    .eq("coordinator_id", coordinatorId)
+    .neq("status", "DRAFT")
+    .order("start_datetime", { ascending: true });
+  if (error) throw dbError(error);
+  return data.map((row) => ({
+    eventId: row.event_id,
+    requestId: formatRequestId(row.event_id),
+    status: row.status,
+    statusLabel: STATUS_LABELS[row.status] || row.status,
+    title: row.title,
+    startDatetime: row.start_datetime,
+    endDatetime: row.end_datetime,
+    expectedAttendance: row.expected_attendance,
+    organisation: toOrganisation(row.organisation),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+};
+
+const findUnassignedSubmittedEvents = async () => {
+  const { data, error } = await supabase
+    .from("event")
+    .select(LIST_SELECT)
+    .eq("status", "SUBMITTED")
+    .is("coordinator_id", null)
+    .order("created_at", { ascending: true })
+    .order("event_id", { ascending: true });
   if (error) throw dbError(error);
   return data;
+};
+
+const mapLeadAssignment = (row, coordinatorNames) => ({
+  eventId: row.event_id,
+  requestId: formatRequestId(row.event_id),
+  status: row.status,
+  statusLabel: STATUS_LABELS[row.status] || row.status,
+  title: row.title,
+  startDatetime: row.start_datetime,
+  endDatetime: row.end_datetime,
+  expectedAttendance: row.expected_attendance,
+  organisation: toOrganisation(row.organisation),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  coordinatorId: row.coordinator_id,
+  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
+});
+
+const mapCalendarEvent = (row, coordinatorNames) => ({
+  eventId: row.event_id,
+  requestId: formatRequestId(row.event_id),
+  status: row.status,
+  statusLabel: STATUS_LABELS[row.status] || row.status,
+  title: row.title,
+  purpose: row.purpose,
+  description: row.description,
+  accessibilityNeeds: row.accessibility_needs,
+  preferredLayoutType: row.preferred_layout_type,
+  isRegistrationEnabled: row.is_registration_enabled,
+  registrationCapacity: row.registration_capacity,
+  startDatetime: row.start_datetime,
+  endDatetime: row.end_datetime,
+  expectedAttendance: row.expected_attendance,
+  organisation: toOrganisation(row.organisation),
+  venuePreferences: Array.isArray(row.event_venue_preference)
+    ? row.event_venue_preference
+        .slice()
+        .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
+        .map((item) => (typeof item === "number" ? item : item.venue_id))
+    : [],
+  equipmentRequirements: Array.isArray(row.event_equipment_requirement)
+    ? row.event_equipment_requirement.map((item) => ({
+        equipmentId: item.equipment_id,
+        quantity: item.quantity_requested ?? item.quantity,
+      }))
+    : [],
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  coordinatorId: row.coordinator_id,
+  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
+});
+
+const findLeadAssignments = async () => {
+  const [{ data: events, error: eventsError }, { data: users, error: usersError }] = await Promise.all([
+    supabase
+      .from("event")
+      .select(LIST_SELECT)
+      .not("coordinator_id", "is", null)
+      .not("status", "in", '("COMPLETED","REJECTED","CANCELLED")')
+      .order("start_datetime", { ascending: true })
+      .order("event_id", { ascending: true }),
+    supabase.from("user").select("user_id,name").eq("role", "COORDINATOR"),
+  ]);
+  if (eventsError) throw dbError(eventsError);
+  if (usersError) throw dbError(usersError);
+  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
+  return events.map((event) => mapLeadAssignment(event, coordinatorNames));
+};
+
+const findCoordinatorAvailability = async () => {
+  const [{ data: users, error: usersError }, { data: events, error: eventsError }] = await Promise.all([
+    supabase
+      .from("user")
+      .select("user_id,name")
+      .eq("role", "COORDINATOR")
+      .eq("is_active", true)
+      .order("name", { ascending: true }),
+    supabase
+      .from("event")
+      .select(CALENDAR_SELECT)
+      .not("coordinator_id", "is", null)
+      .not("status", "in", '("DRAFT","COMPLETED","REJECTED","CANCELLED")')
+      .order("start_datetime", { ascending: true }),
+  ]);
+  if (usersError) throw dbError(usersError);
+  if (eventsError) throw dbError(eventsError);
+
+  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
+  return users.map((user) => ({
+    coordinatorId: user.user_id,
+    name: user.name,
+    events: events
+      .filter((event) => event.coordinator_id === user.user_id)
+      .map((event) => mapCalendarEvent(event, coordinatorNames)),
+  }));
+};
+
+const assignCoordinator = async ({ eventId, coordinatorId, leadId }) => {
+  const { data, error } = await supabase.rpc("assign_event_coordinator", {
+    p_event_id: eventId,
+    p_coordinator_id: coordinatorId,
+    p_lead_id: leadId,
+  });
+  if (error) {
+    const code = error.message;
+    if (["EVENT_NOT_FOUND", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT"].includes(code)) {
+      throw eventRequestError(code);
+    }
+    throw dbError(error);
+  }
+  if (!data || !data.event) throw new Error("assign_event_coordinator returned no event.");
+  return data.event;
+};
+
+const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinatorId, leadId }) => {
+  const { data, error } = await supabase.rpc("reassign_event_coordinator", {
+    p_event_id: eventId,
+    p_coordinator_id: coordinatorId,
+    p_expected_coordinator_id: expectedCoordinatorId,
+    p_lead_id: leadId,
+  });
+  if (error) {
+    const code = error.message;
+    const known = new Set([
+      "EVENT_NOT_REASSIGNABLE",
+      "INVALID_COORDINATOR",
+      "COORDINATOR_CONFLICT",
+      "COORDINATOR_UNCHANGED",
+      "ASSIGNMENT_CHANGED",
+    ]);
+    if (known.has(code)) throw eventRequestError(code);
+    throw dbError(error);
+  }
+  if (!data || !data.event || !data.coordinator) {
+    throw new Error("reassign_event_coordinator returned an incomplete result.");
+  }
+  return {
+    event: {
+      eventId: data.event.event_id,
+      requestId: formatRequestId(data.event.event_id),
+      title: data.event.title,
+      status: data.event.status,
+      coordinatorId: data.event.coordinator_id,
+    },
+    coordinator: {
+      coordinatorId: data.coordinator.user_id,
+      name: data.coordinator.name,
+    },
+  };
 };
 
 // Edits are owner-only, so a colleague's visible request is "not found" here.
@@ -411,103 +606,6 @@ const findValidationContext = async (input) => {
   };
 };
 
-async function findEventsByOrganiser(organiserId, status) {
-  let query = supabase
-    .from('event')
-    .select('*')
-    .eq('organiser_id', organiserId)
-    .order('updated_at', { ascending: false });
-  if (status) query = query.eq('status', status);
-  const { data, error } = await query;
-  if (error) throw error;
-  return data;
-}
-
-async function findUnassignedSubmittedEvents() {
-  const { data, error } = await supabase
-    .from('event')
-    .select('*')
-    .eq('status', EVENT_STATUS.SUBMITTED)
-    .is('coordinator_id', null)
-    .order('start_datetime', { ascending: true })
-    .order('event_id', { ascending: true });
-  if (error) throw error;
-  return data;
-}
-
-async function findCoordinatorAvailability() {
-  const [{ data: users, error: usersError }, { data: events, error: eventsError }] =
-    await Promise.all([
-      supabase
-        .from("user")
-        .select("user_id,name")
-        .eq("role", "COORDINATOR")
-        .eq("is_active", true)
-        .order("name", { ascending: true }),
-      supabase
-        .from("event")
-        .select("*")
-        .not("coordinator_id", "is", null)
-        .not("status", "in", `("DRAFT","REJECTED","CANCELLED")`)
-        .order("start_datetime", { ascending: true }),
-    ]);
-  if (usersError) throw usersError;
-  if (eventsError) throw eventsError;
-
-  return users.map((user) => ({
-    coordinatorId: user.user_id,
-    name: user.name,
-    events: events
-      .filter((event) => event.coordinator_id === user.user_id)
-      .map(toApi),
-  }));
-}
-
-async function assignCoordinator({ eventId, coordinatorId }) {
-  const [{ data: event, error: eventError }, { data: coordinator, error: coordinatorError }] =
-    await Promise.all([
-      supabase.from("event").select("*").eq("event_id", eventId).maybeSingle(),
-      supabase
-        .from("user")
-        .select("user_id,name")
-        .eq("user_id", coordinatorId)
-        .eq("role", "COORDINATOR")
-        .eq("is_active", true)
-        .maybeSingle(),
-    ]);
-  if (eventError) throw eventError;
-  if (coordinatorError) throw coordinatorError;
-  if (!event || event.status !== EVENT_STATUS.SUBMITTED || event.coordinator_id !== null) {
-    throw toEventRequestError("EVENT_NOT_FOUND");
-  }
-  if (!coordinator) throw toEventRequestError("INVALID_COORDINATOR");
-
-  const { data: conflicts, error: conflictError } = await supabase
-    .from("event")
-    .select("title,start_datetime,end_datetime")
-    .eq("coordinator_id", coordinatorId)
-    .not("status", "in", `("DRAFT","REJECTED","CANCELLED")`)
-    .lt("start_datetime", event.end_datetime)
-    .gt("end_datetime", event.start_datetime);
-  if (conflictError) throw conflictError;
-  if (conflicts.length) {
-    throw toEventRequestError("COORDINATOR_CONFLICT", {
-      coordinatorName: coordinator.name,
-      conflict: conflicts[0],
-    });
-  }
-
-  const { data: updated, error: updateError } = await supabase
-    .from("event")
-    .update({ coordinator_id: coordinatorId })
-    .eq("event_id", eventId)
-    .is("coordinator_id", null)
-    .select("*")
-    .single();
-  if (updateError) throw updateError;
-  return updated;
-}
-
 // Allowed layout options come from the rooms that actually exist, plus "no preference".
 async function getAllowedLayouts() {
   const { data, error } = await supabase.from('room').select('layout_type');
@@ -529,12 +627,15 @@ module.exports = {
   submitEvent,
   buildOrganiserVisibilityFilter,
   findVisibleEvent,
+  findCoordinatorEvents,
+  findUnassignedSubmittedEvents,
+  findCoordinatorAvailability,
+  findLeadAssignments,
+  assignCoordinator,
+  reassignCoordinator,
   findOwnEvent,
   findOrganiserEventRequests,
   encodeCursor,
-  findUnassignedSubmittedEvents,
-  findCoordinatorAvailability,
-  assignCoordinator,
   decodeCursor,
   findValidationContext,
 };
