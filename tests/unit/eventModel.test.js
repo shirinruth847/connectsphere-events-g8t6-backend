@@ -293,8 +293,83 @@ describe("Attendee discovery and registration availability", () => {
 
     await eventModel.findPublishedAttendeeEvent(42);
 
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("registration(count)"));
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
-    expect(query.eq).toHaveBeenCalledWith("registration_status", "REGISTERED");
+    expect(query.eq).toHaveBeenCalledWith("registration.registration_status", "REGISTERED");
+  });
+
+  const discoveryRow = (overrides = {}) => ({
+    event_id: 7,
+    title: "Gala",
+    description: "Public description",
+    start_datetime: POSTGREST_TIMESTAMP,
+    end_datetime: "2026-10-07T09:14:14.406209+00:00",
+    status: "CONFIRMED",
+    is_registration_enabled: true,
+    registration_capacity: 2,
+    registration_open_at: null,
+    registration_close_at: null,
+    organisation: { organisation_id: 1, name: "Org" },
+    registration: [{ count: 2 }],
+    ...overrides,
+  });
+
+  test("[SPM-34-AC3] should_report_the_same_availability_in_the_list_and_the_detail", async () => {
+    const row = discoveryRow();
+    const listQuery = queryReturning({ data: [row], error: null });
+    const detailQuery = queryReturning({ data: row, error: null });
+    supabase.from.mockReturnValueOnce(listQuery).mockReturnValueOnce(detailQuery);
+
+    const { events } = await eventModel.findPublishedAttendeeEvents({ user_id: 5 }, { limit: 10 });
+    const detail = await eventModel.findPublishedAttendeeEvent(7);
+
+    expect(events[0].registrationAvailability).toBe("FULL_WAITLIST");
+    expect(detail.registrationAvailability).toBe("FULL_WAITLIST");
+    expect(listQuery.select).toHaveBeenCalledWith(expect.stringContaining("registration(count)"));
+    expect(listQuery.eq).toHaveBeenCalledWith("registration.registration_status", "REGISTERED");
+    expect(Object.keys(events[0])).not.toContain("registration");
+    expect(Object.keys(detail)).not.toContain("registration");
+  });
+
+  test("[SPM-34-AC1] should_list_soonest_start_first_with_event_id_as_the_tie_breaker", async () => {
+    const query = queryReturning({ data: [], error: null });
+    supabase.from.mockReturnValue(query);
+
+    const result = await eventModel.findPublishedAttendeeEvents({ user_id: 5 }, { limit: 10 });
+
+    expect(query.order.mock.calls).toEqual([
+      ["start_datetime", { ascending: true }],
+      ["event_id", { ascending: true }],
+    ]);
+    expect(query.limit).toHaveBeenCalledWith(11);
+    expect(query.or).not.toHaveBeenCalled();
+    expect(result).toEqual({ events: [], nextCursor: null });
+  });
+
+  test("[SPM-34-AC1] should_page_after_the_last_start_time_and_event_id", async () => {
+    const rows = [discoveryRow({ event_id: 3 }), discoveryRow({ event_id: 9 }), discoveryRow({ event_id: 12 })];
+    supabase.from.mockReturnValue(queryReturning({ data: rows, error: null }));
+
+    const { events, nextCursor } = await eventModel.findPublishedAttendeeEvents({ user_id: 5 }, { limit: 2 });
+    expect(events.map(({ eventId }) => eventId)).toEqual([3, 9]);
+    expect(eventModel.decodeDiscoveryCursor(nextCursor)).toEqual({ startDatetime: POSTGREST_TIMESTAMP, eventId: 9 });
+
+    const next = queryReturning({ data: [], error: null });
+    supabase.from.mockReturnValue(next);
+    await eventModel.findPublishedAttendeeEvents({ user_id: 5 }, { limit: 2, cursor: nextCursor });
+
+    expect(next.or).toHaveBeenCalledWith(
+      `start_datetime.gt."${POSTGREST_TIMESTAMP}",and(start_datetime.eq."${POSTGREST_TIMESTAMP}",event_id.gt.9)`
+    );
+  });
+
+  test("[SPM-34-AC1] should_reject_a_cursor_that_does_not_carry_a_start_time", async () => {
+    const organiserCursor = eventModel.encodeCursor({ updated_at: POSTGREST_TIMESTAMP, event_id: 9 });
+
+    await expect(
+      eventModel.findPublishedAttendeeEvents({ user_id: 5 }, { limit: 2, cursor: organiserCursor })
+    ).rejects.toEqual(expect.objectContaining({ code: "INVALID_CURSOR" }));
+    expect(supabase.from).not.toHaveBeenCalled();
   });
 
   test("[SPM-34-AC3] should_report_not_enabled_when_registration_is_disabled", () => {

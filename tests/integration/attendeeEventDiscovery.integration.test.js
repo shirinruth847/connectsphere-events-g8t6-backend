@@ -44,6 +44,20 @@ const callAs = async (method, path, accountKey = "attendee") => {
   return request(app)[method](path).set("Authorization", `Bearer ${session.access_token}`);
 };
 
+// Follows nextCursor to the last page, so fixtures are found wherever the start-time order puts them.
+const listAllDiscoveryEvents = async (limit = 100) => {
+  const events = [];
+  let cursor = null;
+  do {
+    const query = cursor ? `limit=${limit}&cursor=${cursor}` : `limit=${limit}`;
+    const response = await callAs("get", `/api/events/discovery?${query}`);
+    expect(response.status).toBe(200);
+    events.push(...response.body.events);
+    cursor = response.body.nextCursor;
+  } while (cursor);
+  return events;
+};
+
 const insertEvent = async (suffix, overrides = {}) => {
   const startsAt = Date.now() + 3 * 60 * 60 * 1000;
   const { data, error } = await supabase.from("event").insert({
@@ -116,9 +130,7 @@ describe("[SPM-88] attendee event discovery and detail visibility", () => {
       end_datetime: new Date(past).toISOString(),
     }));
 
-    const response = await callAs("get", "/api/events/discovery");
-    expect(response.status).toBe(200);
-    const visibleIds = response.body.events.map(({ eventId }) => eventId);
+    const visibleIds = (await listAllDiscoveryEvents()).map(({ eventId }) => eventId);
     expect(visibleIds).toContain(visibleId);
 
     for (const eventId of hiddenIds) {
@@ -130,8 +142,8 @@ describe("[SPM-88] attendee event discovery and detail visibility", () => {
 
   test("[SPM-34-AC1] should_return_an_empty_event_page_with_a_null_cursor", async () => {
     const cursor = Buffer.from(JSON.stringify({
-      updatedAt: "1970-01-01T00:00:00.000Z",
-      eventId: 1,
+      startDatetime: "9999-12-31T23:59:59.000Z",
+      eventId: 2147483647,
     })).toString("base64url");
     const response = await callAs("get", `/api/events/discovery?cursor=${cursor}`);
 
@@ -170,15 +182,35 @@ describe("[SPM-88] attendee event discovery and detail visibility", () => {
   test("[SPM-34-AC5] should_return_only_allowlisted_fields_and_keep_pending_location_null", async () => {
     const eventId = await insertEvent("allowlisted-projection");
     const detailResponse = await callAs("get", `/api/events/discovery/${eventId}`);
-    const listResponse = await callAs("get", "/api/events/discovery");
     expect(detailResponse.status).toBe(200);
-    expect(listResponse.status).toBe(200);
-    const listItem = listResponse.body.events.find((event) => event.eventId === eventId);
+    const listItem = (await listAllDiscoveryEvents()).find((event) => event.eventId === eventId);
 
     expect(Object.keys(detailResponse.body.event).sort()).toEqual([...detailFields].sort());
     expect(detailResponse.body.event.location).toBeNull();
     expect(Object.keys(listItem).sort()).toEqual([...listFields].sort());
     expect(listItem.location).toBeNull();
+  });
+
+  test("[SPM-34-AC1] should_list_soonest_start_first_and_page_without_skipping_or_repeating", async () => {
+    const sharedStart = Date.now() + 5 * 60 * 60 * 1000;
+    const at = (offsetMs) => ({
+      start_datetime: new Date(sharedStart + offsetMs).toISOString(),
+      end_datetime: new Date(sharedStart + offsetMs + 60 * 60 * 1000).toISOString(),
+    });
+    const later = await insertEvent("order-later", at(60_000));
+    const tieFirst = await insertEvent("order-tie-first", at(0));
+    const tieSecond = await insertEvent("order-tie-second", at(0));
+    const earliest = await insertEvent("order-earliest", at(-60_000));
+
+    const events = await listAllDiscoveryEvents(1);
+    const ids = events.map(({ eventId }) => eventId);
+    const keys = events.map(({ startDatetime, eventId }) => [Date.parse(startDatetime), eventId]);
+    const sorted = [...keys].sort(([aStart, aId], [bStart, bId]) => aStart - bStart || aId - bId);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(keys).toEqual(sorted);
+    expect(ids.filter((id) => [later, tieFirst, tieSecond, earliest].includes(id)))
+      .toEqual([earliest, tieFirst, tieSecond, later]);
   });
 
   test("[SPM-34-AC6] should_show_latest_published_details_after_an_event_update", async () => {
@@ -279,9 +311,11 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     const eventId = await insertEvent("registration-full", { registration_capacity: 1 });
     await insertRegistration(eventId, "attendee", "REGISTERED");
     const response = await callAs("get", `/api/events/discovery/${eventId}`);
+    const listItem = (await listAllDiscoveryEvents()).find((event) => event.eventId === eventId);
 
     expect(response.status).toBe(200);
     expect(response.body.event.registrationAvailability).toBe("FULL_WAITLIST");
+    expect(listItem.registrationAvailability).toBe("FULL_WAITLIST");
   });
 
   test("should_not_count_waitlisted_or_withdrawn_registrations_toward_capacity", async () => {
@@ -290,9 +324,11 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     await insertRegistration(eventId, "deactivatable", "WAITLISTED");
     await insertRegistration(eventId, "inactive", "WITHDRAWN");
     const response = await callAs("get", `/api/events/discovery/${eventId}`);
+    const listItem = (await listAllDiscoveryEvents()).find((event) => event.eventId === eventId);
 
     expect(response.status).toBe(200);
     expect(response.body.event.registrationAvailability).toBe("OPEN");
+    expect(listItem.registrationAvailability).toBe("OPEN");
   });
 
   test.skip("[Q6][SPM-126] should_list_published_preparation_events_and_follow_master_registration_rules", async () => {

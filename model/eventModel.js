@@ -177,8 +177,11 @@ const computeRegistrationAvailability = ({
   return "OPEN";
 };
 
+// registration(count) is narrowed to REGISTERED seats by REGISTERED_SEATS_FILTER, so the
+// list and the detail read capacity from the same embedded count.
 const LIST_ATTENDEE_DISCOVERY_SELECT =
-  "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name)";
+  "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name),registration(count)";
+const REGISTERED_SEATS_FILTER = ["registration.registration_status", "REGISTERED"];
 
 // PROVISIONAL Q6: add PREPARATION once the event_status migration includes it.
 const ATTENDEE_DISCOVERY_STATUSES = ["CONFIRMED"];
@@ -191,7 +194,7 @@ const toAttendeeDiscoveryItem = (row) => {
     registration_capacity: row.registration_capacity,
     registration_open_at: row.registration_open_at,
     registration_close_at: row.registration_close_at,
-    registeredCount: row.registered_count ?? 0,
+    registeredCount: row.registration?.[0]?.count ?? 0,
   });
 
   return {
@@ -577,10 +580,10 @@ const findOwnEvent = async (eventId, organiserId) => {
 // exact text: converting through Date would drop microseconds and skip or repeat rows.
 const CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::\d{2})?)$/;
 
-const encodeCursor = (row) =>
-  Buffer.from(JSON.stringify({ updatedAt: row.updated_at, eventId: row.event_id })).toString("base64url");
+const encodeKeysetCursor = (timestampKey, timestamp, eventId) =>
+  Buffer.from(JSON.stringify({ [timestampKey]: timestamp, eventId })).toString("base64url");
 
-const decodeCursor = (value) => {
+const decodeKeysetCursor = (value, timestampKey) => {
   if (value === undefined || value === null) return null;
   let decoded = null;
   try {
@@ -590,16 +593,22 @@ const decodeCursor = (value) => {
   }
   if (
     !decoded ||
-    typeof decoded.updatedAt !== "string" ||
-    !CURSOR_TIMESTAMP.test(decoded.updatedAt) ||
-    Number.isNaN(Date.parse(decoded.updatedAt)) ||
+    typeof decoded[timestampKey] !== "string" ||
+    !CURSOR_TIMESTAMP.test(decoded[timestampKey]) ||
+    Number.isNaN(Date.parse(decoded[timestampKey])) ||
     !Number.isSafeInteger(decoded.eventId) ||
     decoded.eventId < 1
   ) {
     throw eventRequestError("INVALID_CURSOR");
   }
-  return { updatedAt: decoded.updatedAt, eventId: decoded.eventId };
+  return { [timestampKey]: decoded[timestampKey], eventId: decoded.eventId };
 };
+
+const encodeCursor = (row) => encodeKeysetCursor("updatedAt", row.updated_at, row.event_id);
+const decodeCursor = (value) => decodeKeysetCursor(value, "updatedAt");
+
+const encodeDiscoveryCursor = (row) => encodeKeysetCursor("startDatetime", row.start_datetime, row.event_id);
+const decodeDiscoveryCursor = (value) => decodeKeysetCursor(value, "startDatetime");
 
 // Newest edit first (SPM-37). Keyset paging stays stable while auto-save keeps
 // moving updated_at; event_id breaks ties between equal timestamps.
@@ -625,65 +634,42 @@ const findOrganiserEventRequests = async (user, { limit, cursor = null, status =
   };
 };
 
-const findPublishedAttendeeEvents = async (user, { limit, cursor = null }) => {
-  const after = decodeCursor(cursor);
-  let query = supabase
+// The list and the detail share this query, so visibility and availability cannot drift apart.
+const attendeeDiscoveryQuery = () =>
+  supabase
     .from("event")
     .select(LIST_ATTENDEE_DISCOVERY_SELECT)
+    .eq(...REGISTERED_SEATS_FILTER)
     .eq("is_published", true)
     .in("status", ATTENDEE_DISCOVERY_STATUSES)
     .gt("end_datetime", new Date().toISOString());
+
+// Soonest start first; event_id breaks ties between equal start times.
+const findPublishedAttendeeEvents = async (user, { limit, cursor = null }) => {
+  const after = decodeDiscoveryCursor(cursor);
+  let query = attendeeDiscoveryQuery();
   if (after) {
     query = query.or(
-      `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`
+      `start_datetime.gt."${after.startDatetime}",and(start_datetime.eq."${after.startDatetime}",event_id.gt.${after.eventId})`
     );
   }
   const { data, error } = await query
-    .order("updated_at", { ascending: false })
-    .order("event_id", { ascending: false })
+    .order("start_datetime", { ascending: true })
+    .order("event_id", { ascending: true })
     .limit(limit + 1);
   if (error) throw dbError(error);
 
   const page = data.slice(0, limit);
   return {
     events: page.map((row) => toAttendeeDiscoveryItem(row)),
-    nextCursor: data.length > limit ? encodeCursor(page[page.length - 1]) : null,
+    nextCursor: data.length > limit ? encodeDiscoveryCursor(page[page.length - 1]) : null,
   };
 };
 
 const findPublishedAttendeeEvent = async (eventId) => {
-  const [eventResult, registrationResult] = await Promise.all([
-    supabase
-      .from("event")
-      .select(LIST_ATTENDEE_DISCOVERY_SELECT)
-      .eq("is_published", true)
-      .in("status", ATTENDEE_DISCOVERY_STATUSES)
-      .gt("end_datetime", new Date().toISOString())
-      .eq("event_id", eventId)
-      .maybeSingle(),
-    supabase
-      .from("registration")
-      .select("event_id", { count: "exact", head: true })
-      .eq("event_id", eventId)
-      .eq("registration_status", "REGISTERED"),
-  ]);
-
-  const { data, error } = eventResult;
+  const { data, error } = await attendeeDiscoveryQuery().eq("event_id", eventId).maybeSingle();
   if (error) throw dbError(error);
-  if (!data) return null;
-
-  const registeredCount = registrationResult?.count ?? 0;
-  return {
-    ...toAttendeeDetail({ ...data, registered_count: registeredCount }),
-    registrationAvailability: computeRegistrationAvailability({
-      status: data.status,
-      is_registration_enabled: data.is_registration_enabled,
-      registration_capacity: data.registration_capacity,
-      registration_open_at: data.registration_open_at,
-      registration_close_at: data.registration_close_at,
-      registeredCount,
-    }),
-  };
+  return data ? toAttendeeDetail(data) : null;
 };
 
 const toLookupIds = (values) =>
@@ -753,5 +739,7 @@ module.exports = {
   computeRegistrationAvailability,
   encodeCursor,
   decodeCursor,
+  encodeDiscoveryCursor,
+  decodeDiscoveryCursor,
   findValidationContext,
 };
