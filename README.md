@@ -60,6 +60,15 @@ All event routes require an `ORGANISER` bearer token and use the error shape des
 - **Submission** assigns an active coordinator by round robin and writes the event, activity record and two notifications (one to the organiser, one to the coordinator) in one database transaction (`submit_event_request`). If the database rejects a submission, the `400` still carries field-level `fields`.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
+### Venue Catalogue (SPM-72)
+
+`GET /api/venues` is read-only and requires an authenticated `COORDINATOR`,
+`COORDINATOR_LEAD`, `VENUE_STAFF` or `SAFETY_OFFICER`. It returns
+`{ venues, detailsAvailable }`. PostgreSQL venue rows are the catalogue
+availability source; MongoDB Atlas `venue_details` documents add descriptive
+catalogue fields. If MongoDB is unavailable, the endpoint returns PostgreSQL
+venue rows with descriptive fields marked `not checked`.
+
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
 
 ### Authentication (SPM-32)
@@ -109,6 +118,8 @@ SUPABASE_SERVICE_ROLE_KEY=<server-only-key>
 # Optional
 FRONTEND_ORIGIN=http://localhost:3000   # the only browser origin allowed by CORS (default shown)
 SUPABASE_ANON_KEY=<anon/publishable key>  # tests sign in with it like the browser; falls back to the service role key
+MONGODB_URI=mongodb+srv://<atlas-user>:<url-encoded-password>@spm.ldi4ulx.mongodb.net/?appName=SPM
+MONGODB_DB_NAME=connectsphere_dev
 SEED_ACCOUNT_PASSWORD=<private password for seeded dev accounts, 12+ characters>
 SEED_NAMESPACE=dev                         # prefix for seeded emails and organisation names
 SIGNUP_RATE_LIMIT_MAX=5                    # sign-up attempts per IP per 15 minutes (default 5; tests raise it)
