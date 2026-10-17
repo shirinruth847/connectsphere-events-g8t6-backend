@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "jest tests/unit",
+    "test": "jest tests/unit tests/unassignedEvents.test.js",
     "test:integration": "jest tests/integration --runInBand",
     "test:cleanup": "node tests/fixtures/cleanupManifests.js",
     "seed:unassigned": "node supabase/seed/seedUnassignedEvent.js",

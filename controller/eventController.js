@@ -301,7 +301,7 @@ const listMyEventRequests = async (req, res, next) => {
 async function getUnassignedEvents(req, res, next) {
   try {
     const events = await eventModel.findUnassignedSubmittedEvents();
-    return res.status(200).json({ events: events.map(eventModel.toListItem) });
+    return res.status(200).json({ events: events.map((event) => eventModel.toListItem(event)) });
   } catch (err) {
     return next(err);
   }

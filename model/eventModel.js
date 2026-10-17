@@ -28,6 +28,8 @@ const EVENT_SELECT =
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 const LIST_SELECT =
   "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+const UNASSIGNED_QUEUE_SELECT =
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
 
 // Calendar events include richer details for coordinators' schedule view.
 const CALENDAR_SELECT =
@@ -232,6 +234,7 @@ const toEventRequestError = (error, fields) => {
   if (code === "23502" && /column "title"/.test(message)) {
     return eventRequestError("VALIDATION_FAILED", { title: MESSAGES.titleRequired });
   }
+  if (code === "23P01") return eventRequestError("COORDINATOR_CONFLICT");
   // Data exceptions (bad casts, out-of-range values) are client input the validator missed.
   if (code.startsWith("22") || message === "INVALID_EVENT_PATCH") {
     return eventRequestError("VALIDATION_FAILED", {});
@@ -344,7 +347,7 @@ const findCoordinatorEvents = async (coordinatorId) => {
 const findUnassignedSubmittedEvents = async () => {
   const { data, error } = await supabase
     .from("event")
-    .select(LIST_SELECT)
+    .select(UNASSIGNED_QUEUE_SELECT)
     .eq("status", "SUBMITTED")
     .is("coordinator_id", null)
     .order("created_at", { ascending: true })

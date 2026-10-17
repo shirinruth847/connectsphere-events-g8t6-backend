@@ -1,5 +1,6 @@
 jest.mock("../config/supabase", () => ({
   from: jest.fn(),
+  rpc: jest.fn(),
 }));
 
 const supabase = require("../config/supabase");
@@ -13,15 +14,14 @@ const makeResponse = () => ({
   json: jest.fn().mockReturnThis(),
 });
 
-const chain = (result) => {
-  const query = {};
-  for (const method of ["select", "eq", "is", "not", "lt", "gt", "order", "update"]) {
-    query[method] = jest.fn(() => query);
-  }
-  query.maybeSingle = jest.fn().mockResolvedValue(result);
-  query.single = jest.fn().mockResolvedValue(result);
-  return query;
-};
+const leadId = 10;
+const coordinatorId = 7;
+
+const authReq = (body) => ({
+  params: { id: "42" },
+  body,
+  user: { user_id: leadId, role: USER_ROLES.COORDINATOR_LEAD },
+});
 
 describe("[SPM-174] unassigned event queue", () => {
   afterEach(() => {
@@ -102,10 +102,13 @@ describe("[SPM-174] unassigned event queue", () => {
       { user_id: 7, name: "Alice Coordinator" },
       { user_id: 8, name: "Bob Coordinator" },
     ];
-    const users = chain({
+    const users = {
       data: userRows,
       error: null,
-    });
+      select: jest.fn().mockReturnThis(),
+      eq: jest.fn().mockReturnThis(),
+      order: jest.fn().mockResolvedValue({ data: userRows, error: null }),
+    };
     const eventRows = [
       {
         event_id: 91,
@@ -124,13 +127,14 @@ describe("[SPM-174] unassigned event queue", () => {
         end_datetime: "2026-11-02T10:00:00.000Z",
       },
     ];
-    const events = chain({
+    const events = {
       data: eventRows,
       error: null,
-    });
+      select: jest.fn().mockReturnThis(),
+      not: jest.fn().mockReturnThis(),
+      order: jest.fn().mockResolvedValue({ data: eventRows, error: null }),
+    };
     supabase.from.mockImplementation((table) => (table === "user" ? users : events));
-    users.order.mockResolvedValue({ data: userRows, error: null });
-    events.order.mockResolvedValue({ data: eventRows, error: null });
 
     await expect(eventModel.findCoordinatorAvailability()).resolves.toEqual([
       expect.objectContaining({ coordinatorId: 7, name: "Alice Coordinator", events: expect.any(Array) }),
@@ -139,104 +143,46 @@ describe("[SPM-174] unassigned event queue", () => {
     expect(users.eq).toHaveBeenNthCalledWith(1, "role", "COORDINATOR");
     expect(users.eq).toHaveBeenNthCalledWith(2, "is_active", true);
     expect(events.not).toHaveBeenCalledWith("coordinator_id", "is", null);
-    expect(events.not).toHaveBeenCalledWith("status", "in", '("DRAFT","REJECTED","CANCELLED")');
+    expect(events.not).toHaveBeenCalledWith("status", "in", '("DRAFT","COMPLETED","REJECTED","CANCELLED")');
     expect(events.order).toHaveBeenCalledWith("start_datetime", { ascending: true });
   });
 
   test("[SPM-174-AC3] rejects an assignment when the coordinator has an overlapping event", async () => {
-    const event = chain({
-      data: {
-        event_id: 42,
-        status: "SUBMITTED",
-        coordinator_id: null,
-        start_datetime: "2026-11-01T10:00:00.000Z",
-        end_datetime: "2026-11-01T12:00:00.000Z",
-      },
-      error: null,
-    });
-    const coordinator = chain({
-      data: { user_id: 7, name: "Alice Coordinator" },
-      error: null,
-    });
-    const conflictsResult = [{ title: "Existing event", start_datetime: "2026-11-01T11:00:00.000Z", end_datetime: "2026-11-01T13:00:00.000Z" }];
-    const conflicts = chain({ data: conflictsResult, error: null });
-    conflicts.gt.mockResolvedValue({
-      data: conflictsResult,
-      error: null,
-    });
-    supabase.from
-      .mockReturnValueOnce(event)
-      .mockReturnValueOnce(coordinator)
-      .mockReturnValueOnce(conflicts);
+    supabase.rpc.mockResolvedValue({ data: null, error: { message: "COORDINATOR_CONFLICT", code: "P0001" } });
 
-    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7 })).rejects.toMatchObject({
+    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: coordinatorId, leadId })).rejects.toMatchObject({
       name: "EventRequestError",
       code: "COORDINATOR_CONFLICT",
     });
-    expect(conflicts.lt).toHaveBeenCalledWith("start_datetime", "2026-11-01T12:00:00.000Z");
-    expect(conflicts.gt).toHaveBeenCalledWith("end_datetime", "2026-11-01T10:00:00.000Z");
-    expect(supabase.from).toHaveBeenCalledTimes(3);
+    expect(supabase.rpc).toHaveBeenCalledWith("assign_event_coordinator", {
+      p_event_id: 42,
+      p_coordinator_id: coordinatorId,
+      p_lead_id: leadId,
+    });
   });
 
   test("[SPM-174-AC3] allows an assignment when an existing event only touches a boundary", async () => {
-    const event = chain({
-      data: {
-        event_id: 42,
-        status: "SUBMITTED",
-        coordinator_id: null,
-        start_datetime: "2026-11-01T10:00:00.000Z",
-        end_datetime: "2026-11-01T12:00:00.000Z",
-      },
-      error: null,
-    });
-    const coordinator = chain({
-      data: { user_id: 7, name: "Alice Coordinator" },
-      error: null,
-    });
-    const conflicts = chain({ data: [], error: null });
-    conflicts.gt.mockResolvedValue({ data: [], error: null });
     const updated = {
       event_id: 42,
       status: "SUBMITTED",
-      coordinator_id: 7,
+      coordinator_id: coordinatorId,
       start_datetime: "2026-11-01T10:00:00.000Z",
       end_datetime: "2026-11-01T12:00:00.000Z",
     };
-    const update = chain({ data: updated, error: null });
-    supabase.from
-      .mockReturnValueOnce(event)
-      .mockReturnValueOnce(coordinator)
-      .mockReturnValueOnce(conflicts)
-      .mockReturnValueOnce(update);
+    supabase.rpc.mockResolvedValue({ data: { event: updated }, error: null });
 
-    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7 })).resolves.toEqual(updated);
-    expect(update.update).toHaveBeenCalledWith({ coordinator_id: 7 });
-    expect(update.is).toHaveBeenCalledWith("coordinator_id", null);
-  });
-
-  test("[SPM-174-AC3] maps an invalid coordinator to a structured client error", async () => {
-    const event = chain({
-      data: { event_id: 42, status: "SUBMITTED", coordinator_id: null },
-      error: null,
-    });
-    const coordinator = chain({ data: null, error: null });
-    supabase.from.mockReturnValueOnce(event).mockReturnValueOnce(coordinator);
-    const res = makeResponse();
-
-    await eventController.patchCoordinator({ params: { id: "42" }, body: { coordinatorId: 999 } }, res, jest.fn());
-
-    expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({
-      error: "Please correct the highlighted fields.",
-      code: "VALIDATION_FAILED",
-      fields: { coordinatorId: "Send a positive integer coordinatorId." }
+    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: coordinatorId, leadId })).resolves.toEqual(updated);
+    expect(supabase.rpc).toHaveBeenCalledWith("assign_event_coordinator", {
+      p_event_id: 42,
+      p_coordinator_id: coordinatorId,
+      p_lead_id: leadId,
     });
   });
 
   test("[SPM-174-AC2] rejects malformed assignment input before querying the database", async () => {
     const res = makeResponse();
 
-    await eventController.patchCoordinator({ params: { id: "42" }, body: { coordinatorId: "7" } }, res, jest.fn());
+    await eventController.patchCoordinator(authReq({}), res, jest.fn());
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({
@@ -245,5 +191,20 @@ describe("[SPM-174] unassigned event queue", () => {
       fields: { coordinatorId: "Send a positive integer coordinatorId." },
     });
     expect(supabase.from).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-174-AC2] rejects a non-integer coordinator id before querying the database", async () => {
+    const res = makeResponse();
+
+    await eventController.patchCoordinator(authReq({ coordinatorId: "7" }), res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Select an active Event Coordinator.",
+      code: "INVALID_COORDINATOR",
+    });
+    expect(supabase.from).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 });
