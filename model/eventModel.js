@@ -358,11 +358,12 @@ const submitEvent = async ({
 // visibility begins after submission).
 const buildOrganiserVisibilityFilter = (user) => {
   const ownRequests = `organiser_id.eq.${Number(user.user_id)}`;
+  const coordinatorRequests = `coordinator_id.eq.${Number(user.user_id)}`;
   const organisationIds = Array.isArray(user.organisation_ids)
     ? user.organisation_ids.map(Number).filter(Number.isSafeInteger)
     : [];
-  if (organisationIds.length === 0) return ownRequests;
-  return `${ownRequests},and(organisation_id.in.(${organisationIds.join(",")}),status.neq.DRAFT)`;
+  if (organisationIds.length === 0) return `${ownRequests},${coordinatorRequests}`;
+  return `${ownRequests},${coordinatorRequests},and(organisation_id.in.(${organisationIds.join(",")}),status.neq.DRAFT)`;
 };
 
 const findVisibleEvent = async (eventId, user) => {
@@ -473,16 +474,18 @@ const mapCalendarEvent = (row, coordinatorNames) => ({
     coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
 });
 
-const findLeadAssignments = async () => {
+const findLeadAssignments = async (leadId) => {
   const [
     { data: events, error: eventsError },
     { data: users, error: usersError },
   ] = await Promise.all([
     supabase
       .from("event")
-      .select(LIST_SELECT)
+      .select(`${LIST_SELECT},event_assignments!inner(assignment_id,assigned_by,ended_at)`)
       .not("coordinator_id", "is", null)
       .not("status", "in", '("COMPLETED","REJECTED","CANCELLED")')
+      .eq("event_assignments.assigned_by", leadId || 0)
+      .is("event_assignments.ended_at", null)
       .order("start_datetime", { ascending: true })
       .order("event_id", { ascending: true }),
     supabase.from("user").select("user_id,name").eq("role", "COORDINATOR"),

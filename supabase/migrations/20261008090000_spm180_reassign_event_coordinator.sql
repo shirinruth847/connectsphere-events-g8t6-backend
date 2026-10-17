@@ -173,6 +173,17 @@ BEGIN
     FROM public."user"
    WHERE user_id = v_event.coordinator_id;
 
+  -- Ensure only the supervising Lead can reassign this event.
+  PERFORM 1
+    FROM public.event_assignments
+   WHERE event_id = p_event_id
+     AND ended_at IS NULL
+     AND assigned_by = p_lead_id
+    FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'FORBIDDEN';
+  END IF;
+
   -- Serializes assignments to this coordinator so overlapping events cannot
   -- both pass the availability check concurrently.
   SELECT *

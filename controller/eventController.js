@@ -273,7 +273,7 @@ const assignCoordinator = async (req, res, next) => {
 
 const listLeadAssignments = async (req, res, next) => {
   try {
-    const assignments = await eventModel.findLeadAssignments();
+    const assignments = await eventModel.findLeadAssignments(req.user?.user_id);
     return res.status(200).json({ assignments });
   } catch (error) {
     return handleError(error, res, next);

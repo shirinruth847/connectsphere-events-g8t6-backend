@@ -10,12 +10,12 @@ const CANONICAL_EVENT_STATES = [
 
 describe("[TC-LOGIN-005] buildOrganiserVisibilityFilter", () => {
   test("should_limit_to_own_requests_when_organiser_has_no_organisations", () => {
-    expect(buildOrganiserVisibilityFilter({ user_id: 7, organisation_ids: [] })).toBe("organiser_id.eq.7");
+    expect(buildOrganiserVisibilityFilter({ user_id: 7, organisation_ids: [] })).toBe("organiser_id.eq.7,coordinator_id.eq.7");
   });
 
   test("should_add_non_draft_organisation_requests_when_organiser_has_memberships", () => {
     expect(buildOrganiserVisibilityFilter({ user_id: 7, organisation_ids: [3, 9] }))
-      .toBe("organiser_id.eq.7,and(organisation_id.in.(3,9),status.neq.DRAFT)");
+      .toBe("organiser_id.eq.7,coordinator_id.eq.7,and(organisation_id.in.(3,9),status.neq.DRAFT)");
   });
 });
 
