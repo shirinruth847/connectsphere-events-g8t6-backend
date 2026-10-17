@@ -2,7 +2,7 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
-const { NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require("../config/eventConstants");
+const { EVENT_STATUS, NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require("../config/eventConstants");
 const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
 
 // Allowlist: the ONLY fields a client may set. status, organiser_id, coordinator_id etc.
@@ -28,6 +28,8 @@ const EVENT_SELECT =
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 const LIST_SELECT =
   "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+const UNASSIGNED_QUEUE_SELECT =
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
 
 // Calendar events include richer details for coordinators' schedule view.
 const CALENDAR_SELECT =
@@ -171,6 +173,8 @@ const DOMAIN_CODES = new Set([
   "IDEMPOTENCY_KEY_REQUIRED",
   "IDEMPOTENCY_KEY_REUSED",
   "IDEMPOTENCY_IN_PROGRESS",
+  "COORDINATOR_CONFLICT",
+  "INVALID_COORDINATOR",
 ]);
 
 // submit_event_request reports "<field>:<reason>" pairs in the error detail.
@@ -208,11 +212,12 @@ const CONSTRAINT_FIELD_ERRORS = Object.freeze({
   event_equipment_requirement_equipment_id_fkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
 });
 
-const toEventRequestError = (error) => {
+const toEventRequestError = (error, fields) => {
+  if (typeof error === "string") return eventRequestError(error, fields);
   const message = error.message || "";
   const code = error.code || "";
 
-  if (DOMAIN_CODES.has(message)) return eventRequestError(message);
+  if (DOMAIN_CODES.has(message)) return eventRequestError(message, error.fields);
   if (message === "INVALID_EVENT_SUBMISSION") {
     const fields = {};
     for (const failure of String(error.details || "").split(",")) {
@@ -229,6 +234,7 @@ const toEventRequestError = (error) => {
   if (code === "23502" && /column "title"/.test(message)) {
     return eventRequestError("VALIDATION_FAILED", { title: MESSAGES.titleRequired });
   }
+  if (code === "23P01") return eventRequestError("COORDINATOR_CONFLICT");
   // Data exceptions (bad casts, out-of-range values) are client input the validator missed.
   if (code.startsWith("22") || message === "INVALID_EVENT_PATCH") {
     return eventRequestError("VALIDATION_FAILED", {});
@@ -311,7 +317,8 @@ const findVisibleEvent = async (eventId, user) => {
   }
   const { data, error } = await query.maybeSingle();
   if (error) throw dbError(error);
-  return data;
+  if (!data) return null;
+  return toListItem(data, user && user.user_id);
 };
 
 const findCoordinatorEvents = async (coordinatorId) => {
@@ -340,7 +347,7 @@ const findCoordinatorEvents = async (coordinatorId) => {
 const findUnassignedSubmittedEvents = async () => {
   const { data, error } = await supabase
     .from("event")
-    .select(LIST_SELECT)
+    .select(UNASSIGNED_QUEUE_SELECT)
     .eq("status", "SUBMITTED")
     .is("coordinator_id", null)
     .order("created_at", { ascending: true })
@@ -601,6 +608,13 @@ const findValidationContext = async (input) => {
     equipmentIds: equipment.data.map(({ equipment_id }) => equipment_id),
   };
 };
+
+// Allowed layout options come from the rooms that actually exist, plus "no preference".
+async function getAllowedLayouts() {
+  const { data, error } = await supabase.from('room').select('layout_type');
+  if (error) throw error;
+  return [NO_LAYOUT_PREFERENCE, ...new Set(data.map((room) => room.layout_type))];
+}
 
 module.exports = {
   getUnsupportedInputFields,
