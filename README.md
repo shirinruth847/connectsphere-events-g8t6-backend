@@ -259,6 +259,14 @@ also matches the exact synthetic run prefix. The application retains append-only
 audit grants. With no privileged test connection, those suites are blocked;
 ordinary auth/signup tests do not require audit-log deletion.
 
+For an IPv4-only network, copy the Session pooler URI from Supabase's Connect
+panel; use its supplied hostname and username. For verified TLS, download the
+CA certificate from Database Settings > SSL Configuration and configure the
+private test URI with `sslmode=verify-full` and `sslrootcert` pointing to that
+local file. Keep the password and completed URI out of Git and browser code.
+The variable name does not make a shared project an isolated test database.
+
 Do not delete applied migration files or reset the shared database to remove
-pending UI features. Later assignment/history migrations are a separate
-integration concern; current live assignment transitions to UNDER_REVIEW.
+pending UI features. Current live assignment transitions to UNDER_REVIEW.
+The full integration run passed 81 tests against the configured development
+database; reconstruction from local migration history remains a separate check.

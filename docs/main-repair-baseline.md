@@ -110,18 +110,27 @@ revert those merge commits or import the pending PRs wholesale.
   Each run removed its three temporary events and dependent rows. Append-only
   audit entries remain attached to existing synthetic seed users intentionally;
   no users were created, reset or deleted by the live browser runner.
-- Complete mutating event/reassignment suites were **not run**: their preflight
-  requires `TEST_DATABASE_URL`, which is absent. They now fail before fixture
-  creation. This is not a claim that every old integration suite is green.
+- The previously blocked complete integration run now passes: 4 suites,
+  81 tests (49 auth, 15 signup, 14 event/draft and 3 reassignment). The test
+  connection uses the configured shared development project through its
+  session pooler, with TLS certificate and hostname verification against
+  Supabase's official CA. The variable name does not imply an isolated
+  database. No schema changes were applied. Each suite verified removal of
+  its manifest-listed records, including temporary users and audit rows;
+  zero fixture manifests remain. Machine-readable evidence is saved locally
+  at `/private/tmp/connectsphere-integration-20261018.json`.
 - A separate privileged test connection can remove only manifest-listed users'
   audit rows whose email matches the exact synthetic run prefix. Parameterised
   SQL and rollback tests protect this boundary; runtime audit DELETE grants
   were not broadened. Supply the connection only to test commands.
 - Live initial assignment enters UNDER_REVIEW, as the current Master requires.
-  Its old SUBMITTED-list assertion was corrected. Source/deployed migration
-  drift remains a pending assignment/history integration concern: the later
-  SPM-33 correction relies on history columns absent from this baseline. No
-  partial migration was copied or applied to the shared database.
+  Its old SUBMITTED-list assertion was corrected. Initial audit concerns about
+  source/deployed migration drift did not prevent the current assignment and
+  reassignment integration checks from passing, including history and
+  notifications. This verifies the deployed database, not reconstruction of
+  a fresh database from this branch's migration files. No partial migration
+  was copied or applied to the shared database. Pending coordinator routes
+  remain disabled by default; their tests explicitly enable them.
 - Default scripts use Webpack because Turbopack failed with a worker port error
   in the audit environment. Both build roots are explicit. BACKEND_URL is
   accepted as a build-time fallback for NEXT_PUBLIC_BACKEND_URL.
