@@ -30,4 +30,13 @@ const addRoom = async (req, res) => {
   }
 };
 
-module.exports = { getVenueCatalogue, addVenue, addRoom };
+const updateVenue = async (req, res) => {
+  try {
+    const venue = await venueModel.updateVenue(req.params.venueId, req.body);
+    res.status(200).json({ success: true, data: venue });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+};
+
+module.exports = { getVenueCatalogue, addVenue, addRoom, updateVenue };

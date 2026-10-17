@@ -1,0 +1,19 @@
+{
+  "$jsonSchema": {
+    "bsonType": "object",
+    "required": ["_id", "pg_version", "name", "location"],
+    "additionalProperties": false,
+    "properties": {
+      "_id": { "bsonType": "string" },
+      "pg_version": { "bsonType": "int", "minimum": 1 },
+      "name": { "bsonType": "string", "maxLength": 200 },
+      "location": { "bsonType": "string", "maxLength": 500 },
+      "description": { "bsonType": ["string", "null"], "maxLength": 2000 },
+      "facilities": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 100 }, "maxItems": 50 },
+      "accessibilityFeatures": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 100 }, "maxItems": 50 },
+      "supportedLayouts": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 100 }, "maxItems": 20 },
+      "emergencyAccess": { "bsonType": ["string", "null"], "maxLength": 1000 },
+      "knownRestrictions": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 200 }, "maxItems": 50 }
+    }
+  }
+}

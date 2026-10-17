@@ -90,4 +90,16 @@ const createRoom = async (roomData) => {
   return data;
 };
 
-module.exports = { getVenueCatalogue, getAllVenues, createVenue, createRoom };
+// Update venue
+const updateVenue = async (venueId, data) => {
+  const { data: row, error } = await supabase
+    .from("venue")
+    .update({ ...data, updated_at: new Date().toISOString() })
+    .eq("venue_id", venueId)
+    .select()
+    .single();
+  if (error) throw error;
+  return row;
+};
+
+module.exports = { getVenueCatalogue, getAllVenues, createVenue, createRoom, updateVenue };
