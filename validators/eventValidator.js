@@ -219,12 +219,33 @@ const validateSubmission = (input = {}, { now = new Date(), allowedLayouts } = {
   return errors;
 };
 
+// SPM-33 AC4: a coordinator's direct edit of ordinary fields. Each field is
+// optional, but one that is sent cannot be blanked on a submitted event.
+const validateOrdinaryFields = (input = {}) => {
+  const errors = {};
+  const required = [
+    ["title", MESSAGES.titleRequired],
+    ["purpose", MESSAGES.purposeRequired],
+    ["description", MESSAGES.descriptionRequired],
+  ];
+  for (const [field, message] of required) {
+    if (input[field] === undefined) continue;
+    if (isBlank(input[field])) {
+      errors[field] = message;
+    } else {
+      checkText(input, field, errors);
+    }
+  }
+  return errors;
+};
+
 const hasErrors = (errors) => Object.keys(errors).length > 0;
 
 module.exports = {
   validateDraft,
   validateSubmission,
   validateRequirements,
+  validateOrdinaryFields,
   hasErrors,
   toWholeNumber,
   MESSAGES,

@@ -85,8 +85,9 @@ const insertOne = async (table, row, idColumn, step) =>
   check(await supabase.from(table).insert(row).select(idColumn).single(), step)[idColumn];
 
 // Callers pass a run ID they already hold, so a failure part-way through
-// setup can still be cleaned up from the manifest.
-const createAuthFixtures = async (runId) => {
+// setup can still be cleaned up from the manifest. extraAccounts adds accounts
+// only one suite needs (e.g. a second coordinator and a Lead for reassignment).
+const createAuthFixtures = async (runId, { extraAccounts = [] } = {}) => {
   const password = `Spm32-${crypto.randomBytes(12).toString("base64url")}`;
   const manifest = emptyManifest(runId);
   saveManifest(manifest);
@@ -108,7 +109,7 @@ const createAuthFixtures = async (runId) => {
   }
 
   const accounts = {};
-  for (const account of ACCOUNTS) {
+  for (const account of [...ACCOUNTS, ...extraAccounts]) {
     const email = `spm32-${runId}-${account.key.toLowerCase()}@${TEST_EMAIL_DOMAIN}`;
     const authUser = check(
       await supabase.auth.admin.createUser({ email, password, email_confirm: true }),
@@ -257,6 +258,23 @@ const deleteIn = async (table, column, ids) => {
   }
 };
 
+// History is append-only and outlives the people in it (Master section 6.1): the
+// database refuses to delete a profile that wrote history entries. Such test users
+// are kept but deactivated, and lose their Auth account like every other one.
+const usersWithHistory = async (userIds) => {
+  if (!userIds.length) return [];
+  const data = check(await supabase.from("activity_log").select("user_id").in("user_id", userIds), "find users with history");
+  return [...new Set(data.map((row) => row.user_id))];
+};
+
+const retireUsers = async (userIds) => {
+  const kept = await usersWithHistory(userIds);
+  await deleteIn("user", "user_id", userIds.filter((id) => !kept.includes(id)));
+  if (kept.length) {
+    check(await supabase.from("user").update({ is_active: false }).in("user_id", kept), "deactivate users with history");
+  }
+};
+
 // Throws if anything this run created is still present.
 const verifyManifestClean = async (manifest) => {
   const leftovers = [];
@@ -270,8 +288,6 @@ const verifyManifestClean = async (manifest) => {
     ["event_equipment_requirement", "event_id", eventIds],
     ["event", "event_id", eventIds],
     ["organisation_membership", "user_id", manifest.userIds],
-    ["activity_log", "user_id", manifest.userIds],
-    ["user", "user_id", manifest.userIds],
     ["room", "room_id", manifest.roomIds],
     ["venue", "venue_id", manifest.venueIds],
     ["equipment", "equipment_id", manifest.equipmentIds || []],
@@ -286,6 +302,21 @@ const verifyManifestClean = async (manifest) => {
       leftovers.push(`${table}: ${error ? error.message : count}`);
     }
   }
+  // Profiles that wrote history stay, deactivated; every other profile must be gone.
+  const kept = await usersWithHistory(manifest.userIds);
+  const removable = manifest.userIds.filter((id) => !kept.includes(id));
+  if (removable.length) {
+    const { count, error } = await supabase.from("user").select("user_id", { count: "exact", head: true }).in("user_id", removable);
+    if (error || count > 0) leftovers.push(`user: ${error ? error.message : count}`);
+  }
+  if (kept.length) {
+    const { count, error } = await supabase
+      .from("user")
+      .select("user_id", { count: "exact", head: true })
+      .in("user_id", kept)
+      .eq("is_active", true);
+    if (error || count > 0) leftovers.push(`active user with history: ${error ? error.message : count}`);
+  }
   for (const authUserId of manifest.authUserIds) {
     const { data } = await supabase.auth.admin.getUserById(authUserId);
     if (data && data.user) {
@@ -298,18 +329,19 @@ const verifyManifestClean = async (manifest) => {
 };
 
 // Dependency-safe order; Auth accounts last so profiles never dangle mid-cleanup.
-// Deleting the users cascades their activity_log and idempotency_records rows.
+// Deleting a user cascades their idempotency_records; history entries are kept.
 const cleanupManifest = async (manifest) => {
   const eventIds = manifest.eventIds || [];
   await deleteIn("registration", "registration_id", manifest.registrationIds);
   await deleteIn("venue_booking", "booking_id", manifest.bookingIds);
   await deleteIn("notification", "event_id", eventIds);
+  // Assignment history references the event without a cascade.
   await deleteIn("event_assignments", "event_id", eventIds);
   await deleteIn("event_venue_preference", "event_id", eventIds);
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);
   await deleteIn("organisation_membership", "user_id", manifest.userIds);
-  await deleteIn("user", "user_id", manifest.userIds);
+  await retireUsers(manifest.userIds);
   await deleteIn("room", "room_id", manifest.roomIds);
   await deleteIn("venue", "venue_id", manifest.venueIds);
   await deleteIn("equipment", "equipment_id", manifest.equipmentIds || []);
