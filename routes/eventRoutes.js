@@ -3,6 +3,7 @@ const router = express.Router();
 
 const {
   createAndSubmit,
+  getRequestOptions,
   createDraft,
   updateDraft,
   submitDraft,
@@ -28,6 +29,7 @@ const leadOnly = [requireAuth, requireRole(USER_ROLES.COORDINATOR_LEAD)];
 // GET / is left free for event discovery (Master section 3.4).
 router.post("/", organiserOnly, createAndSubmit);
 router.post("/drafts", organiserOnly, createDraft);
+router.get("/request-options", organiserOnly, getRequestOptions);
 router.get("/mine", organiserOnly, validateCursorPagination, listMyEventRequests); // must stay above "/:id"
 // Pending coordinator workflows are opt-in on this completed-ticket baseline.
 if (process.env.ENABLE_COORDINATOR_WORKFLOWS === "true") {
