@@ -231,3 +231,34 @@ Format: `<type>/<ticket-id>-<short-description>` or `<type>/<short-description>`
    git checkout main
    git pull origin main
    ```
+
+
+## Completed-ticket repair baseline
+
+See `docs/main-repair-baseline.md` for scope, removed entrypoints and AC evidence.
+Existing event write/validation contracts are preserved. Request creation gains
+an organiser-only, read-only `GET /api/events/request-options` response containing
+`venues: [{ venueId, name }]` and `layouts: [layoutType]`; it creates no holds.
+
+Pending lead queue/assignment/reassignment endpoints are unavailable by default.
+Set `ENABLE_COORDINATOR_WORKFLOWS=true` only when intentionally testing that work.
+The coordinator's own assigned-event read remains part of SPM-32.
+
+`npm test` runs all unit suites. Real auth/signup can be checked separately:
+
+```sh
+node node_modules/jest/bin/jest.js --runInBand --runTestsByPath tests/integration/auth.integration.test.js tests/integration/signup.integration.test.js
+```
+
+The full `npm run test:integration` event/reassignment suites also require
+TEST_DATABASE_URL: a privileged test-only PostgreSQL connection to the same
+isolated database as SUPABASE_URL. Supply it only to the test command, never the
+application runtime. Their preflight checks permissions before creating fixtures.
+Cleanup deletes audit rows only for the manifest's numeric user IDs whose email
+also matches the exact synthetic run prefix. The application retains append-only
+audit grants. With no privileged test connection, those suites are blocked;
+ordinary auth/signup tests do not require audit-log deletion.
+
+Do not delete applied migration files or reset the shared database to remove
+pending UI features. Later assignment/history migrations are a separate
+integration concern; current live assignment transitions to UNDER_REVIEW.
