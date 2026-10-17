@@ -102,8 +102,9 @@ revert those merge commits or import the pending PRs wholesale.
 - Frontend `npm test`: 8 tests passed. Lint and Webpack production compilation,
   TypeScript and prerendering passed. Browser results are in the frontend's
   ignored `test-results/browser-results.json`; see the companion report for the
-  final count (28/28 passed). Three focused development-mode checks also
-  passed; save notices survive React Strict Mode mount replay.
+  final count (29/29 passed, including organiser layout parity). Three focused
+  development-mode checks also passed; save notices survive React Strict Mode
+  mount replay.
 - Frontend `npm run test:live`: real seed-account login/logout for the five
   requested roles and request/draft/autosave journeys passed. A focused rerun
   also checked every submitted field and one venue preference in the database.
