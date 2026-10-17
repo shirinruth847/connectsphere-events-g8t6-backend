@@ -93,6 +93,7 @@ const organiserEventCount = async (key) =>
   )).length;
 
 beforeAll(async () => {
+  await require("../fixtures/adminCleanup").assertAuditCleanupAvailable();
   fixtures = await createAuthFixtures(runId);
 });
 
@@ -140,9 +141,9 @@ describe("POST /api/events (SPM-35)", () => {
       fixtures.accounts.coordinatorThree.userId,
     ].sort());
 
-    const list = await call("get", "/api/events/mine?status=SUBMITTED", "organiserA");
+    const list = await call("get", "/api/events/mine?status=UNDER_REVIEW", "organiserA");
     expect(list.body.events.find((event) => event.eventId === eventId)).toEqual(
-      expect.objectContaining({ requestId, statusLabel: "Pending Approval", isOwner: true })
+      expect.objectContaining({ requestId, status: "UNDER_REVIEW", isOwner: true })
     );
   });
 

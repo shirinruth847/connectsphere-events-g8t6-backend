@@ -42,6 +42,7 @@ const eventRow = (eventId) => rows(
 );
 
 beforeAll(async () => {
+  await require("../fixtures/adminCleanup").assertAuditCleanupAvailable();
   fixtures = await createAuthFixtures(runId);
 });
 
