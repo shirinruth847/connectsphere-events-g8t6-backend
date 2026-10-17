@@ -142,3 +142,14 @@ schema changes have been performed.
 The three inactive, unlinked profiles and protected audit rows from the earlier
 17 October audit still require database-owner cleanup using its scoped SQL.
 The repair run did not create additional stranded profiles.
+
+## Final branch review
+
+The final frontend role-folder split passes 29 browser tests, its production
+build/type checks, lint and 8 helper tests. Backend unit checks were rerun
+with local-port access and all 342 pass. The earlier 81-test live integration
+run remains applicable: final backend changes only correct documentation of
+unassigned submission and the current signup ACs. No schema changes or new
+backend runtime changes were introduced in this pass. Credential/artifact
+review found no private environment files or generated test/dependency data
+tracked by the repair branch.

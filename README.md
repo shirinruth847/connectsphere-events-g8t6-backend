@@ -42,7 +42,7 @@ Returns:
 
 ### Event Requests (SPM-35, SPM-37)
 
-All event routes require an `ORGANISER` bearer token and use the error shape described under Authentication below. Request and response fields are camelCase.
+The organiser request routes below require an `ORGANISER` bearer token and use the error shape described under Authentication below. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`; pending lead workflows are disabled by default on this baseline.
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
@@ -57,7 +57,7 @@ All event routes require an `ORGANISER` bearer token and use the error shape des
 - **Server-controlled fields** (`status`, `organiserId`, `requestId`, …) are rejected with `400`, never silently ignored.
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
-- **Submission** assigns an active coordinator by round robin and writes the event, activity record and two notifications (one to the organiser, one to the coordinator) in one database transaction (`submit_event_request`). If the database rejects a submission, the `400` still carries field-level `fields`.
+- **Submission** creates an unassigned `SUBMITTED` event, its activity record and an organiser receipt notification in one database transaction (`submit_event_request`). Lead assignment is a separate opt-in workflow. If the database rejects a submission, the `400` still carries field-level `fields`.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
@@ -91,7 +91,7 @@ Prospective attendees and event organisers create their own accounts. Staff role
 
 - **Field rules:** `name` 1–100 characters; `email` a valid address of up to 150 characters, stored lowercase; `password` 8–72 characters with at least one letter and one number. The `400` message for a weak password states these rules.
 - **Duplicate emails** get the same `409` whether the email belongs to an account, differs only in letter case, or matches a profile not yet linked to Auth, so the response never confirms that an account exists.
-- **Accounts are usable immediately.** Email verification is deferred (SPM-123 AC6–AC8), so new accounts are created already confirmed and no email is sent.
+- **Accounts are usable immediately.** New accounts are created already confirmed and no verification email is sent. The current SPM-123 ticket has five ACs and does not require email verification; older AC6–AC8 references are superseded.
 - **Consistency:** Supabase Auth and the `user` table cannot share a transaction. The Auth account is created first, marked in `app_metadata.signup_account_type`; if the profile insert then fails, the Auth account is deleted again. A marked Auth account left without a profile (e.g. after a crash) is removed and recreated when the same email signs up again more than two minutes later.
 - **Organisers** start without an organisation membership, so `GET /api/events/mine` shows only their own requests.
 - **Behind a proxy** (production), set Express `trust proxy` so the rate limit counts each client's IP rather than the proxy's.
