@@ -11,18 +11,30 @@ const EVENT_STATUS = Object.freeze({
   CANCELLED: "CANCELLED",
 });
 
-// Organiser-facing label for each stored status (Master section 3.5).
+// Organiser-facing label for each stored status (Master section 3.5). Listed by
+// name because SAFETY_REVIEW and PREPARATION are not in the live event_status
+// enum yet; an unknown status falls back to its stored code.
 const STATUS_LABELS = Object.freeze({
   DRAFT: "Draft",
   SUBMITTED: "Submitted",
   UNDER_REVIEW: "Under Review",
+  AWAITING_CLARIFICATION: "Under Review",
+  PLANNING: "Approved & Planning",
+  SAFETY_REVIEW: "Approved & Planning",
+  CONFIRMED: "Confirmed",
+  PREPARATION: "Confirmed",
+  COMPLETED: "Completed",
+  CANCELLED: "Cancelled",
+  REJECTED: "Rejected",
 });
 
-// Organiser-facing notes that explain what a request is waiting for, in the
-// spirit of the "flag" column of Master section 3.5 (this note is an SPM-33
-// addition the Master does not list yet). Shown only while the note is true.
+// Organiser-facing notes, the "flag" column of Master section 3.5. Shown only
+// while the note is true. WAITING_FOR_COORDINATOR is an SPM-33 addition the
+// Master does not list yet. The "Reconfirmation pending" flag is not produced:
+// nothing records yet whether an event in planning was confirmed before.
 const STATUS_NOTES = Object.freeze({
   WAITING_FOR_COORDINATOR: "Waiting for a coordinator",
+  RETURNED_FOR_ACTION: "Returned – action required",
 });
 
 const NO_LAYOUT_PREFERENCE = "NO_PREFERENCE";

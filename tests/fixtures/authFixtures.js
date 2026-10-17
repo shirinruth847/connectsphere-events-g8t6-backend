@@ -286,7 +286,6 @@ const verifyManifestClean = async (manifest) => {
     ["event_assignments", "event_id", eventIds],
     ["event_venue_preference", "event_id", eventIds],
     ["event_equipment_requirement", "event_id", eventIds],
-    ["event_assignments", "event_id", eventIds],
     ["event", "event_id", eventIds],
     ["organisation_membership", "user_id", manifest.userIds],
     ["room", "room_id", manifest.roomIds],
@@ -336,11 +335,10 @@ const cleanupManifest = async (manifest) => {
   await deleteIn("registration", "registration_id", manifest.registrationIds);
   await deleteIn("venue_booking", "booking_id", manifest.bookingIds);
   await deleteIn("notification", "event_id", eventIds);
+  // Assignment history references the event without a cascade.
   await deleteIn("event_assignments", "event_id", eventIds);
   await deleteIn("event_venue_preference", "event_id", eventIds);
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
-  // Assignment history references the event without a cascade.
-  await deleteIn("event_assignments", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);
   await deleteIn("organisation_membership", "user_id", manifest.userIds);
   await retireUsers(manifest.userIds);

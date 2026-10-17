@@ -106,9 +106,13 @@ const hashRequest = (row, requirements, scope = []) =>
 const formatRequestId = (eventId) => `REQ-${String(eventId).padStart(6, "0")}`;
 
 // What a request is waiting for, when that is worth telling the organiser. A
-// submitted request waits in the unassigned queue until a Lead assigns it.
-const toStatusNote = (row) =>
-  row.status === EVENT_STATUS.SUBMITTED && row.coordinator_id == null ? STATUS_NOTES.WAITING_FOR_COORDINATOR : null;
+// submitted request waits in the unassigned queue until a Lead assigns it; a
+// request awaiting clarification waits for the organiser.
+const toStatusNote = (row) => {
+  if (row.status === EVENT_STATUS.SUBMITTED && row.coordinator_id == null) return STATUS_NOTES.WAITING_FOR_COORDINATOR;
+  if (row.status === EVENT_STATUS.AWAITING_CLARIFICATION) return STATUS_NOTES.RETURNED_FOR_ACTION;
+  return null;
+};
 
 const parseAccessibility = (value) => {
   if (typeof value !== "string" || !value.startsWith("[")) return value;

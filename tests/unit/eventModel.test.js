@@ -167,6 +167,31 @@ describe("organiser status note (SPM-33)", () => {
       expect.objectContaining({ statusLabel: "Under Review", statusNote: null })
     );
   });
+
+  // Master section 3.5: eight organiser labels for the stored states.
+  test.each([
+    ["DRAFT", "Draft", null],
+    ["SUBMITTED", "Submitted", null],
+    ["UNDER_REVIEW", "Under Review", null],
+    ["AWAITING_CLARIFICATION", "Under Review", "Returned – action required"],
+    ["PLANNING", "Approved & Planning", null],
+    ["SAFETY_REVIEW", "Approved & Planning", null],
+    ["CONFIRMED", "Confirmed", null],
+    ["PREPARATION", "Confirmed", null],
+    ["COMPLETED", "Completed", null],
+    ["CANCELLED", "Cancelled", null],
+    ["REJECTED", "Rejected", null],
+  ])("[SPM-33-REVIEW] should_show_%s_to_the_organiser_as_%s", (status, statusLabel, statusNote) => {
+    expect(eventModel.toApi({ event_id: 7, status, coordinator_id: 5 })).toEqual(
+      expect.objectContaining({ statusLabel, statusNote })
+    );
+  });
+
+  test("[SPM-33-REVIEW] should_fall_back_to_the_stored_code_for_a_status_outside_the_lifecycle", () => {
+    expect(eventModel.toApi({ event_id: 7, status: "APPROVED", coordinator_id: 5 })).toEqual(
+      expect.objectContaining({ statusLabel: "APPROVED", statusNote: null })
+    );
+  });
 });
 
 describe("reads", () => {
