@@ -337,7 +337,13 @@ const reassignCoordinator = async (req, res, next) => {
   }
 };
 
+const getRequestOptions = async (req, res, next) => {
+  try { res.status(200).json(await eventModel.findRequestOptions()); }
+  catch (error) { return next(error); }
+};
+
 module.exports = {
+  getRequestOptions,
   createAndSubmit,
   createDraft,
   updateDraft,
