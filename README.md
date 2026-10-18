@@ -295,9 +295,11 @@ Existing event write/validation contracts are preserved. Request creation gains
 an organiser-only, read-only `GET /api/events/request-options` response containing
 `venues: [{ venueId, name }]` and `layouts: [layoutType]`; it creates no holds.
 
-Pending lead queue/assignment/reassignment endpoints are unavailable by default.
-Set `ENABLE_COORDINATOR_WORKFLOWS=true` only when intentionally testing that work.
-The coordinator's own assigned-event read remains part of SPM-32.
+Lead queue/assignment/reassignment endpoints exist only when
+`ENABLE_COORDINATOR_WORKFLOWS=true`; unset or any other value returns 404. Shared
+development sets it to `true` (see `.env.example`) because SPM-33's coordinator
+view and edits need assigned events. The coordinator's own assigned-event read
+remains part of SPM-32 and is always available.
 
 `npm test` runs all unit suites. Real auth/signup can be checked separately:
 
