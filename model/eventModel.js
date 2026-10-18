@@ -711,7 +711,22 @@ const findValidationContext = async (input) => {
   };
 };
 
+// Request creation only needs catalogue names/IDs and supported layouts.
+// This read does not reserve a venue or expose internal venue planning data.
+const findRequestOptions = async () => {
+  const [venues, rooms] = await Promise.all([
+    supabase.from("venue").select("venue_id,name").order("name", { ascending: true }),
+    supabase.from("room").select("layout_type"),
+  ]);
+  for (const result of [venues, rooms]) if (result.error) throw dbError(result.error);
+  return {
+    venues: venues.data.map(row => ({ venueId: row.venue_id, name: row.name })),
+    layouts: [...new Set([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)])].filter(Boolean),
+  };
+};
+
 module.exports = {
+  findRequestOptions,
   getUnsupportedInputFields,
   pickEventInput,
   toRow,

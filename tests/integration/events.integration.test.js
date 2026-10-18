@@ -1,3 +1,4 @@
+process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 // SPM-35/SPM-37 live integration tests: real Express routes, Supabase Auth and the
 // shared development database. They cover what mocks cannot: the atomic RPCs,
 // constraints, round-robin locking, idempotency and real PostgREST paging.
@@ -92,6 +93,7 @@ const organiserEventCount = async (key) =>
   )).length;
 
 beforeAll(async () => {
+  await require("../fixtures/adminCleanup").assertAuditCleanupAvailable();
   fixtures = await createAuthFixtures(runId);
 });
 
@@ -145,6 +147,7 @@ describe("POST /api/events (SPM-35)", () => {
       fixtures.accounts.coordinatorThree.userId,
     ].sort());
 
+    // assign_event_coordinator moves the request to UNDER_REVIEW (SPM-33 migration 20261015121555).
     const list = await call("get", "/api/events/mine?status=UNDER_REVIEW", "organiserA");
     expect(list.body.events.find((event) => event.eventId === eventId)).toEqual(
       expect.objectContaining({ requestId, statusLabel: "Under Review", statusNote: null, isOwner: true })

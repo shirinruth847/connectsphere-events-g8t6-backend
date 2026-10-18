@@ -329,7 +329,9 @@ const verifyManifestClean = async (manifest) => {
 };
 
 // Dependency-safe order; Auth accounts last so profiles never dangle mid-cleanup.
-// Deleting a user cascades their idempotency_records; history entries are kept.
+// Deleting a user cascades their idempotency_records. Audit rows can be removed
+// only through the privileged test connection (TEST_DATABASE_URL); without it,
+// history entries are kept and users that have them are deactivated instead.
 const cleanupManifest = async (manifest) => {
   const eventIds = manifest.eventIds || [];
   await deleteIn("registration", "registration_id", manifest.registrationIds);
@@ -341,6 +343,11 @@ const cleanupManifest = async (manifest) => {
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);
   await deleteIn("organisation_membership", "user_id", manifest.userIds);
+  if (manifest.userIds.length && process.env.TEST_DATABASE_URL) {
+    const { count, error } = await supabase.from("activity_log").select("log_id", { count: "exact", head: true }).in("user_id", manifest.userIds);
+    if (error) throw error;
+    if (count) await require("./adminCleanup").deleteFixtureAudit(manifest);
+  }
   await retireUsers(manifest.userIds);
   await deleteIn("room", "room_id", manifest.roomIds);
   await deleteIn("venue", "venue_id", manifest.venueIds);
