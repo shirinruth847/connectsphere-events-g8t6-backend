@@ -1,3 +1,4 @@
+process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 // SPM-35/SPM-37 live integration tests: real Express routes, Supabase Auth and the
 // shared development database. They cover what mocks cannot: the atomic RPCs,
 // constraints, round-robin locking, idempotency and real PostgREST paging.
@@ -92,6 +93,7 @@ const organiserEventCount = async (key) =>
   )).length;
 
 beforeAll(async () => {
+  await require("../fixtures/adminCleanup").assertAuditCleanupAvailable();
   fixtures = await createAuthFixtures(runId);
 });
 
@@ -104,9 +106,10 @@ describe("POST /api/events (SPM-35)", () => {
     const res = await call("post", "/api/events", "organiserA", validRequest("TC-001"), newKey());
 
     expect(res.status).toBe(201);
-    const { eventId, requestId, statusLabel } = res.body.event;
+    const { eventId, requestId, statusLabel, statusNote } = res.body.event;
     expect(requestId).toBe(`REQ-${String(eventId).padStart(6, "0")}`);
-    expect(statusLabel).toBe("Pending Approval");
+    expect(statusLabel).toBe("Submitted");
+    expect(statusNote).toBe("Waiting for a coordinator");
 
     const row = await eventRow(eventId);
     expect(row.status).toBe("SUBMITTED");
@@ -124,8 +127,13 @@ describe("POST /api/events (SPM-35)", () => {
     expect(assignment.status).toBe(200);
     expect(assignment.body.event.eventId).toBe(eventId);
 
+    expect(assignment.body.event.status).toBe("UNDER_REVIEW");
+
+    // Master section 5.2: assignment sets the coordinator, records history and enters UNDER_REVIEW.
     const assignedRow = await eventRow(eventId);
     expect(assignedRow.coordinator_id).toBe(fixtures.accounts.coordinatorThree.userId);
+    expect(assignedRow.status).toBe("UNDER_REVIEW");
+    expect(await activityActions(eventId)).toEqual(["EVENT_SUBMITTED", "COORDINATOR_ASSIGNED"]);
     const notifications = await notificationsFor(eventId);
     const recipients = notifications.flatMap((item) => item.notification_recipient.map(({ recipient_id }) => recipient_id));
     expect(notifications.map(({ title }) => title).sort()).toEqual([
@@ -139,9 +147,10 @@ describe("POST /api/events (SPM-35)", () => {
       fixtures.accounts.coordinatorThree.userId,
     ].sort());
 
-    const list = await call("get", "/api/events/mine?status=SUBMITTED", "organiserA");
+    // assign_event_coordinator moves the request to UNDER_REVIEW (SPM-33 migration 20261015121555).
+    const list = await call("get", "/api/events/mine?status=UNDER_REVIEW", "organiserA");
     expect(list.body.events.find((event) => event.eventId === eventId)).toEqual(
-      expect.objectContaining({ requestId, statusLabel: "Pending Approval", isOwner: true })
+      expect.objectContaining({ requestId, statusLabel: "Under Review", statusNote: null, isOwner: true })
     );
   });
 
@@ -303,13 +312,14 @@ describe("drafts (SPM-37)", () => {
     const submitted = await call("put", `/api/events/${eventId}/submit`, "organiserA", validRequest("S4"));
 
     expect(submitted.status).toBe(200);
-    expect(submitted.body.event.statusLabel).toBe("Pending Approval");
+    expect(submitted.body.event.statusLabel).toBe("Submitted");
     expect(await notificationsFor(eventId)).toHaveLength(1);
     expect(await activityActions(eventId)).toEqual(["DRAFT_CREATED", "EVENT_SUBMITTED"]);
 
+    // SPM-33 AC3: a submitted request is read-only; the owner is pointed to a change request.
     const lateEdit = await call("put", `/api/events/${eventId}/draft`, "organiserA", { title: "Too late" });
-    expect(lateEdit.status).toBe(409);
-    expect(lateEdit.body.code).toBe("EVENT_NOT_DRAFT");
+    expect(lateEdit.status).toBe(403);
+    expect(lateEdit.body.code).toBe("EDIT_REQUIRES_CHANGE_REQUEST");
   });
 });
 

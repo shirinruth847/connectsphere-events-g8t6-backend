@@ -3,14 +3,16 @@
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
 const {
+  EVENT_STATUS,
   NO_LAYOUT_PREFERENCE,
   STATUS_LABELS,
+  STATUS_NOTES,
+  EVENT_RELATIONSHIP,
+  HISTORY_AUDIENCE,
+  EVENT_FIELD_GROUPS,
+  COORDINATOR_EDITABLE_STATUSES,
 } = require("../config/eventConstants");
-const {
-  MESSAGES,
-  MAX_INTEGER,
-  toWholeNumber,
-} = require("../validators/eventValidator");
+const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
 
 // Allowlist: the ONLY fields a client may set. status, organiser_id, coordinator_id etc.
 // are set by the server, so a user cannot send { status: "CONFIRMED" } themselves.
@@ -29,13 +31,12 @@ const FIELD_MAP = Object.freeze({
 
 const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
-const INPUT_FIELDS = new Set([
-  ...Object.keys(FIELD_MAP),
-  ...REQUIREMENT_FIELDS,
-]);
+const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
   "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
+// The assigned coordinator's view also names the organiser they are working with.
+const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
 const LIST_SELECT =
   "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
 
@@ -47,9 +48,10 @@ const MAX_LOOKUP_IDS = 50;
 
 // ---------- input mapping ----------
 
-const getUnsupportedInputFields = (body = {}, { allowAutoSave = false } = {}) =>
+const getUnsupportedInputFields = (body = {}, { allowAutoSave = false, allowVersion = false } = {}) =>
   Object.keys(body).filter(
-    (key) => !INPUT_FIELDS.has(key) && !(allowAutoSave && key === "isAutoSave"),
+    (key) =>
+      !INPUT_FIELDS.has(key) && !(allowAutoSave && key === "isAutoSave") && !(allowVersion && key === "version")
   );
 
 const pickEventInput = (body = {}) => {
@@ -69,8 +71,7 @@ const toRow = (input) => {
     if (value === "") value = null;
     if (NUMERIC_FIELDS.includes(key) && value !== null) value = Number(value);
     // accessibility_needs is a text column; multi-select values are stored as a JSON string.
-    if (key === "accessibilityNeeds" && Array.isArray(value))
-      value = JSON.stringify(value);
+    if (key === "accessibilityNeeds" && Array.isArray(value)) value = JSON.stringify(value);
     row[column] = value;
   }
   return row;
@@ -90,21 +91,28 @@ const toRequirementPayload = (input) => ({
 });
 
 // Identical normalized input gives an identical hash, whatever the JSON key order was.
-const hashRequest = (row, requirements) =>
+// Updates add the event and the version they were made against as scope, so a key
+// reused for another event or another edit is reported instead of replayed.
+const hashRequest = (row, requirements, scope = []) =>
   crypto
     .createHash("sha256")
     .update(
-      JSON.stringify([
-        row,
-        requirements.venuePreferences ?? null,
-        requirements.equipmentRequirements ?? null,
-      ]),
+      JSON.stringify([row, requirements.venuePreferences ?? null, requirements.equipmentRequirements ?? null, ...scope])
     )
     .digest("hex");
 
 // ---------- output mapping ----------
 
 const formatRequestId = (eventId) => `REQ-${String(eventId).padStart(6, "0")}`;
+
+// What a request is waiting for, when that is worth telling the organiser. A
+// submitted request waits in the unassigned queue until a Lead assigns it; a
+// request awaiting clarification waits for the organiser.
+const toStatusNote = (row) => {
+  if (row.status === EVENT_STATUS.SUBMITTED && row.coordinator_id == null) return STATUS_NOTES.WAITING_FOR_COORDINATOR;
+  if (row.status === EVENT_STATUS.AWAITING_CLARIFICATION) return STATUS_NOTES.RETURNED_FOR_ACTION;
+  return null;
+};
 
 const parseAccessibility = (value) => {
   if (typeof value !== "string" || !value.startsWith("[")) return value;
@@ -116,19 +124,17 @@ const parseAccessibility = (value) => {
 };
 
 const toOrganisation = (organisation) =>
-  organisation
-    ? { organisationId: organisation.organisation_id, name: organisation.name }
-    : null;
+  organisation ? { organisationId: organisation.organisation_id, name: organisation.name } : null;
 
 const toApi = (row, viewerUserId) => {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
-  const equipmentRequirements =
-    row.equipment_requirements || row.event_equipment_requirement;
+  const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
   return {
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
     status: row.status,
     statusLabel: STATUS_LABELS[row.status] || row.status,
+    statusNote: toStatusNote(row),
     title: row.title,
     purpose: row.purpose,
     description: row.description,
@@ -140,10 +146,7 @@ const toApi = (row, viewerUserId) => {
     venuePreferences: Array.isArray(venuePreferences)
       ? venuePreferences
           .slice()
-          .sort(
-            (left, right) =>
-              (left.preference_order || 0) - (right.preference_order || 0),
-          )
+          .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
           .map((item) => (typeof item === "number" ? item : item.venue_id))
       : [],
     equipmentRequirements: Array.isArray(equipmentRequirements)
@@ -156,21 +159,40 @@ const toApi = (row, viewerUserId) => {
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    ...(row.organisation === undefined
-      ? {}
-      : { organisation: toOrganisation(row.organisation) }),
+    // Sent back as "version" when saving, to detect a save over someone else's change.
+    ...(row.version === undefined ? {} : { version: row.version }),
+    ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
     isAssignedToCoordinator: row.coordinator_id != null,
-    ...(viewerUserId === undefined
-      ? {}
-      : { isOwner: row.organiser_id === viewerUserId }),
+    ...(viewerUserId === undefined ? {} : { isOwner: row.organiser_id === viewerUserId }),
   };
 };
+
+// The event as one signed-in user may see it (SPM-33 AC1). "access" comes from
+// getEventAccess; permissions tell the interface which controls to offer and are
+// enforced again on every save.
+const toEventView = (row, user, access) => ({
+  ...toApi(row, user.user_id),
+  ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
+    ? {
+        coordinatorId: row.coordinator_id,
+        organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
+      }
+    : {}),
+  viewerRelationship: access.relationship,
+  permissions: {
+    canEdit: access.canEdit,
+    editableFields: access.editableFields,
+    canViewDraftHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.OWNER_ONLY),
+    canViewStaffHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.STAFF_ONLY),
+  },
+});
 
 const toListItem = (row, viewerUserId) => ({
   eventId: row.event_id,
   requestId: formatRequestId(row.event_id),
   status: row.status,
   statusLabel: STATUS_LABELS[row.status] || row.status,
+  statusNote: toStatusNote(row),
   title: row.title,
   startDatetime: row.start_datetime,
   endDatetime: row.end_datetime,
@@ -200,6 +222,9 @@ const DOMAIN_CODES = new Set([
   "IDEMPOTENCY_KEY_REQUIRED",
   "IDEMPOTENCY_KEY_REUSED",
   "IDEMPOTENCY_IN_PROGRESS",
+  "EVENT_VERSION_CONFLICT",
+  "EVENT_NOT_EDITABLE_IN_STATUS",
+  "FIELD_NOT_EDITABLE",
 ]);
 
 // submit_event_request reports "<field>:<reason>" pairs in the error detail.
@@ -219,40 +244,43 @@ const SUBMISSION_FAILURES = Object.freeze({
   "registrationCapacity:INVALID": MESSAGES.registrationCapacityInvalid,
 });
 
+// update_event_details reports the same "<field>:<reason>" pairs.
+const DETAILS_FAILURES = Object.freeze({
+  "title:REQUIRED": MESSAGES.titleRequired,
+  "title:INVALID": MESSAGES.textInvalid,
+  "title:TOO_LONG": MESSAGES.titleTooLong,
+  "purpose:REQUIRED": MESSAGES.purposeRequired,
+  "purpose:INVALID": MESSAGES.textInvalid,
+  "purpose:TOO_LONG": MESSAGES.purposeTooLong,
+  "description:REQUIRED": MESSAGES.descriptionRequired,
+  "description:INVALID": MESSAGES.textInvalid,
+  "description:TOO_LONG": MESSAGES.descriptionTooLong,
+});
+
+const toFieldErrors = (details, messages) => {
+  const fields = {};
+  for (const failure of String(details || "").split(",")) {
+    if (messages[failure]) fields[failure.split(":")[0]] = messages[failure];
+  }
+  return fields;
+};
+
 const RPC_FIELD_ERRORS = Object.freeze({
   DRAFT_TITLE_REQUIRED: { title: MESSAGES.titleRequired },
-  INVALID_VENUE_PREFERENCES: {
-    venuePreferences: MESSAGES.venuePreferencesInvalid,
-  },
-  INVALID_EQUIPMENT_REQUIREMENTS: {
-    equipmentRequirements: MESSAGES.equipmentRequirementsInvalid,
-  },
+  INVALID_VENUE_PREFERENCES: { venuePreferences: MESSAGES.venuePreferencesInvalid },
+  INVALID_EQUIPMENT_REQUIREMENTS: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
 });
 
 // Constraints are the final check (e.g. a stale draft merge); report them against the field.
 const CONSTRAINT_FIELD_ERRORS = Object.freeze({
-  event_expected_attendance_positive_check: {
-    expectedAttendance: MESSAGES.attendanceInvalid,
-  },
-  event_registration_capacity_positive_check: {
-    registrationCapacity: MESSAGES.registrationCapacityInvalid,
-  },
-  event_registration_enabled_capacity_check: {
-    registrationCapacity: MESSAGES.registrationCapacityRequired,
-  },
+  event_expected_attendance_positive_check: { expectedAttendance: MESSAGES.attendanceInvalid },
+  event_registration_capacity_positive_check: { registrationCapacity: MESSAGES.registrationCapacityInvalid },
+  event_registration_enabled_capacity_check: { registrationCapacity: MESSAGES.registrationCapacityRequired },
   event_datetime_order_check: { endDatetime: MESSAGES.endBeforeStart },
-  event_venue_preference_pkey: {
-    venuePreferences: MESSAGES.venuePreferencesInvalid,
-  },
-  event_venue_preference_venue_id_fkey: {
-    venuePreferences: MESSAGES.venuePreferencesInvalid,
-  },
-  event_equipment_requirement_pkey: {
-    equipmentRequirements: MESSAGES.equipmentRequirementsInvalid,
-  },
-  event_equipment_requirement_equipment_id_fkey: {
-    equipmentRequirements: MESSAGES.equipmentRequirementsInvalid,
-  },
+  event_venue_preference_pkey: { venuePreferences: MESSAGES.venuePreferencesInvalid },
+  event_venue_preference_venue_id_fkey: { venuePreferences: MESSAGES.venuePreferencesInvalid },
+  event_equipment_requirement_pkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
+  event_equipment_requirement_equipment_id_fkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
 });
 
 const toEventRequestError = (error) => {
@@ -261,27 +289,19 @@ const toEventRequestError = (error) => {
 
   if (DOMAIN_CODES.has(message)) return eventRequestError(message);
   if (message === "INVALID_EVENT_SUBMISSION") {
-    const fields = {};
-    for (const failure of String(error.details || "").split(",")) {
-      if (SUBMISSION_FAILURES[failure])
-        fields[failure.split(":")[0]] = SUBMISSION_FAILURES[failure];
-    }
-    return eventRequestError("VALIDATION_FAILED", fields);
+    return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, SUBMISSION_FAILURES));
   }
-  if (RPC_FIELD_ERRORS[message])
-    return eventRequestError("VALIDATION_FAILED", RPC_FIELD_ERRORS[message]);
+  if (message === "INVALID_EVENT_DETAILS") {
+    return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, DETAILS_FAILURES));
+  }
+  if (RPC_FIELD_ERRORS[message]) return eventRequestError("VALIDATION_FAILED", RPC_FIELD_ERRORS[message]);
 
   const constraint = /constraint "([^"]+)"/.exec(message);
   if (constraint && CONSTRAINT_FIELD_ERRORS[constraint[1]]) {
-    return eventRequestError(
-      "VALIDATION_FAILED",
-      CONSTRAINT_FIELD_ERRORS[constraint[1]],
-    );
+    return eventRequestError("VALIDATION_FAILED", CONSTRAINT_FIELD_ERRORS[constraint[1]]);
   }
   if (code === "23502" && /column "title"/.test(message)) {
-    return eventRequestError("VALIDATION_FAILED", {
-      title: MESSAGES.titleRequired,
-    });
+    return eventRequestError("VALIDATION_FAILED", { title: MESSAGES.titleRequired });
   }
   // Data exceptions (bad casts, out-of-range values) are client input the validator missed.
   if (code.startsWith("22") || message === "INVALID_EVENT_PATCH") {
@@ -308,16 +328,20 @@ const callEventRpc = async (name, args) => {
   };
 };
 
-// Creating a draft (eventId null) needs an idempotency key; updates are naturally idempotent.
+// Creating a draft (eventId null) needs an idempotency key. On an update the key
+// and the expected version are optional: a key stops a retried manual save from
+// writing a second history entry, and a version blocks a save over a newer one.
 const saveDraft = async ({
   organiserId,
   eventId = null,
   input,
   isAutoSave = false,
   idempotencyKey = null,
+  expectedVersion = null,
 }) => {
   const row = toRow(input);
   const requirements = toRequirementPayload(input);
+  const scope = eventId === null ? [] : [eventId, expectedVersion];
   return callEventRpc("save_event_draft", {
     p_organiser_id: organiserId,
     p_event_id: eventId,
@@ -326,18 +350,34 @@ const saveDraft = async ({
     p_equipment_requirements: requirements.equipmentRequirements ?? null,
     p_is_auto_save: isAutoSave,
     p_idempotency_key: idempotencyKey,
-    p_request_hash: idempotencyKey ? hashRequest(row, requirements) : null,
+    p_request_hash: idempotencyKey ? hashRequest(row, requirements, scope) : null,
+    ...(expectedVersion === null ? {} : { p_expected_version: expectedVersion }),
+  });
+};
+
+// SPM-33 AC4: the assigned coordinator's direct edit of ordinary fields. The
+// database rechecks assignment, status and version under the event row lock,
+// so a coordinator reassigned away a moment ago cannot save.
+const updateEventDetails = async ({ actorId, eventId, input, expectedVersion, idempotencyKey }) => {
+  const changes = {};
+  for (const field of EVENT_FIELD_GROUPS.ORDINARY) {
+    const value = input[field];
+    if (value !== undefined) changes[FIELD_MAP[field]] = typeof value === "string" ? value.trim() : value;
+  }
+  return callEventRpc("update_event_details", {
+    p_actor_id: actorId,
+    p_event_id: eventId,
+    p_changes: changes,
+    p_expected_version: expectedVersion,
+    p_editable_statuses: [...COORDINATOR_EDITABLE_STATUSES],
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest(changes, {}, [eventId, expectedVersion]),
   });
 };
 
 // Creating and submitting (eventId null) needs an idempotency key; a second submit
 // of the same draft already fails with EVENT_NOT_DRAFT.
-const submitEvent = async ({
-  organiserId,
-  eventId = null,
-  input,
-  idempotencyKey = null,
-}) => {
+const submitEvent = async ({ organiserId, eventId = null, input, idempotencyKey = null }) => {
   const row = toRow(input);
   const requirements = toRequirementPayload(input);
   return callEventRpc("submit_event_request", {
@@ -358,19 +398,19 @@ const submitEvent = async ({
 // visibility begins after submission).
 const buildOrganiserVisibilityFilter = (user) => {
   const ownRequests = `organiser_id.eq.${Number(user.user_id)}`;
-  const coordinatorRequests = `coordinator_id.eq.${Number(user.user_id)}`;
   const organisationIds = Array.isArray(user.organisation_ids)
     ? user.organisation_ids.map(Number).filter(Number.isSafeInteger)
     : [];
-  if (organisationIds.length === 0) return `${ownRequests},${coordinatorRequests}`;
-  return `${ownRequests},${coordinatorRequests},and(organisation_id.in.(${organisationIds.join(",")}),status.neq.DRAFT)`;
+  if (organisationIds.length === 0) return ownRequests;
+  return `${ownRequests},and(organisation_id.in.(${organisationIds.join(",")}),status.neq.DRAFT)`;
 };
 
+// One read for every role (SPM-33 AC1, SPM-180 AC3): returns the row only when it is
+// inside the user's viewing scope, so callers answer "not found" for everything else.
+// Venue Staff, Technical Support, Leads and attendees have no scope through this view.
 const findVisibleEvent = async (eventId, user) => {
-  let query = supabase
-    .from("event")
-    .select(EVENT_SELECT)
-    .eq("event_id", eventId);
+  const select = user.role === "COORDINATOR" ? COORDINATION_SELECT : EVENT_SELECT;
+  let query = supabase.from("event").select(select).eq("event_id", eventId);
   if (user.role === "COORDINATOR") {
     query = query.eq("coordinator_id", user.user_id).neq("status", "DRAFT");
   } else if (user.role === "ORGANISER") {
@@ -391,8 +431,7 @@ const findCoordinatorEvents = async (coordinatorId) => {
     .neq("status", "DRAFT")
     .order("start_datetime", { ascending: true });
   if (error) throw dbError(error);
-  const dataRows = data || [];
-  return dataRows.map((row) => ({
+  return data.map((row) => ({
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
     status: row.status,
@@ -432,8 +471,7 @@ const mapLeadAssignment = (row, coordinatorNames) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   coordinatorId: row.coordinator_id,
-  coordinatorName:
-    coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
+  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
 });
 
 const mapCalendarEvent = (row, coordinatorNames) => ({
@@ -455,10 +493,7 @@ const mapCalendarEvent = (row, coordinatorNames) => ({
   venuePreferences: Array.isArray(row.event_venue_preference)
     ? row.event_venue_preference
         .slice()
-        .sort(
-          (left, right) =>
-            (left.preference_order || 0) - (right.preference_order || 0),
-        )
+        .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
         .map((item) => (typeof item === "number" ? item : item.venue_id))
     : [],
   equipmentRequirements: Array.isArray(row.event_equipment_requirement)
@@ -470,41 +505,28 @@ const mapCalendarEvent = (row, coordinatorNames) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   coordinatorId: row.coordinator_id,
-  coordinatorName:
-    coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
+  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
 });
 
-const findLeadAssignments = async (leadId) => {
-  const [
-    { data: events, error: eventsError },
-    { data: users, error: usersError },
-  ] = await Promise.all([
+const findLeadAssignments = async () => {
+  const [{ data: events, error: eventsError }, { data: users, error: usersError }] = await Promise.all([
     supabase
       .from("event")
-      .select(`${LIST_SELECT},event_assignments!inner(assignment_id,assigned_by,ended_at)`)
+      .select(LIST_SELECT)
       .not("coordinator_id", "is", null)
       .not("status", "in", '("COMPLETED","REJECTED","CANCELLED")')
-      .eq("event_assignments.assigned_by", leadId || 0)
-      .is("event_assignments.ended_at", null)
       .order("start_datetime", { ascending: true })
       .order("event_id", { ascending: true }),
     supabase.from("user").select("user_id,name").eq("role", "COORDINATOR"),
   ]);
   if (eventsError) throw dbError(eventsError);
   if (usersError) throw dbError(usersError);
-  const coordinatorNames = new Map(
-    users.map(({ user_id, name }) => [user_id, name]),
-  );
-  return (events || []).map((event) =>
-    mapLeadAssignment(event, coordinatorNames || new Map()),
-  );
+  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
+  return events.map((event) => mapLeadAssignment(event, coordinatorNames));
 };
 
 const findCoordinatorAvailability = async () => {
-  const [
-    { data: users, error: usersError },
-    { data: events, error: eventsError },
-  ] = await Promise.all([
+  const [{ data: users, error: usersError }, { data: events, error: eventsError }] = await Promise.all([
     supabase
       .from("user")
       .select("user_id,name")
@@ -520,12 +542,9 @@ const findCoordinatorAvailability = async () => {
   ]);
   if (usersError) throw dbError(usersError);
   if (eventsError) throw dbError(eventsError);
-  const usersData = users || [];
-  const eventsData = events || [];
-  const coordinatorNames = new Map(
-    usersData.map(({ user_id, name }) => [user_id, name]),
-  );
-  return usersData.map((user) => ({
+
+  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
+  return users.map((user) => ({
     coordinatorId: user.user_id,
     name: user.name,
     events: events
@@ -542,28 +561,16 @@ const assignCoordinator = async ({ eventId, coordinatorId, leadId }) => {
   });
   if (error) {
     const code = error.message;
-    if (
-      [
-        "EVENT_NOT_FOUND",
-        "INVALID_COORDINATOR",
-        "COORDINATOR_CONFLICT",
-      ].includes(code)
-    ) {
+    if (["EVENT_NOT_FOUND", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT"].includes(code)) {
       throw eventRequestError(code);
     }
     throw dbError(error);
   }
-  if (!data || !data.event)
-    throw new Error("assign_event_coordinator returned no event.");
+  if (!data || !data.event) throw new Error("assign_event_coordinator returned no event.");
   return data.event;
 };
 
-const reassignCoordinator = async ({
-  eventId,
-  coordinatorId,
-  expectedCoordinatorId,
-  leadId,
-}) => {
+const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinatorId, leadId }) => {
   const { data, error } = await supabase.rpc("reassign_event_coordinator", {
     p_event_id: eventId,
     p_coordinator_id: coordinatorId,
@@ -583,9 +590,7 @@ const reassignCoordinator = async ({
     throw dbError(error);
   }
   if (!data || !data.event || !data.coordinator) {
-    throw new Error(
-      "reassign_event_coordinator returned an incomplete result.",
-    );
+    throw new Error("reassign_event_coordinator returned an incomplete result.");
   }
   return {
     event: {
@@ -602,7 +607,7 @@ const reassignCoordinator = async ({
   };
 };
 
-// Edits are owner-only, so a colleague's visible request is "not found" here.
+// Submitting is owner-only, so a colleague's visible request is "not found" here.
 const findOwnEvent = async (eventId, organiserId) => {
   const { data, error } = await supabase
     .from("event")
@@ -616,13 +621,10 @@ const findOwnEvent = async (eventId, organiserId) => {
 
 // PostgREST timestamptz text, e.g. 2026-10-07T07:14:14.406209+00:00. The cursor keeps the
 // exact text: converting through Date would drop microseconds and skip or repeat rows.
-const CURSOR_TIMESTAMP =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::\d{2})?)$/;
+const CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::\d{2})?)$/;
 
 const encodeCursor = (row) =>
-  Buffer.from(
-    JSON.stringify({ updatedAt: row.updated_at, eventId: row.event_id }),
-  ).toString("base64url");
+  Buffer.from(JSON.stringify({ updatedAt: row.updated_at, eventId: row.event_id })).toString("base64url");
 
 const decodeCursor = (value) => {
   if (value === undefined || value === null) return null;
@@ -647,19 +649,13 @@ const decodeCursor = (value) => {
 
 // Newest edit first (SPM-37). Keyset paging stays stable while auto-save keeps
 // moving updated_at; event_id breaks ties between equal timestamps.
-const findOrganiserEventRequests = async (
-  user,
-  { limit, cursor = null, status = null },
-) => {
+const findOrganiserEventRequests = async (user, { limit, cursor = null, status = null }) => {
   const after = decodeCursor(cursor);
-  let query = supabase
-    .from("event")
-    .select(LIST_SELECT)
-    .or(buildOrganiserVisibilityFilter(user));
+  let query = supabase.from("event").select(LIST_SELECT).or(buildOrganiserVisibilityFilter(user));
   if (status) query = query.eq("status", status);
   if (after) {
     query = query.or(
-      `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`,
+      `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`
     );
   }
   const { data, error } = await query
@@ -671,8 +667,7 @@ const findOrganiserEventRequests = async (
   const page = data.slice(0, limit);
   return {
     events: page.map((row) => toListItem(row, user.user_id)),
-    nextCursor:
-      data.length > limit ? encodeCursor(page[page.length - 1]) : null,
+    nextCursor: data.length > limit ? encodeCursor(page[page.length - 1]) : null,
   };
 };
 
@@ -688,35 +683,21 @@ const NO_ROWS = { data: [], error: null };
 // Looks up only the layout, venues and equipment this request mentions, so an
 // auto-save does not read whole catalogue tables.
 const findValidationContext = async (input) => {
-  const layout =
-    typeof input.preferredLayoutType === "string"
-      ? input.preferredLayoutType.trim()
-      : "";
+  const layout = typeof input.preferredLayoutType === "string" ? input.preferredLayoutType.trim() : "";
   const venueIds = toLookupIds(input.venuePreferences);
   const equipmentIds = toLookupIds(
     Array.isArray(input.equipmentRequirements)
-      ? input.equipmentRequirements.map((item) =>
-          item && typeof item === "object" ? item.equipmentId : null,
-        )
-      : [],
+      ? input.equipmentRequirements.map((item) => (item && typeof item === "object" ? item.equipmentId : null))
+      : []
   );
 
   const [layouts, venues, equipment] = await Promise.all([
     layout && layout !== NO_LAYOUT_PREFERENCE
-      ? supabase
-          .from("room")
-          .select("layout_type")
-          .eq("layout_type", layout)
-          .limit(1)
+      ? supabase.from("room").select("layout_type").eq("layout_type", layout).limit(1)
       : NO_ROWS,
-    venueIds.length
-      ? supabase.from("venue").select("venue_id").in("venue_id", venueIds)
-      : NO_ROWS,
+    venueIds.length ? supabase.from("venue").select("venue_id").in("venue_id", venueIds) : NO_ROWS,
     equipmentIds.length
-      ? supabase
-          .from("equipment")
-          .select("equipment_id")
-          .in("equipment_id", equipmentIds)
+      ? supabase.from("equipment").select("equipment_id").in("equipment_id", equipmentIds)
       : NO_ROWS,
   ]);
   for (const result of [layouts, venues, equipment]) {
@@ -724,27 +705,44 @@ const findValidationContext = async (input) => {
   }
 
   return {
-    allowedLayouts: [
-      NO_LAYOUT_PREFERENCE,
-      ...layouts.data.map((room) => room.layout_type),
-    ],
+    allowedLayouts: [NO_LAYOUT_PREFERENCE, ...layouts.data.map((room) => room.layout_type)],
     venueIds: venues.data.map(({ venue_id }) => venue_id),
     equipmentIds: equipment.data.map(({ equipment_id }) => equipment_id),
   };
 };
 
+// Request creation only needs catalogue names/IDs and supported layouts.
+// This read does not reserve a venue or expose internal venue planning data.
+const findRequestOptions = async () => {
+  const [venues, rooms] = await Promise.all([
+    supabase.from("venue").select("venue_id,name").order("name", { ascending: true }),
+    supabase.from("room").select("layout_type"),
+  ]);
+  for (const result of [venues, rooms]) if (result.error) throw dbError(result.error);
+  return {
+    venues: venues.data.map(row => ({ venueId: row.venue_id, name: row.name })),
+    layouts: [...new Set([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)])].filter(Boolean),
+  };
+};
+
 module.exports = {
+  findRequestOptions,
   getUnsupportedInputFields,
   pickEventInput,
   toRow,
   toApi,
+  toEventView,
   toListItem,
   formatRequestId,
+  toStatusNote,
+  parseAccessibility,
+  eventRequestError,
   hashRequest,
   toRequirementPayload,
   toEventRequestError,
   saveDraft,
   submitEvent,
+  updateEventDetails,
   buildOrganiserVisibilityFilter,
   findVisibleEvent,
   findCoordinatorEvents,
