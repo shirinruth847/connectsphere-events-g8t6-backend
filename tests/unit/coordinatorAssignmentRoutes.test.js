@@ -39,6 +39,25 @@ beforeEach(() => {
 });
 
 describe("PATCH /api/events/:id/coordinator", () => {
+  test("should_pass_the_authenticated_lead_to_initial_assignment", async () => {
+    signedInAs(leadId, "COORDINATOR_LEAD");
+    eventModel.assignCoordinator.mockResolvedValue({
+      event_id: 42,
+      title: "Conference",
+      status: "UNDER_REVIEW",
+      coordinator_id: coordinatorId,
+    });
+
+    const res = await send("patch", "/api/events/42/coordinator", { coordinatorId });
+
+    expect(res.status).toBe(200);
+    expect(eventModel.assignCoordinator).toHaveBeenCalledWith({
+      eventId: 42,
+      coordinatorId,
+      leadId,
+    });
+  });
+
   test("[SPM-180-AC1/AC2] should_return_the_new_assignment_when_an_authorised_lead_reassigns", async () => {
     signedInAs(leadId, "COORDINATOR_LEAD");
     eventModel.reassignCoordinator.mockResolvedValue({

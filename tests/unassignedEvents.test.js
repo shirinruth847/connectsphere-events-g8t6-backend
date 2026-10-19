@@ -62,6 +62,7 @@ describe("[SPM-174] unassigned event queue", () => {
       status: "SUBMITTED",
       title: "Example event",
       purpose: "Community outreach",
+      submitted_at: "2026-10-20T08:30:00.000Z",
       start_datetime: "2026-10-20T09:00:00.000Z",
       end_datetime: "2026-10-20T12:00:00.000Z",
       event_venue_preference: [
@@ -81,6 +82,7 @@ describe("[SPM-174] unassigned event queue", () => {
     });
     expect(res.json.mock.calls[0][0].events[0]).toMatchObject({
       purpose: "Community outreach",
+      submittedAt: "2026-10-20T08:30:00.000Z",
       venuePreferences: [3, 8],
       equipmentRequirements: [{ equipmentId: 4, quantity: 2 }],
     });

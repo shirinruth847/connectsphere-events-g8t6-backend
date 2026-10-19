@@ -519,6 +519,7 @@ const patchCoordinator = async (req, res, next) => {
     const assignedEvent = await eventModel.assignCoordinator({
       eventId,
       coordinatorId: body.coordinatorId,
+      leadId: req.user.user_id,
     });
     return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
   } catch (error) {

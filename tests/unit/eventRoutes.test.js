@@ -174,6 +174,7 @@ describe("authentication and role checks", () => {
       expect(eventModel.assignCoordinator).toHaveBeenCalledWith({
         eventId: 42,
         coordinatorId: 7,
+        leadId: 11,
       });
     });
 
