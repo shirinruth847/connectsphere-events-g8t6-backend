@@ -597,8 +597,9 @@ describe("Lead assignment reads", () => {
 
     expect(query.eq).toHaveBeenCalledWith("status", "SUBMITTED");
     expect(query.is).toHaveBeenCalledWith("coordinator_id", null);
-    expect(query.order).toHaveBeenNthCalledWith(1, "created_at", { ascending: true });
-    expect(query.order).toHaveBeenNthCalledWith(2, "event_id", { ascending: true });
+    expect(query.order).toHaveBeenNthCalledWith(1, "submitted_at", { ascending: true, nullsFirst: false });
+    expect(query.order).toHaveBeenNthCalledWith(2, "created_at", { ascending: true });
+    expect(query.order).toHaveBeenNthCalledWith(3, "event_id", { ascending: true });
   });
 
   test("should_return_active_assignments_with_current_coordinator_names", async () => {
@@ -671,4 +672,19 @@ describe("SPM-180 reassignment RPC", () => {
       });
     }
   );
+});
+
+
+describe("SPM-36 submission metadata", () => {
+  test("[BE-03] submission time is independent of last update and Coordinator name is safe to display", () => {
+    const event = eventModel.toApi({ event_id: 42, status: "UNDER_REVIEW", coordinator_id: 20,
+      coordinator: { name: "Coordinator One" }, submitted_at: "2026-10-19T10:00:00Z", updated_at: "2026-10-20T11:00:00Z" });
+    expect(event.submittedAt).toBe("2026-10-19T10:00:00Z");
+    expect(event.updatedAt).toBe("2026-10-20T11:00:00Z");
+    expect(event.coordinatorName).toBe("Coordinator One");
+    expect(event.coordinatorId).toBeUndefined();
+  });
+  test("[BE-03] legacy events never invent a submission time", () => {
+    expect(eventModel.toApi({ event_id: 42, status: "SUBMITTED", created_at: POSTGREST_TIMESTAMP, updated_at: POSTGREST_TIMESTAMP }).submittedAt).toBeNull();
+  });
 });

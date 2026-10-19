@@ -40,7 +40,7 @@ Returns:
 }
 ```
 
-### Event Requests (SPM-35, SPM-37)
+### Event Requests (SPM-35, SPM-36, SPM-37)
 
 These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it, because SPM-33's coordinator view needs assigned events.
 
@@ -48,10 +48,10 @@ The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
-| `POST /api/events` | Event fields; `Idempotency-Key` header | `201 { message, event }`, status `SUBMITTED` | `400 VALIDATION_FAILED`, `409 NO_ELIGIBLE_COORDINATOR`, `409 IDEMPOTENCY_KEY_REUSED` |
+| `POST /api/events` | Event fields; `Idempotency-Key` header | `201 { message, event }`, status `SUBMITTED` | `400 VALIDATION_FAILED`, `409 IDEMPOTENCY_KEY_REUSED` |
 | `POST /api/events/drafts` | Any event fields, `title` required; `Idempotency-Key` header | `201 { message, event, savedAt }`, status `DRAFT` | `400`, `409 IDEMPOTENCY_KEY_REUSED` |
 | `PUT /api/events/:id/draft` | Changed fields, plus `"isAutoSave": true` from the idle timer. Optional `version` and `Idempotency-Key` (see SPM-33) | `200 { message, event, savedAt }`; auto-saves skip the activity log | `400`, `403` (see SPM-33), `404 EVENT_NOT_FOUND`, `409 EVENT_VERSION_CONFLICT` |
-| `PUT /api/events/:id/submit` | Final edits or `{}` | `200 { message, event }`, status `SUBMITTED` | `400` (draft unchanged), `404`, `409 EVENT_NOT_DRAFT`, `409 NO_ELIGIBLE_COORDINATOR` |
+| `PUT /api/events/:id/submit` | Final edits or `{}` | `200 { message, event }`, status `SUBMITTED` | `400` (draft unchanged), `404`, `409 EVENT_NOT_DRAFT` |
 | `GET /api/events/:id` | — | `200 { event }` with `isOwner`, `version`, `viewerRelationship` and `permissions` | `404 EVENT_NOT_FOUND` (missing, or outside the user's viewing scope) |
 | `GET /api/events/mine` | `?status=<event status>`, `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { events: [{ eventId, requestId, status, statusLabel, statusNote, title, startDatetime, endDatetime, expectedAttendance, organisation, isOwner, createdAt, updatedAt }], nextCursor }`, newest edit first | `400 VALIDATION_FAILED` (including `offset`, which this list does not accept) |
 | `GET /api/events/discovery` | `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { events: [{ eventId, title, description, startDatetime, endDatetime, organisationName, location, registrationAvailability }], nextCursor }`, soonest start first (ties by event ID) | `400 VALIDATION_FAILED`, `401 UNAUTHENTICATED`, `403 FORBIDDEN` |
@@ -65,11 +65,43 @@ The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/
 - **Status label and note:** organiser-facing responses carry `statusLabel` (`DRAFT` → "Draft", `SUBMITTED` → "Submitted", `UNDER_REVIEW` → "Under Review"; other states still return the stored code) (labels per Master section 3.5) and `statusNote`: "Waiting for a coordinator" while a submitted request has no coordinator, otherwise `null` (added by SPM-33; not yet listed in the Master).
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
-- **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the organiser's receipt notification in one database transaction (`submit_event_request`). The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
+- **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the receipt notification for the organiser and active Coordinator Leads in one database transaction (`submit_event_request`). The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
 - **Assignment** (`POST /api/events/:id/coordinator`, Coordinator Lead only, requires `ENABLE_COORDINATOR_WORKFLOWS=true`) takes a request from the queue: in one transaction (`assign_event_coordinator`) it sets the coordinator, moves the request from `SUBMITTED` to `UNDER_REVIEW` (Master section 5.2), records the staff-only history entry `COORDINATOR_ASSIGNED` and notifies the organiser and the coordinator.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
+
+### Submission guarantees (SPM-36)
+
+The agreed deployment has one Coordinator Lead. Submission saves against the
+existing draft ID, enters `SUBMITTED` with no Coordinator, and notifies the owner
+and that Lead. It succeeds even when no Coordinator is available. Assignment is
+still the separate Lead action and enters `UNDER_REVIEW`.
+
+Apply the reviewed migration
+`supabase/migrations/20261019120000_spm36_submission_time_and_lead_receipt.sql`
+before deploying this backend. It adds `event.submitted_at`, preserves the first
+submission time on later updates, backfills only from recorded submission history,
+and adds active Leads to the existing durable receipt's recipients in the same
+transaction. Legacy events without submission evidence retain a null timestamp.
+It has not been applied to shared development by this work item.
+
+Event responses add `submittedAt` (ISO timestamp or null). The event detail read
+also adds `coordinatorName` (name or null), without exposing the Coordinator's
+other profile fields. The queue sorts by submission time, creation time and ID;
+legacy entries without a known submission time follow dated entries. The existing
+`event_assignments.assigned_by` records the assigning Lead; dedicated supervision
+and handover modeling remains with the assignment stories.
+
+Repeated draft submissions return `409 EVENT_NOT_DRAFT` without writing again;
+the frontend retrieves the current event after a lost response or stale-tab retry.
+The row lock, field/requirement changes, timestamp, history and notification
+recipients commit or roll back together. Inbox UI (SPM-191), Organiser update
+presentation (SPM-192), Coordinator assignment updates (SPM-193), and provider
+email/SMS delivery remain separate notification dependencies.
+
+See [the backend test plan](docs/test-plans/spm-36.md) for execution results,
+commands and the isolated SQL test setup.
 
 ### Role-Scoped Event View, Direct Edits and History (SPM-33)
 

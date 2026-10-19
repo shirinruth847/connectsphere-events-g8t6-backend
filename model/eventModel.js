@@ -33,12 +33,12 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
 const LIST_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 
 // Calendar events include richer details for coordinators' schedule view.
 const CALENDAR_SELECT =
@@ -159,6 +159,8 @@ const toApi = (row, viewerUserId) => {
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    submittedAt: row.submitted_at ?? null,
+    coordinatorName: row.coordinator?.name ?? null,
     // Sent back as "version" when saving, to detect a save over someone else's change.
     ...(row.version === undefined ? {} : { version: row.version }),
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
@@ -202,6 +204,7 @@ const toListItem = (row, viewerUserId) => ({
   isOwner: row.organiser_id === viewerUserId,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  submittedAt: row.submitted_at ?? null,
 });
 
 const computeRegistrationAvailability = ({
@@ -530,6 +533,7 @@ const findUnassignedSubmittedEvents = async () => {
     .select(LIST_SELECT)
     .eq("status", "SUBMITTED")
     .is("coordinator_id", null)
+    .order("submitted_at", { ascending: true, nullsFirst: false })
     .order("created_at", { ascending: true })
     .order("event_id", { ascending: true });
   if (error) throw dbError(error);
