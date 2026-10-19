@@ -8,6 +8,7 @@
     "test:cleanup": "node tests/fixtures/cleanupManifests.js",
     "seed:accounts": "node supabase/seed/provisionAccounts.js",
     "seed:accounts:cleanup": "node supabase/seed/provisionAccounts.js cleanup",
+    "mongo:migrate": "node mongodb/migrate.js",
     "dev": "nodemon server.js"
   },
   "author": "",
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "jest": "^30.5.2",
+    "mongodb-memory-server": "^10.4.3",
     "pg": "^8.23.1",
     "supertest": "^7.3.1"
   },

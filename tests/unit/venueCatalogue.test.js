@@ -9,6 +9,23 @@ const venueModel = require("../../model/venueModel");
 
 const send = () => request(app).get("/api/venues").set("Authorization", "Bearer token");
 
+const venue = (venueId, name) => ({
+  venueId,
+  name,
+  address: `${name} Road`,
+  maxCapacity: 100,
+  operatingHours: "09:00-18:00",
+  accessibilityFeatures: null,
+  setupTurnaroundMinutes: 15,
+  rooms: [],
+  detailStatus: "NOT_AVAILABLE",
+  description: null,
+  facilities: null,
+  supportedLayouts: null,
+  emergencyAccess: null,
+  knownRestrictions: null,
+});
+
 beforeEach(() => {
   jest.clearAllMocks();
   userModel.verifyAccessToken.mockResolvedValue("auth-venue");
@@ -28,25 +45,27 @@ describe("GET /api/venues", () => {
       expect(response.status).toBe(401);
       expect(response.body.code).toBe("UNAUTHENTICATED");
       expect(userModel.verifyAccessToken).not.toHaveBeenCalled();
+      expect(venueModel.getVenueCatalogue).not.toHaveBeenCalled();
     }
   );
 
   test.each(["COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF"])(
-    "[AC-VC-001] should_allow_read_only_catalogue_access_for_%s",
+    "[SPM-72-AC1] should_allow_catalogue_access_for_%s",
     async (role) => {
       userModel.findUserByAuthId.mockResolvedValue({ user_id: 9, role });
-      venueModel.getVenueCatalogue.mockResolvedValue({ venues: [{ venueId: 1, name: "Venue A" }], detailsAvailable: true });
+      venueModel.getVenueCatalogue.mockResolvedValue({ venues: [venue(1, "Venue A")], detailsAvailable: true });
 
       const response = await send();
 
       expect(response.status).toBe(200);
       expect(response.body.venues).toHaveLength(1);
+      expect(response.headers["cache-control"]).toBe("no-store");
       expect(venueModel.getVenueCatalogue).toHaveBeenCalledTimes(1);
     }
   );
 
-  test.each(["ORGANISER", "TECH_SUPPORT", "ATTENDEE"])(
-    "[AC-VC-001] should_return_403_for_%s_without_reading_the_catalogue",
+  test.each(["ORGANISER", "TECH_SUPPORT", "ATTENDEE", "SAFETY_OFFICER"])(
+    "[SPM-72-AC1] should_return_403_for_%s_without_reading_the_catalogue",
     async (role) => {
       userModel.findUserByAuthId.mockResolvedValue({ user_id: 10, role });
 
@@ -58,43 +77,53 @@ describe("GET /api/venues", () => {
     }
   );
 
-  test("[TC-VC-001] should_return_available_venues_read_only", async () => {
-    venueModel.getVenueCatalogue.mockResolvedValue({
-      venues: [{ venueId: 1, name: "Venue A" }, { venueId: 2, name: "Venue B" }],
-      detailsAvailable: true,
-    });
+  test.each([
+    ["post", "/api/venues"],
+    ["put", "/api/venues/1"],
+    ["patch", "/api/venues/1"],
+    ["delete", "/api/venues/1"],
+    ["post", "/api/venues/1/rooms"],
+    ["post", "/api/resources/bookings"],
+    ["post", "/api/resources/equipment-requests"],
+    ["get", "/api/resources/equipment"],
+  ])(
+    "[SPM-72-AC1] should_not_expose_a_write_route_for_%s_%s",
+    async (method, path) => {
+      const response = await request(app)[method](path).set("Authorization", "Bearer token").send({ name: "No write" });
+
+      expect(response.status).toBe(404);
+      expect(venueModel.getVenueCatalogue).not.toHaveBeenCalled();
+    }
+  );
+
+  test("[TC-VC-001][SPM-72-AC3] should_return_each_venue_with_its_catalogue_fields", async () => {
+    const catalogue = { venues: [venue(1, "Venue A"), venue(2, "Venue B")], detailsAvailable: true };
+    venueModel.getVenueCatalogue.mockResolvedValue(catalogue);
 
     const response = await send();
 
     expect(response.status).toBe(200);
-    expect(response.body.venues).toHaveLength(2);
-    expect(response.body.venues.map(({ name }) => name)).toEqual(["Venue A", "Venue B"]);
+    expect(response.body).toEqual(catalogue);
   });
 
-  test("[TC-VC-002] should_return_an_empty_catalogue_without_a_mutation_path", async () => {
+  test("[TC-VC-002][SPM-72-AC5] should_return_an_empty_list_when_no_venue_is_available", async () => {
     const response = await send();
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ venues: [], detailsAvailable: true });
-    expect((await request(app).post("/api/venues").set("Authorization", "Bearer token").send({ name: "No write" })).status).toBe(404);
   });
 
-  test("[TC-VC-003] should_return_only_venues_present_in_the_available_source", async () => {
-    venueModel.getVenueCatalogue.mockResolvedValue({ venues: [{ venueId: 2, name: "Venue B" }], detailsAvailable: true });
+  test("should_return_a_safe_500_when_postgres_fails", async () => {
+    jest.spyOn(console, "error").mockImplementation(() => {});
+    venueModel.getVenueCatalogue.mockRejectedValue(
+      Object.assign(new Error("relation venue does not exist"), { code: "42P01" }),
+    );
 
     const response = await send();
 
-    expect(response.status).toBe(200);
-    expect(response.body.venues).toEqual([{ venueId: 2, name: "Venue B" }]);
-    expect(response.body.venues.some(({ name }) => name === "Venue A")).toBe(false);
-  });
-
-  test("should_reject_a_non_catalogue_role", async () => {
-    userModel.findUserByAuthId.mockResolvedValue({ user_id: 10, role: "ATTENDEE" });
-
-    const response = await send();
-
-    expect(response.status).toBe(403);
-    expect(venueModel.getVenueCatalogue).not.toHaveBeenCalled();
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: "Internal Server Error", code: "INTERNAL_ERROR" });
+    expect(JSON.stringify(response.body)).not.toContain("relation venue");
+    console.error.mockRestore();
   });
 });

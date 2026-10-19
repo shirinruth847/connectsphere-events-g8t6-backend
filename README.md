@@ -40,6 +40,8 @@ Returns:
 }
 ```
 
+HTTP 200 confirms both stores: the Supabase key is accepted and MongoDB answers a `ping`. Without `MONGODB_URI`, or when Atlas is unreachable, it returns `500 INTERNAL_ERROR` and the backend log names the cause.
+
 ### Event Requests (SPM-35, SPM-37)
 
 These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it, because SPM-33's coordinator view needs assigned events.
@@ -64,12 +66,14 @@ These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, 
 
 ### Venue Catalogue (SPM-72)
 
-`GET /api/venues` is read-only and requires an authenticated `COORDINATOR`,
-`COORDINATOR_LEAD`, `VENUE_STAFF` or `SAFETY_OFFICER`. It returns
-`{ venues, detailsAvailable }`. PostgreSQL venue rows are the catalogue
-availability source; MongoDB Atlas `venue_details` documents add descriptive
-catalogue fields. If MongoDB is unavailable, the endpoint returns PostgreSQL
-venue rows with descriptive fields marked `not checked`.
+| Method & path | Access | Success | Errors |
+| --- | --- | --- | --- |
+| `GET /api/venues` | `COORDINATOR`, `COORDINATOR_LEAD`, `VENUE_STAFF` | `200 { venues: [{ venueId, name, address, maxCapacity, operatingHours, accessibilityFeatures, setupTurnaroundMinutes, rooms: [{ roomId, layoutType, capacity }], detailStatus, description, facilities, supportedLayouts, emergencyAccess, knownRestrictions }], detailsAvailable }`, ordered by name | `401 UNAUTHENTICATED`, `403 FORBIDDEN` (other roles), `500 INTERNAL_ERROR` (PostgreSQL failure) |
+
+- **Read-only:** there is no venue, room, booking or equipment write route. Venue maintenance belongs to SPM-73, bookings and equipment requests to SPM-179/181/186. `SAFETY_OFFICER` gets access when its ticket adds the role to `user_role`.
+- **Available venues only:** PostgreSQL is the source of which venues exist. A venue deleted as unusable keeps its row (bookings may still reference it) with `venue.is_active = false` and is left out (migration `20261019025616_spm72_venue_active_state`). An empty `venues` list means no venue is currently available.
+- **Details:** MongoDB `venue_details` documents (`_id` = the PostgreSQL `venue_id` as a string) add the descriptive fields. `detailStatus` is the only signal for them: `CURRENT` (document read), `NOT_AVAILABLE` (no document for this venue) or `NOT_CHECKED` (MongoDB unavailable; `detailsAvailable` is then `false`, Master M4). Fields without a value are `null`. `accessibilityFeatures` is the document's list, or else the PostgreSQL accessibility note as a one-item list.
+- **MongoDB outages:** a failed connection is retried on the next request, and server selection times out after 3 seconds, so the catalogue still answers from PostgreSQL.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
 
@@ -166,17 +170,19 @@ Create a `.env` file in the root directory:
 PORT=8000
 SUPABASE_URL=https://rvwiflsedoujspmzfrbq.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<server-only-key>
+MONGODB_URI=mongodb+srv://<atlas-user>:<url-encoded-password>@spm.ldi4ulx.mongodb.net/?appName=SPM  # your own Atlas user; server-only
+MONGODB_DB_NAME=connectsphere_dev           # shared development database (Master M3)
 # Optional
 FRONTEND_ORIGIN=http://localhost:3000   # the only browser origin allowed by CORS (default shown)
 SUPABASE_ANON_KEY=<anon/publishable key>  # tests sign in with it like the browser; falls back to the service role key
-MONGODB_URI=mongodb+srv://<atlas-user>:<url-encoded-password>@spm.ldi4ulx.mongodb.net/?appName=SPM
-MONGODB_DB_NAME=connectsphere_dev
 SEED_ACCOUNT_PASSWORD=<private password for seeded dev accounts, 12+ characters>
 SEED_NAMESPACE=dev                         # prefix for seeded emails and organisation names
 SIGNUP_RATE_LIMIT_MAX=5                    # sign-up attempts per IP per 15 minutes (default 5; tests raise it)
 ```
 
 The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.
+
+`MONGODB_URI` and `MONGODB_DB_NAME` are required: without them the health check fails and the venue catalogue reports its details as `NOT_CHECKED`. Your Atlas user needs read/write access and your current IP on the Atlas Network Access list (Master section 2.7.1).
 
 ---
 
@@ -209,6 +215,8 @@ Supabase Auth rate-limits password sign-ins per IP. The suite reuses one session
 
 Test names follow `[<Jira test case or domain ID>] should_<behaviour>_when_<condition>`, e.g. `[TC-LOGIN-013] should_reject_the_access_token_immediately_when_user_logs_out`.
 
+Tests that need MongoDB (`tests/unit/venueDetailModel.test.js`, `tests/integration/venue.integration.test.js`) start a local in-memory server with `mongodb-memory-server`, never Atlas (Master M7). The first run downloads a `mongod` binary into the user cache; later runs work offline. `tests/integration/venue.integration.test.js` covers SPM-72 TC-VC-001 and TC-VC-003 against the live database and needs migration `20261019025616_spm72_venue_active_state`. TC-VC-002 (no available venues) cannot run against the shared database, which always holds other venues; the unit suites and the frontend journey cover it.
+
 `tests/integration/events.integration.test.js` exercises the event request RPCs end to end, including parallel submissions and idempotent replays. It needs migration `20261007075542_event_request_review_fixes` applied to the development project.
 
 `tests/integration/eventEdits.integration.test.js` covers SPM-33 (TC-01 to TC-21, two parallel saves, and an edit racing a reassignment). It needs the four SPM-33 migrations (`spm33_event_edit_history`, `spm33_owner_history_and_edit_notice`, `spm33_request_organisation_and_history_retention`, `spm33_assignment_enters_under_review`) and the `reassign_event_coordinator` function (SPM-180) in the development project. Cleanup deletes everything a run created except the profiles that wrote history entries: those stay, deactivated and without an Auth account, because history is never deleted.
@@ -218,6 +226,14 @@ Test names follow `[<Jira test case or domain ID>] should_<behaviour>_when_<cond
 ## 🗄️ Database Migrations
 
 Schema changes live in `supabase/migrations/<version>_<name>.sql`. The version matches the one recorded in the remote migration history. Add the SQL file first, review it, then apply it to the development project. Never edit an applied migration; add a corrective one.
+
+MongoDB collections, validators and indexes are defined in `mongodb/schemas/` and created by numbered scripts in `mongodb/migrations/` (Master section 6.4, M8). Apply them to the database in `MONGODB_DB_NAME` with:
+
+```bash
+npm run mongo:migrate   # runs each script once and records it in _schema_migrations
+```
+
+Never create or change collections by hand or in the Atlas UI.
 
 ---
 
@@ -234,14 +250,16 @@ Please refer to the `COMMIT_MESSAGES.md` file in the root directory for details.
 ```bash
 connectsphere-events-g8t6-backend/
 ├── app.js                 # Express app and middleware composition
-├── config/               # External service configurations (Supabase) and shared constants
+├── config/               # External service configurations (Supabase, MongoDB) and shared constants
 │   ├── eventConstants.js # Event statuses and the SPM-33 field edit matrix
+│   ├── mongodb.js        # Shared MongoDB client; retries after a failed connection
 │   ├── roles.js
 │   └── supabase.js
 ├── controller/           # Route handler logic and controllers
 │   ├── authController.js
 │   ├── eventController.js
-│   └── registrationController.js
+│   ├── registrationController.js
+│   └── venueController.js
 ├── middleware/           # Request/response middleware functions
 │   ├── auth.js           # Verifies the Supabase access token and loads the profile
 │   ├── authorize.js      # Role checks, the event access policy and requireVisibleEvent (404 outside viewing scope)
@@ -253,12 +271,19 @@ connectsphere-events-g8t6-backend/
 │   ├── eventModel.js
 │   ├── healthModel.js
 │   ├── registrationModel.js
-│   └── userModel.js
+│   ├── userModel.js
+│   ├── venueDetailModel.js # MongoDB venue_details reads
+│   └── venueModel.js       # Active venue catalogue (PostgreSQL) merged with details
+├── mongodb/
+│   ├── migrate.js        # Applies numbered scripts once (npm run mongo:migrate)
+│   ├── migrations/       # Numbered collection/validator scripts
+│   └── schemas/          # JSON Schema validators
 ├── routes/               # API route definitions
 │   ├── authRoutes.js
 │   ├── eventRoutes.js
 │   ├── registrationRoutes.js
-│   └── routers.js
+│   ├── routers.js
+│   └── venueRoutes.js
 ├── supabase/
 │   ├── migrations/       # Versioned schema changes
 │   └── seed/             # Development account provisioning
