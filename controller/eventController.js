@@ -11,7 +11,14 @@ const {
   toWholeNumber,
   MAX_INTEGER,
 } = require("../validators/eventValidator");
-const { EVENT_STATUS, EVENT_RELATIONSHIP, EVENT_FIELD_GROUPS } = require("../config/eventConstants");
+const {
+  EVENT_STATUS,
+  EVENT_RELATIONSHIP,
+  EVENT_FIELD_GROUPS,
+  LABEL_STATUSES,
+  LIFECYCLE_ACTIONS,
+  READINESS_MESSAGES,
+} = require("../config/eventConstants");
 
 const EVENT_STATUSES = Object.values(EVENT_STATUS);
 const KNOWN_EVENT_FIELDS = new Set(Object.values(EVENT_FIELD_GROUPS).flat());
@@ -37,6 +44,12 @@ const DOMAIN_ERRORS = Object.freeze({
   COORDINATOR_UNCHANGED: [409, "The selected coordinator is already assigned to this event."],
   ASSIGNMENT_CHANGED: [409, "This event was reassigned by someone else. Refresh and try again."],
   EVENT_NOT_REASSIGNABLE: [404, "Event request not found."],
+  FORBIDDEN: [403, "You do not have permission to access this resource."],
+  TRANSITION_NOT_ALLOWED: [403, "This action is not allowed for this event in its current status."],
+  READINESS_BLOCKED: [409, "The event is not ready yet. Resolve the listed items, then try again."],
+  SAFETY_APPROVAL_REQUIRED: [409, "The event needs a safety approval for its current arrangements before it can be confirmed."],
+  EVENT_NOT_ENDED: [409, "The event can be completed only after it has ended."],
+  COORDINATOR_INVARIANT: [409, "The event's coordinator assignment does not allow this action. Refresh and try again."],
 });
 
 // ---------- helpers ----------
@@ -314,16 +327,25 @@ const submitDraft = async (req, res, next) => {
   }
 };
 
-// GET /api/events/mine?status=DRAFT — dashboard lists ("My Drafts" / "My Requests")
+// GET /api/events/mine?status=DRAFT or ?label=Draft — dashboard lists ("My Drafts" /
+// "My Requests"). A label is expanded to its statuses here (SPM-173 AC6); the status
+// filter stays for the current organiser pages until they move to labels.
 const listMyEventRequests = async (req, res, next) => {
   try {
-    const { status } = req.query;
+    const { status, label } = req.query;
+    if (status !== undefined && label !== undefined) {
+      return validationFailed(res, { label: "Filter by status or by label, not both." });
+    }
     if (status !== undefined && !EVENT_STATUSES.includes(status)) {
       return validationFailed(res, { status: "Unknown status filter." });
+    }
+    if (label !== undefined && !Object.prototype.hasOwnProperty.call(LABEL_STATUSES, label)) {
+      return validationFailed(res, { label: "Unknown label filter." });
     }
     const { events, nextCursor } = await eventModel.findOrganiserEventRequests(req.user, {
       ...req.pagination,
       status: status ?? null,
+      ...(label === undefined ? {} : { statuses: [...LABEL_STATUSES[label]] }),
     });
     return res.status(200).json({ events, nextCursor });
   } catch (error) {
@@ -453,6 +475,95 @@ const reassignCoordinator = async (req, res, next) => {
   }
 };
 
+// ---------- SPM-173 lifecycle actions ----------
+
+const toReadinessFailures = (codes) =>
+  codes.map((code) => ({ code, message: READINESS_MESSAGES[code] || "This condition is not met yet." }));
+
+// The body carries only the version of the event the coordinator loaded, so an
+// action taken from an outdated page is refused (409) instead of applied.
+const readActionRequest = (req) => {
+  const body = req.body ?? {};
+  if (!isPlainObject(body)) return { errors: { body: "Send the request as a JSON object." } };
+  const errors = Object.fromEntries(
+    Object.keys(body)
+      .filter((key) => key !== "version")
+      .slice(0, 10)
+      .map((key) => [key.slice(0, 60), "This field cannot be set."])
+  );
+  const expectedVersion = readVersion(body, true, errors);
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey && req.get("Idempotency-Key") !== undefined) errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  return { errors, expectedVersion, idempotencyKey };
+};
+
+// POST /api/events/:id/submit-for-safety-review, /confirm, /start-preparation and
+// /complete — SPM-173 AC9-AC12. Outside the coordinator's scope is 404 (before
+// this, in requireVisibleEvent); then 400 for the request itself. The database
+// decides the rest under the event lock: 403 for an action the status does not
+// allow (naming the status, AC3), 409 for a stale version (AC5) or an unmet
+// condition (readiness, safety approval, event not ended).
+const lifecycleAction = (action) => async (req, res, next) => {
+  const { eventId } = req.visibleEvent;
+  try {
+    const { errors, expectedVersion, idempotencyKey } = readActionRequest(req);
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const result = await eventModel.runLifecycleAction({
+      action,
+      eventId,
+      actorId: req.user.user_id,
+      expectedVersion,
+      idempotencyKey,
+    });
+    markReplay(res, result);
+    const current = await loadEventForViewer(eventId, req.user);
+    if (!current) return eventNotFound(res);
+    return res.status(200).json({
+      message: LIFECYCLE_ACTIONS[action].message,
+      event: eventModel.toEventView(current.event, req.user, current.access),
+    });
+  } catch (error) {
+    if (error.name === "EventRequestError" && error.code === "EVENT_VERSION_CONFLICT") {
+      return sendVersionConflict(req, res, eventId).catch(next);
+    }
+    if (error.name === "EventRequestError" && error.code === "TRANSITION_NOT_ALLOWED") {
+      const currentStatus = error.currentStatus ?? null;
+      return res.status(403).json({
+        error: currentStatus
+          ? `This action is not allowed while the event is in ${currentStatus}.`
+          : DOMAIN_ERRORS.TRANSITION_NOT_ALLOWED[1],
+        code: "TRANSITION_NOT_ALLOWED",
+        currentStatus,
+      });
+    }
+    if (error.name === "EventRequestError" && error.code === "READINESS_BLOCKED") {
+      return res.status(409).json({
+        error: DOMAIN_ERRORS.READINESS_BLOCKED[1],
+        code: "READINESS_BLOCKED",
+        failures: toReadinessFailures(error.failures || []),
+      });
+    }
+    return handleError(error, res, next);
+  }
+};
+
+const submitForSafetyReview = lifecycleAction("SUBMIT_FOR_SAFETY_REVIEW");
+const confirmEvent = lifecycleAction("CONFIRM");
+const startPreparation = lifecycleAction("START_PREPARATION");
+const completeEvent = lifecycleAction("COMPLETE");
+
+// GET /api/events/:id/readiness — SPM-173 AC8: what still blocks safety review and
+// confirmation, one entry per failing condition. Read-only; the actions recheck it.
+const getEventReadiness = async (req, res, next) => {
+  try {
+    const readiness = await eventModel.getEventReadiness({ eventId: req.visibleEvent.eventId, actorId: req.user.user_id });
+    return res.status(200).json({ ...readiness, failures: toReadinessFailures(readiness.failures) });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
 const getRequestOptions = async (req, res, next) => {
   try { res.status(200).json(await eventModel.findRequestOptions()); }
   catch (error) { return next(error); }
@@ -474,4 +585,9 @@ module.exports = {
   listUnassignedEvents,
   getCoordinatorAvailability,
   reassignCoordinator,
+  getEventReadiness,
+  submitForSafetyReview,
+  confirmEvent,
+  startPreparation,
+  completeEvent,
 };

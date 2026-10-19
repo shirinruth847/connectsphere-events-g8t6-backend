@@ -1,19 +1,21 @@
 // Values must match the public.event_status enum exactly (Master section 5.2).
+// The enum's unused APPROVED value is left out: no lifecycle action reaches it.
 const EVENT_STATUS = Object.freeze({
   DRAFT: "DRAFT",
   SUBMITTED: "SUBMITTED",
   UNDER_REVIEW: "UNDER_REVIEW",
   AWAITING_CLARIFICATION: "AWAITING_CLARIFICATION",
   PLANNING: "PLANNING",
+  SAFETY_REVIEW: "SAFETY_REVIEW",
   CONFIRMED: "CONFIRMED",
+  PREPARATION: "PREPARATION",
   COMPLETED: "COMPLETED",
   REJECTED: "REJECTED",
   CANCELLED: "CANCELLED",
 });
 
-// Organiser-facing label for each stored status (Master section 3.5). Listed by
-// name because SAFETY_REVIEW and PREPARATION are not in the live event_status
-// enum yet; an unknown status falls back to its stored code.
+// Organiser-facing label for each stored status (Master section 3.5). An
+// unknown status falls back to its stored code.
 const STATUS_LABELS = Object.freeze({
   DRAFT: "Draft",
   SUBMITTED: "Submitted",
@@ -28,13 +30,46 @@ const STATUS_LABELS = Object.freeze({
   REJECTED: "Rejected",
 });
 
+// The statuses behind each organiser label, so a label filter is expanded on
+// the backend (SPM-173 AC6). Built from STATUS_LABELS so the two cannot drift.
+const LABEL_STATUSES = Object.freeze(
+  Object.entries(STATUS_LABELS).reduce((byLabel, [status, label]) => {
+    byLabel[label] = Object.freeze([...(byLabel[label] || []), status]);
+    return byLabel;
+  }, {})
+);
+
 // Organiser-facing notes, the "flag" column of Master section 3.5. Shown only
 // while the note is true. WAITING_FOR_COORDINATOR is an SPM-33 addition the
-// Master does not list yet. The "Reconfirmation pending" flag is not produced:
-// nothing records yet whether an event in planning was confirmed before.
+// Master does not list yet.
 const STATUS_NOTES = Object.freeze({
   WAITING_FOR_COORDINATOR: "Waiting for a coordinator",
   RETURNED_FOR_ACTION: "Returned – action required",
+  RECONFIRMATION_PENDING: "Reconfirmation pending",
+});
+
+// Coordinator lifecycle actions owned by SPM-173 (Master section 5.2, T07 and
+// T10-T12), each with the database function that runs it under the event lock.
+const LIFECYCLE_ACTIONS = Object.freeze({
+  SUBMIT_FOR_SAFETY_REVIEW: Object.freeze({ rpc: "submit_event_for_safety_review", message: "Event submitted for safety review." }),
+  CONFIRM: Object.freeze({ rpc: "confirm_event", message: "Event confirmed." }),
+  START_PREPARATION: Object.freeze({ rpc: "start_event_preparation", message: "Event preparation started." }),
+  COMPLETE: Object.freeze({ rpc: "complete_event", message: "Event completed." }),
+});
+
+// Why an event is not ready for safety review or confirmation (Master section
+// 5.3), by the code the database reports.
+const READINESS_MESSAGES = Object.freeze({
+  READINESS_DATA_PENDING: "Venue booking and technical arrangements cannot be checked yet.",
+  NO_ACTIVE_BOOKING: "Add at least one venue booking.",
+  BOOKING_NOT_APPROVED: "Every venue booking must be approved; holds and pending requests do not count.",
+  BOOKING_OVER_CAPACITY: "A booking's expected attendance is larger than its venue's capacity.",
+  NO_PRIMARY_VENUE: "Choose one approved venue booking as the primary venue.",
+  TECHNICAL_NOT_APPROVED: "The technical request must be approved, or marked as not required.",
+  REGISTRATION_INVALID: "Registration is enabled without a valid capacity.",
+  REGISTRATION_EXCEEDS_PRIMARY_CAPACITY: "Registration capacity is larger than the primary venue's capacity.",
+  OPEN_BLOCKING_INCIDENT: "A venue or equipment incident is still open.",
+  OPEN_CHANGE_REQUEST: "A change request is still open.",
 });
 
 const NO_LAYOUT_PREFERENCE = "NO_PREFERENCE";
@@ -94,9 +129,8 @@ const OWNER_DRAFT_FIELDS = Object.freeze([
 ]);
 
 // Statuses in which the assigned coordinator may edit ordinary fields, in Master
-// section 5.2 lifecycle order. Listed by name because SAFETY_REVIEW and PREPARATION
-// are not in the live event_status enum yet. SUBMITTED is absent because an event
-// in it has no coordinator, and there is no APPROVED state.
+// section 5.2 lifecycle order. SUBMITTED is absent because an event in it has no
+// coordinator, and there is no APPROVED state.
 const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "UNDER_REVIEW",
   "PLANNING",
@@ -108,7 +142,10 @@ const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
 module.exports = {
   EVENT_STATUS,
   STATUS_LABELS,
+  LABEL_STATUSES,
   STATUS_NOTES,
+  LIFECYCLE_ACTIONS,
+  READINESS_MESSAGES,
   NO_LAYOUT_PREFERENCE,
   MIN_LEAD_TIME_HOURS,
   EVENT_RELATIONSHIP,
