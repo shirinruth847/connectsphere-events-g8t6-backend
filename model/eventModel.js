@@ -33,12 +33,12 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
 const LIST_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 
 // Calendar events include richer details for coordinators' schedule view.
 const CALENDAR_SELECT =
@@ -159,6 +159,8 @@ const toApi = (row, viewerUserId) => {
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    submittedAt: row.submitted_at ?? null,
+    coordinatorName: row.coordinator?.name ?? null,
     // Sent back as "version" when saving, to detect a save over someone else's change.
     ...(row.version === undefined ? {} : { version: row.version }),
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
@@ -202,6 +204,7 @@ const toListItem = (row, viewerUserId) => ({
   isOwner: row.organiser_id === viewerUserId,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  submittedAt: row.submitted_at ?? null,
 });
 
 const computeRegistrationAvailability = ({
@@ -214,7 +217,7 @@ const computeRegistrationAvailability = ({
   now = new Date(),
 }) => {
   if (!is_registration_enabled) return "NOT_ENABLED";
-  if (status !== "CONFIRMED") return "CLOSED";
+  if (!["CONFIRMED", "PREPARATION"].includes(status)) return "CLOSED";
 
   const currentTime = now instanceof Date ? now.getTime() : new Date(now).getTime();
   const openAt = registration_open_at ? new Date(registration_open_at).getTime() : null;
@@ -232,14 +235,26 @@ const computeRegistrationAvailability = ({
 // registration(count) is narrowed to REGISTERED seats by REGISTERED_SEATS_FILTER, so the
 // list and the detail read capacity from the same embedded count.
 const LIST_ATTENDEE_DISCOVERY_SELECT =
-  "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name),registration(count)";
+  "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name),registration(count),venue_booking(status,room(venue(venue_id,name,address)))";
 const REGISTERED_SEATS_FILTER = ["registration.registration_status", "REGISTERED"];
 
-// Add PREPARATION once the event_status migration includes it.
-const ATTENDEE_DISCOVERY_STATUSES = ["CONFIRMED"];
+const ATTENDEE_DISCOVERY_STATUSES = ["CONFIRMED", "PREPARATION"];
+
+const attendeeLocation = (bookings = []) => {
+  // The legacy schema has no primary-venue flag. Publish only an unambiguous
+  // approved venue; never choose an arbitrary booking or reveal pending ones.
+  const venues = new Map();
+  for (const booking of bookings ?? []) {
+    const venue = booking.room?.venue;
+    if (booking.status === "APPROVED" && venue) venues.set(venue.venue_id, venue);
+  }
+  if (venues.size !== 1) return null;
+  const venue = venues.values().next().value;
+  return [venue.name, venue.address].filter(Boolean).join(", ") || null;
+};
 
 const toAttendeeDiscoveryItem = (row) => {
-  const location = null;
+  const location = attendeeLocation(row.venue_booking);
   const availability = computeRegistrationAvailability({
     status: row.status,
     is_registration_enabled: row.is_registration_enabled,
@@ -518,6 +533,7 @@ const findUnassignedSubmittedEvents = async () => {
     .select(LIST_SELECT)
     .eq("status", "SUBMITTED")
     .is("coordinator_id", null)
+    .order("submitted_at", { ascending: true, nullsFirst: false })
     .order("created_at", { ascending: true })
     .order("event_id", { ascending: true });
   if (error) throw dbError(error);
@@ -692,6 +708,17 @@ const CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z
 const encodeKeysetCursor = (timestampKey, timestamp, eventId) =>
   Buffer.from(JSON.stringify({ [timestampKey]: timestamp, eventId })).toString("base64url");
 
+const isValidCursorTimestamp = (value) => {
+  if (typeof value !== "string" || !CURSOR_TIMESTAMP.test(value)) return false;
+  // Date.parse normalizes dates such as February 31; PostgreSQL rejects them.
+  // Check the local calendar date without changing the original microseconds.
+  const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return year > 0 && month >= 1 && month <= 12 && day >= 1 &&
+    day <= days[month - 1] && !Number.isNaN(Date.parse(value));
+};
+
 const decodeKeysetCursor = (value, timestampKey) => {
   if (value === undefined || value === null) return null;
   let decoded = null;
@@ -702,9 +729,7 @@ const decodeKeysetCursor = (value, timestampKey) => {
   }
   if (
     !decoded ||
-    typeof decoded[timestampKey] !== "string" ||
-    !CURSOR_TIMESTAMP.test(decoded[timestampKey]) ||
-    Number.isNaN(Date.parse(decoded[timestampKey])) ||
+    !isValidCursorTimestamp(decoded[timestampKey]) ||
     !Number.isSafeInteger(decoded.eventId) ||
     decoded.eventId < 1
   ) {
