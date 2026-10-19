@@ -284,7 +284,7 @@ describe("reads", () => {
   test("[EVT-PERF-001] should_look_up_only_the_mentioned_layout_venues_and_equipment", async () => {
     const queries = {
       room: queryReturning({ data: [{ layout_type: "THEATRE" }], error: null }),
-      venue: { select: jest.fn(() => ({ in: jest.fn().mockResolvedValue({ data: [{ venue_id: 2 }], error: null }) })) },
+      venue: queryReturning({ data: [{ venue_id: 2 }], error: null }),
     };
     supabase.from.mockImplementation((table) => queries[table]);
 
@@ -292,7 +292,33 @@ describe("reads", () => {
 
     expect(supabase.from).toHaveBeenCalledTimes(2);
     expect(queries.room.eq).toHaveBeenCalledWith("layout_type", "THEATRE");
+    expect(queries.venue.in).toHaveBeenCalledWith("venue_id", [2]);
     expect(context).toEqual({ allowedLayouts: ["NO_PREFERENCE", "THEATRE"], venueIds: [2], equipmentIds: [] });
+  });
+
+  test("[SPM-73] should_accept_only_available_venues_as_preferences", async () => {
+    const venue = queryReturning({ data: [], error: null });
+    supabase.from.mockReturnValue(venue);
+
+    const context = await eventModel.findValidationContext({ venuePreferences: [5] });
+
+    expect(venue.eq).toHaveBeenCalledWith("is_active", true);
+    expect(venue.eq).toHaveBeenCalledWith("status", "ACTIVE");
+    expect(context.venueIds).toEqual([]);
+  });
+
+  test("[SPM-73] should_offer_only_available_venues_in_request_options", async () => {
+    const queries = {
+      venue: queryReturning({ data: [{ venue_id: 1, name: "Hall" }], error: null }),
+      room: queryReturning({ data: [{ layout_type: "THEATRE" }], error: null }),
+    };
+    supabase.from.mockImplementation((table) => queries[table]);
+
+    const options = await eventModel.findRequestOptions();
+
+    expect(queries.venue.eq).toHaveBeenCalledWith("is_active", true);
+    expect(queries.venue.eq).toHaveBeenCalledWith("status", "ACTIVE");
+    expect(options.venues).toEqual([{ venueId: 1, name: "Hall" }]);
   });
 
   test("[EVT-PERF-001] should_not_query_the_database_when_no_catalogue_fields_are_sent", async () => {

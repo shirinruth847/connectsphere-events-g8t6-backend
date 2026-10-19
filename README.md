@@ -70,10 +70,31 @@ These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, 
 | --- | --- | --- | --- |
 | `GET /api/venues` | `COORDINATOR`, `COORDINATOR_LEAD`, `VENUE_STAFF` | `200 { venues: [{ venueId, name, address, maxCapacity, operatingHours, accessibilityFeatures, setupTurnaroundMinutes, rooms: [{ roomId, layoutType, capacity }], detailStatus, description, facilities, supportedLayouts, emergencyAccess, knownRestrictions }], detailsAvailable }`, ordered by name | `401 UNAUTHENTICATED`, `403 FORBIDDEN` (other roles), `500 INTERNAL_ERROR` (PostgreSQL failure) |
 
-- **Read-only:** there is no venue, room, booking or equipment write route. Venue maintenance belongs to SPM-73, bookings and equipment requests to SPM-179/181/186. `SAFETY_OFFICER` gets access when its ticket adds the role to `user_role`.
-- **Available venues only:** PostgreSQL is the source of which venues exist. A venue deleted as unusable keeps its row (bookings may still reference it) with `venue.is_active = false` and is left out (migration `20261019025616_spm72_venue_active_state`). An empty `venues` list means no venue is currently available.
+- **Read-only:** the catalogue changes nothing. Only Venue Staff maintain venues (SPM-73, below); bookings and equipment requests belong to SPM-179/181/186. `SAFETY_OFFICER` gets access when its ticket adds the role to `user_role`.
+- **Available venues only:** PostgreSQL is the source of which venues exist. The catalogue lists venues with `is_active` and `status = 'ACTIVE'`. A venue deleted as unusable keeps its row (bookings may still reference it) with `venue.is_active = false` (migration `20261019025616_spm72_venue_active_state`); `INACTIVE` and `UNDER_MAINTENANCE` venues are left out too (SPM-73). An empty `venues` list means no venue is currently available.
 - **Details:** MongoDB `venue_details` documents (`_id` = the PostgreSQL `venue_id` as a string) add the descriptive fields. `detailStatus` is the only signal for them: `CURRENT` (document read), `NOT_AVAILABLE` (no document for this venue) or `NOT_CHECKED` (MongoDB unavailable; `detailsAvailable` is then `false`, Master M4). Fields without a value are `null`. `accessibilityFeatures` is the document's list, or else the PostgreSQL accessibility note as a one-item list.
 - **MongoDB outages:** a failed connection is retried on the next request, and server selection times out after 3 seconds, so the catalogue still answers from PostgreSQL.
+
+### Venue Maintenance (SPM-73)
+
+Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-checks the role inside each write. Needs migration `20261019120000_spm73_venue_catalogue_maintenance`.
+
+| Method & path | Input | Success | Errors |
+| --- | --- | --- | --- |
+| `GET /api/venues/manage` | `?search=` (name), `?location=` (address), `?status=ACTIVE\|INACTIVE\|UNDER_MAINTENANCE`, `?limit=1..100` (default 50), `?offset=` | `200 { venues: [venue], nextOffset }`, ordered by name; every status, deleted venues excluded | `400 VALIDATION_FAILED` |
+| `GET /api/venues/:venueId` | — | `200 { venue }` | `404 VENUE_NOT_FOUND` |
+| `POST /api/venues` | `{ name, address, maxCapacity, contactPerson, contactEmail, contactNumber, status?, statusReason? }` | `201 { message, venue }`, status `ACTIVE` unless sent | `400 VALIDATION_FAILED` with `fields`, `409 VENUE_NAME_TAKEN` |
+| `PUT /api/venues/:venueId` | Changed details plus the `version` loaded | `200 { message, venue, changed }` | `400`, `404`, `409 VENUE_NAME_TAKEN`, `409 VENUE_VERSION_CONFLICT` |
+| `PUT /api/venues/:venueId/status` | `{ status, reason?, version, confirmUpcomingBookings? }` | `200 { message, venue, changed, upcomingBookings }` | `400`, `404`, `409 VENUE_VERSION_CONFLICT`, `409 VENUE_HAS_UPCOMING_BOOKINGS` with `upcomingBookings` and `firstStart` |
+
+`venue` is `{ venueId, name, address, maxCapacity, status, statusReason, contactPerson, contactEmail, contactNumber, version, createdAt, updatedAt, createdBy, updatedBy }`, where `createdBy` and `updatedBy` are `{ userId, name }` or `null` for venues older than SPM-73.
+
+- **Fields:** name (≤ 150, unique in any letter case), address (≤ 255), capacity (whole number from 1 to `MAX_VENUE_CAPACITY` = 100,000 in `config/venueConstants.js`), contact person (≤ 100), and a contact email or number (both may be given). Numbers may use digits, spaces, `+`, `-` and brackets, with 7–15 digits. Messages follow the SPM-73 test cases, e.g. "Venue name is required", "Capacity must be a positive whole number", "A venue with this name already exists". Any other field, such as `createdBy` or `version` on create, is rejected with `400` rather than ignored.
+- **Status:** `ACTIVE`, `INACTIVE` or `UNDER_MAINTENANCE`; `UNDER_MAINTENANCE` needs a `reason` (≤ 500). Status is separate from `is_active`, which only marks a venue deleted as unusable. Only `ACTIVE` venues appear in the catalogue and in `GET /api/events/request-options`, and only they are accepted as event venue preferences.
+- **Upcoming bookings:** taking a venue out of service while it has upcoming `PENDING` or `APPROVED` bookings returns `409 VENUE_HAS_UPCOMING_BOOKINGS` until the request repeats with `"confirmUpcomingBookings": true`. Bookings are never changed or removed.
+- **Stale saves:** every change raises `version`. Send the one you loaded; an older one gets `409 VENUE_VERSION_CONFLICT`. A save that changes nothing keeps the version and writes no history.
+- **Audit:** create, detail updates and status changes write the venue and one `activity_log` entry (`VENUE_CREATED`, `VENUE_UPDATED` with before/after values, `VENUE_STATUS_CHANGED` with the reason) in one transaction (`create_venue`, `update_venue`, `set_venue_status`). Entries are `STAFF_ONLY` and never appear in event history.
+- **Not covered here:** detail documents in MongoDB `venue_details` are not written yet (Master 6.5 routes those writes through the outbox, which does not exist), so new venues show `detailStatus: "NOT_AVAILABLE"` in the catalogue. Venue deletion is SPM-210.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
 
@@ -254,7 +275,8 @@ connectsphere-events-g8t6-backend/
 │   ├── eventConstants.js # Event statuses and the SPM-33 field edit matrix
 │   ├── mongodb.js        # Shared MongoDB client; retries after a failed connection
 │   ├── roles.js
-│   └── supabase.js
+│   ├── supabase.js
+│   └── venueConstants.js # Venue statuses and the maximum capacity
 ├── controller/           # Route handler logic and controllers
 │   ├── authController.js
 │   ├── eventController.js
@@ -293,7 +315,8 @@ connectsphere-events-g8t6-backend/
 │   └── unit/             # Mocked Supabase; run by npm test
 ├── validators/           # Pure request validation rules
 │   ├── authValidator.js
-│   └── eventValidator.js
+│   ├── eventValidator.js
+│   └── venueValidator.js # SPM-73 venue fields, status and list filters
 ├── COMMIT_MESSAGES.md    # Commit message SOP standards
 ├── README.md             # Backend documentation
 └── server.js             # Main server entry point

@@ -5,7 +5,8 @@ const supabase = require("../../config/supabase");
 const venueDetailModel = require("../../model/venueDetailModel");
 const venueModel = require("../../model/venueModel");
 
-// Venue A is active, Venue B is active, Venue Z was deleted as unusable.
+// Venues A and B are available. The others are not: deleted as unusable
+// (SPM-72), or taken out of service by Venue Staff (SPM-73).
 const venueA = {
   venue_id: 1,
   name: "Venue A",
@@ -15,6 +16,7 @@ const venueA = {
   accessibility_features: null,
   setup_turnaround_min: 15,
   is_active: true,
+  status: "ACTIVE",
   rooms: [],
 };
 const venueB = {
@@ -26,9 +28,12 @@ const venueB = {
   accessibility_features: "Lift to all floors",
   setup_turnaround_min: 30,
   is_active: true,
+  status: "ACTIVE",
   rooms: [{ room_id: 8, layout_type: "THEATRE", capacity: 200 }],
 };
 const deletedVenue = { ...venueA, venue_id: 3, name: "Venue Z (deleted)", is_active: false };
+const inactiveVenue = { ...venueA, venue_id: 4, name: "Venue Y (inactive)", status: "INACTIVE" };
+const maintainedVenue = { ...venueA, venue_id: 5, name: "Venue X (maintenance)", status: "UNDER_MAINTENANCE" };
 
 // Applies .eq() filters and .order() calls to the rows, like PostgREST would,
 // so the tests check the model's query rather than a pre-filtered result.
@@ -57,7 +62,7 @@ const tableOf = (rows, error = null) => {
         }
         return 0;
       })
-      .map(({ is_active: _ignored, ...row }) => row);
+      .map(({ is_active: _active, status: _status, ...row }) => row);
     return resolve({ data, error: null });
   };
   return query;
@@ -78,7 +83,7 @@ let table;
 beforeEach(() => {
   jest.clearAllMocks();
   jest.spyOn(console, "warn").mockImplementation(() => {});
-  table = tableOf([venueB, deletedVenue, venueA]);
+  table = tableOf([venueB, deletedVenue, maintainedVenue, venueA, inactiveVenue]);
   supabase.from.mockReturnValue(table);
   venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([["1", venueADetails]]));
 });
@@ -149,8 +154,15 @@ describe("venueModel.getVenueCatalogue", () => {
     expect(venueDetailModel.getVenueDetailsByIds.mock.calls[0][0]).not.toContain(deletedVenue.venue_id);
   });
 
+  test("[SPM-73] should_exclude_inactive_and_under_maintenance_venues", async () => {
+    const result = await venueModel.getVenueCatalogue();
+
+    expect(table.eq).toHaveBeenCalledWith("status", "ACTIVE");
+    expect(result.venues.map(({ name }) => name)).toEqual(["Venue A", "Venue B"]);
+  });
+
   test("[TC-VC-002][SPM-72-AC5] should_return_an_empty_catalogue_when_no_venue_is_available", async () => {
-    supabase.from.mockReturnValue(tableOf([deletedVenue]));
+    supabase.from.mockReturnValue(tableOf([deletedVenue, inactiveVenue, maintainedVenue]));
     venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map());
 
     const result = await venueModel.getVenueCatalogue();
@@ -189,9 +201,5 @@ describe("venueModel.getVenueCatalogue", () => {
 
     await expect(venueModel.getVenueCatalogue()).rejects.toBe(databaseError);
     expect(venueDetailModel.getVenueDetailsByIds).not.toHaveBeenCalled();
-  });
-
-  test("[SPM-72-AC1] should_expose_only_the_read_operation", () => {
-    expect(Object.keys(venueModel)).toEqual(["getVenueCatalogue"]);
   });
 });

@@ -148,13 +148,14 @@ describe("GET /api/venues (SPM-72)", () => {
     expect(response.body.code).toBe("FORBIDDEN");
   });
 
+  // Venue writes exist for Venue Staff only (SPM-73).
   test("[SPM-72-AC1] should_not_accept_a_venue_write_from_a_coordinator", async () => {
     const session = await signIn("coordinator");
     const response = await request(app)
       .post("/api/venues")
       .set("Authorization", bearer(session))
-      .send({ name: venueName("not created"), address: "x", max_capacity: 1 });
-    expect(response.status).toBe(404);
+      .send({ name: venueName("not created"), address: "x", maxCapacity: 1 });
+    expect(response.status).toBe(403);
 
     const { count } = await supabase.from("venue").select("venue_id", { count: "exact", head: true }).eq("name", venueName("not created"));
     expect(count).toBe(0);

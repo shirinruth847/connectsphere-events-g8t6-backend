@@ -2,6 +2,7 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
+const { VENUE_STATUS } = require("../config/venueConstants");
 const {
   EVENT_STATUS,
   NO_LAYOUT_PREFERENCE,
@@ -695,7 +696,11 @@ const findValidationContext = async (input) => {
     layout && layout !== NO_LAYOUT_PREFERENCE
       ? supabase.from("room").select("layout_type").eq("layout_type", layout).limit(1)
       : NO_ROWS,
-    venueIds.length ? supabase.from("venue").select("venue_id").in("venue_id", venueIds) : NO_ROWS,
+    // Only available venues can be chosen (SPM-73: inactive or unavailable
+    // venues cannot be selected for new bookings).
+    venueIds.length
+      ? supabase.from("venue").select("venue_id").in("venue_id", venueIds).eq("is_active", true).eq("status", VENUE_STATUS.ACTIVE)
+      : NO_ROWS,
     equipmentIds.length
       ? supabase.from("equipment").select("equipment_id").in("equipment_id", equipmentIds)
       : NO_ROWS,
@@ -715,7 +720,12 @@ const findValidationContext = async (input) => {
 // This read does not reserve a venue or expose internal venue planning data.
 const findRequestOptions = async () => {
   const [venues, rooms] = await Promise.all([
-    supabase.from("venue").select("venue_id,name").order("name", { ascending: true }),
+    supabase
+      .from("venue")
+      .select("venue_id,name")
+      .eq("is_active", true)
+      .eq("status", VENUE_STATUS.ACTIVE)
+      .order("name", { ascending: true }),
     supabase.from("room").select("layout_type"),
   ]);
   for (const result of [venues, rooms]) if (result.error) throw dbError(result.error);
