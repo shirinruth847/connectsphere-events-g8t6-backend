@@ -42,4 +42,24 @@ async function deleteFixtureAudit(manifest) {
   });
 }
 
-module.exports = { assertAuditCleanupAvailable, deleteFixtureAudit };
+// Clarification rounds (SPM-41) block event deletion, and the runtime may only read
+// them, so fixture rounds are removed here. Only rounds on events whose organiser is
+// one of this run's synthetic profiles are touched.
+async function deleteFixtureClarifications(manifest) {
+  if (!/^[a-z0-9]+$/.test(manifest.runId)) throw new Error("Invalid fixture run ID.");
+  const ids = manifest.eventIds ?? [];
+  if (!ids.length) return;
+  if (ids.some(id => !Number.isSafeInteger(id) || id < 1)) throw new Error("Invalid fixture event IDs.");
+  const prefixes = [`spm32-${manifest.runId}-`, `spm123-${manifest.runId}-`];
+  return withCleanupConnection(async client => {
+    await client.query("BEGIN");
+    try {
+      const { rows } = await client.query('SELECT e.event_id, u.email FROM public.event AS e JOIN public."user" AS u ON u.user_id = e.organiser_id WHERE e.event_id = ANY($1::integer[]) FOR UPDATE OF e', [ids]);
+      if (rows.some(event => !prefixes.some(prefix => event.email.startsWith(prefix)))) throw new Error("Refusing cleanup of a non-fixture event.");
+      await client.query('DELETE FROM public.clarifications AS c USING public.event AS e, public."user" AS u WHERE c.event_id = e.event_id AND e.organiser_id = u.user_id AND e.event_id = ANY($1::integer[]) AND (u.email LIKE $2 OR u.email LIKE $3)', [ids, `${prefixes[0]}%`, `${prefixes[1]}%`]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+  });
+}
+
+module.exports = { assertAuditCleanupAvailable, deleteFixtureAudit, deleteFixtureClarifications };
