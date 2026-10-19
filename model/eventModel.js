@@ -609,14 +609,22 @@ const findValidationContext = async (input) => {
   };
 };
 
-// Allowed layout options come from the rooms that actually exist, plus "no preference".
-async function getAllowedLayouts() {
-  const { data, error } = await supabase.from('room').select('layout_type');
-  if (error) throw error;
-  return [NO_LAYOUT_PREFERENCE, ...new Set(data.map((room) => room.layout_type))];
-}
+// Request creation only needs catalogue names/IDs and supported layouts.
+// This read does not reserve a venue or expose internal venue planning data.
+const findRequestOptions = async () => {
+  const [venues, rooms] = await Promise.all([
+    supabase.from("venue").select("venue_id,name").order("name", { ascending: true }),
+    supabase.from("room").select("layout_type"),
+  ]);
+  for (const result of [venues, rooms]) if (result.error) throw dbError(result.error);
+  return {
+    venues: venues.data.map(row => ({ venueId: row.venue_id, name: row.name })),
+    layouts: [...new Set([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)])].filter(Boolean),
+  };
+};
 
 module.exports = {
+  findRequestOptions,
   getUnsupportedInputFields,
   pickEventInput,
   toRow,

@@ -3,6 +3,7 @@ const router = express.Router();
 
 const {
   createAndSubmit,
+  getRequestOptions,
   createDraft,
   updateDraft,
   submitDraft,
@@ -45,8 +46,6 @@ router.get(
   coordinatorOperations,
   getCoordinatorAvailability,
 );
-router.get("/unassigned", leadOnly, listUnassignedEvents); // must stay above "/:id"
-router.get("/coordinator-availability", leadOnly, getCoordinatorAvailability); // Lead-only cross-coordinator schedule
 router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/:id"
 router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
 router.post("/:id/coordinator", leadOnly, assignCoordinatorAsLead);
@@ -60,6 +59,15 @@ router.get(
   [requireAuth, requireRole(USER_ROLES.ORGANISER, USER_ROLES.COORDINATOR)],
   getEventRequest,
 );
+router.get("/request-options", organiserOnly, getRequestOptions);
+router.get("/mine", organiserOnly, validateCursorPagination, listMyEventRequests); // must stay above "/:id"
+router.get("/unassigned", leadOnly, listUnassignedEvents); // must stay above "/:id"
+router.get("/coordinator-availability", leadOnly, getCoordinatorAvailability); // Lead-only cross-coordinator schedule
+router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/:id"
+router.post("/:id/coordinator", leadOnly, assignCoordinatorAsLead);
+router.patch("/:id/coordinator", leadOnly, patchCoordinator);
+router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
+router.get("/:id", [requireAuth, requireRole(USER_ROLES.ORGANISER, USER_ROLES.COORDINATOR)], getEventRequest);
 router.put("/:id/draft", organiserOnly, updateDraft);
 router.put("/:id/submit", organiserOnly, submitDraft);
 

@@ -10,6 +10,7 @@ jest.mock("../../model/eventModel", () => {
   const actual = jest.requireActual("../../model/eventModel");
   return {
     ...actual,
+    findRequestOptions: jest.fn(),
     saveDraft: jest.fn(),
     submitEvent: jest.fn(),
     findVisibleEvent: jest.fn(),
@@ -634,5 +635,21 @@ describe("GET /api/events/:id and /mine", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.fields).toEqual({ cursor: "Invalid page cursor." });
+  });
+});
+
+
+describe("SPM-35 request catalogue", () => {
+  test("returns names and layout choices to an organiser without writing", async () => {
+    eventModel.findRequestOptions.mockResolvedValue({ venues: [{ venueId: 1, name: "Main Hall" }], layouts: ["NO_PREFERENCE", "THEATRE"] });
+    const res = await send("get", "/api/events/request-options");
+    expect(res.status).toBe(200);
+    expect(res.body.venues).toEqual([{ venueId: 1, name: "Main Hall" }]);
+    expect(eventModel.saveDraft).not.toHaveBeenCalled();
+  });
+  test.each(["ATTENDEE", "COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT"])("denies request options to %s", async role => {
+    signedInAs(role);
+    expect((await send("get", "/api/events/request-options")).status).toBe(403);
+    expect(eventModel.findRequestOptions).not.toHaveBeenCalled();
   });
 });

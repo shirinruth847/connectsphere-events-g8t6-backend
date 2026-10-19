@@ -298,7 +298,8 @@ const verifyManifestClean = async (manifest) => {
 };
 
 // Dependency-safe order; Auth accounts last so profiles never dangle mid-cleanup.
-// Deleting the users cascades their activity_log and idempotency_records rows.
+// Audit rows require a separate privileged cleanup connection; the runtime
+// identity intentionally cannot delete them.
 const cleanupManifest = async (manifest) => {
   const eventIds = manifest.eventIds || [];
   await deleteIn("registration", "registration_id", manifest.registrationIds);
@@ -309,6 +310,11 @@ const cleanupManifest = async (manifest) => {
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);
   await deleteIn("organisation_membership", "user_id", manifest.userIds);
+  if (manifest.userIds.length) {
+    const { count, error } = await supabase.from("activity_log").select("log_id", { count: "exact", head: true }).in("user_id", manifest.userIds);
+    if (error) throw error;
+    if (count) await require("./adminCleanup").deleteFixtureAudit(manifest);
+  }
   await deleteIn("user", "user_id", manifest.userIds);
   await deleteIn("room", "room_id", manifest.roomIds);
   await deleteIn("venue", "venue_id", manifest.venueIds);

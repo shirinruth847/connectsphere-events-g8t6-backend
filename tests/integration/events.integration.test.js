@@ -1,3 +1,4 @@
+process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 // SPM-35/SPM-37 live integration tests: real Express routes, Supabase Auth and the
 // shared development database. They cover what mocks cannot: the atomic RPCs,
 // constraints, round-robin locking, idempotency and real PostgREST paging.
@@ -134,6 +135,7 @@ const organiserEventCount = async (key) =>
   ).length;
 
 beforeAll(async () => {
+  await require("../fixtures/adminCleanup").assertAuditCleanupAvailable();
   fixtures = await createAuthFixtures(runId);
 });
 

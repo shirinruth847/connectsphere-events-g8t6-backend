@@ -3,3 +3,5 @@ node_modules/
 tests/fixtures/manifests/
 supabase/seed/manifests/
 .playwright-mcp/
+
+!.env.example
