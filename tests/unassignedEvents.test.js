@@ -43,15 +43,17 @@ describe("[SPM-174] unassigned event queue", () => {
       is: jest.fn().mockReturnThis(),
       order: jest.fn().mockReturnThis(),
     };
-    query.order.mockImplementationOnce(() => query).mockResolvedValue({ data: rows, error: null });
+    query.order.mockImplementation(() => query);
+    query.then = (resolve) => Promise.resolve({ data: rows, error: null }).then(resolve);
     supabase.from.mockReturnValue(query);
 
     await expect(eventModel.findUnassignedSubmittedEvents()).resolves.toEqual(rows);
     expect(supabase.from).toHaveBeenCalledWith("event");
     expect(query.eq).toHaveBeenCalledWith("status", "SUBMITTED");
     expect(query.is).toHaveBeenCalledWith("coordinator_id", null);
-    expect(query.order).toHaveBeenNthCalledWith(1, "created_at", { ascending: true });
-    expect(query.order).toHaveBeenNthCalledWith(2, "event_id", { ascending: true });
+    expect(query.order).toHaveBeenNthCalledWith(1, "submitted_at", { ascending: true, nullsFirst: false });
+    expect(query.order).toHaveBeenNthCalledWith(2, "created_at", { ascending: true });
+    expect(query.order).toHaveBeenNthCalledWith(3, "event_id", { ascending: true });
   });
 
   test("TC-SPM-174-AC2: maps queue rows to the public event response", async () => {
@@ -59,8 +61,14 @@ describe("[SPM-174] unassigned event queue", () => {
       event_id: 42,
       status: "SUBMITTED",
       title: "Example event",
+      purpose: "Community outreach",
       start_datetime: "2026-10-20T09:00:00.000Z",
       end_datetime: "2026-10-20T12:00:00.000Z",
+      event_venue_preference: [
+        { venue_id: 8, preference_order: 2 },
+        { venue_id: 3, preference_order: 1 },
+      ],
+      event_equipment_requirement: [{ equipment_id: 4, quantity_requested: 2 }],
     };
     jest.spyOn(eventModel, "findUnassignedSubmittedEvents").mockResolvedValue([event]);
     const res = makeResponse();
@@ -69,7 +77,12 @@ describe("[SPM-174] unassigned event queue", () => {
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({
-      events: [eventModel.toListItem(event)],
+      events: [eventModel.toUnassignedQueueItem(event)],
+    });
+    expect(res.json.mock.calls[0][0].events[0]).toMatchObject({
+      purpose: "Community outreach",
+      venuePreferences: [3, 8],
+      equipmentRequirements: [{ equipmentId: 4, quantity: 2 }],
     });
   });
 

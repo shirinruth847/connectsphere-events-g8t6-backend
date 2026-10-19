@@ -33,14 +33,14 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
 const LIST_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 const UNASSIGNED_QUEUE_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,purpose,status,start_datetime,end_datetime,expected_attendance,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 
 // Calendar events include richer details for coordinators' schedule view.
 const CALENDAR_SELECT =
@@ -161,6 +161,8 @@ const toApi = (row, viewerUserId) => {
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    submittedAt: row.submitted_at ?? null,
+    coordinatorName: row.coordinator?.name ?? null,
     // Sent back as "version" when saving, to detect a save over someone else's change.
     ...(row.version === undefined ? {} : { version: row.version }),
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
@@ -204,6 +206,26 @@ const toListItem = (row, viewerUserId) => ({
   isOwner: row.organiser_id === viewerUserId,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  submittedAt: row.submitted_at ?? null,
+});
+
+// Leads need the stated purpose and resource needs to decide who should take
+// an unassigned request. Keep this richer representation scoped to that queue.
+const toUnassignedQueueItem = (row) => ({
+  ...toListItem(row),
+  purpose: row.purpose,
+  venuePreferences: Array.isArray(row.event_venue_preference)
+    ? row.event_venue_preference
+        .slice()
+        .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
+        .map((item) => item.venue_id)
+    : [],
+  equipmentRequirements: Array.isArray(row.event_equipment_requirement)
+    ? row.event_equipment_requirement.map((item) => ({
+        equipmentId: item.equipment_id,
+        quantity: item.quantity_requested,
+      }))
+    : [],
 });
 
 // ---------- errors ----------
@@ -459,6 +481,7 @@ const findUnassignedSubmittedEvents = async () => {
     .select(UNASSIGNED_QUEUE_SELECT)
     .eq("status", "SUBMITTED")
     .is("coordinator_id", null)
+    .order("submitted_at", { ascending: true, nullsFirst: false })
     .order("created_at", { ascending: true })
     .order("event_id", { ascending: true });
   if (error) throw dbError(error);
@@ -740,6 +763,7 @@ module.exports = {
   toApi,
   toEventView,
   toListItem,
+  toUnassignedQueueItem,
   formatRequestId,
   toStatusNote,
   parseAccessibility,

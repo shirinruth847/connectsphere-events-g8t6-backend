@@ -1,7 +1,7 @@
 process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 // SPM-35/SPM-37 live integration tests: real Express routes, Supabase Auth and the
 // shared development database. They cover what mocks cannot: the atomic RPCs,
-// constraints, round-robin locking, idempotency and real PostgREST paging.
+// constraints, submission row locks, idempotency and real PostgREST paging.
 // Every event created here is recorded in the run manifest and removed afterwards.
 const crypto = require("crypto");
 const request = require("supertest");
@@ -123,6 +123,10 @@ const eventsTitled = async (title) =>
     )
   ).length;
 
+const activeLeadIds = async () => (await rows(
+  supabase.from("user").select("user_id").eq("role", "COORDINATOR_LEAD").eq("is_active", true), "Lead lookup"
+)).map(row => row.user_id);
+
 const organiserEventCount = async (key) =>
   (
     await rows(
@@ -171,8 +175,8 @@ describe("POST /api/events (SPM-35)", () => {
     expect(
       submitNotifications[0].notification_recipient.map(
         ({ recipient_id }) => recipient_id,
-      ),
-    ).toEqual([fixtures.accounts.organiserA.userId]);
+      ).sort(),
+    ).toEqual([fixtures.accounts.organiserA.userId, ...await activeLeadIds()].sort());
 
     const assignment = await call(
       "post",
@@ -206,6 +210,7 @@ describe("POST /api/events (SPM-35)", () => {
         fixtures.accounts.organiserA.userId,
         fixtures.accounts.organiserA.userId,
         fixtures.accounts.coordinatorThree.userId,
+        ...await activeLeadIds(),
       ].sort(),
     );
 
@@ -515,5 +520,44 @@ describe("GET /api/events/mine paging against real PostgREST timestamps", () => 
 
     expect(allIds.length).toBeGreaterThan(2);
     expect(pagedIds).toEqual(allIds);
+  });
+});
+
+
+describe("SPM-36 database submission regressions", () => {
+  test("[BE-01/02/03/14] records one submission time, final edits, history and audience under concurrent PUTs", async () => {
+    const draft = await call("post", "/api/events/drafts", "organiserA", { title: titled("SPM-36 concurrent draft") }, newKey());
+    expect(draft.status).toBe(201);
+    const id = draft.body.event.eventId;
+    expect(draft.body.event.submittedAt).toBeNull();
+    const fields = validRequest("SPM-36 final values");
+    const responses = await Promise.all([1, 2].map(() => call("put", `/api/events/${id}/submit`, "organiserA", fields)));
+    expect(responses.map(res => res.status).sort()).toEqual([200, 409]);
+    const winner = responses.find(res => res.status === 200).body.event;
+    expect(winner).toMatchObject({ eventId: id, requestId: draft.body.event.requestId, status: "SUBMITTED", isAssignedToCoordinator: false, title: fields.title });
+    expect(Number.isFinite(Date.parse(winner.submittedAt))).toBe(true);
+    const stored = await rows(supabase.from("event").select("submitted_at,title,status,coordinator_id").eq("event_id", id).single(), "submitted time lookup");
+    expect(Date.parse(stored.submitted_at)).toBe(Date.parse(winner.submittedAt));
+    expect(stored.coordinator_id).toBeNull();
+    expect((await activityActions(id)).filter(action => action === "EVENT_SUBMITTED")).toHaveLength(1);
+    expect(await notificationsFor(id)).toHaveLength(1);
+    const retry = await call("put", `/api/events/${id}/submit`, "organiserA", fields);
+    expect(retry.status).toBe(409);
+    expect(await rows(supabase.from("event").select("submitted_at,title,status,coordinator_id").eq("event_id", id).single(), "retry lookup")).toEqual(stored);
+  });
+
+  test("[BE-19] a requirement failure inside the RPC rolls back the event, history and notification", async () => {
+    const draft = await call("post", "/api/events/drafts", "organiserA", { title: titled("SPM-36 rollback") }, newKey());
+    const id = draft.body.event.eventId;
+    const before = await rows(supabase.from("event").select("*").eq("event_id", id).single(), "draft before failure");
+    const model = require("../../model/eventModel");
+    // Bypass HTTP validation only to exercise failure after the database's event
+    // write, without installing triggers or changing anything in shared schema.
+    await expect(model.submitEvent({ organiserId: fixtures.accounts.organiserA.userId, eventId: id,
+      input: { ...validRequest("SPM-36 invalid requirements"), equipmentRequirements: [{ equipmentId: fixtures.equipmentId, quantity: -1 }] }
+    })).rejects.toBeDefined();
+    expect(await rows(supabase.from("event").select("*").eq("event_id", id).single(), "draft after failure")).toEqual(before);
+    expect(await activityActions(id)).toEqual(["DRAFT_CREATED"]);
+    expect(await notificationsFor(id)).toEqual([]);
   });
 });
