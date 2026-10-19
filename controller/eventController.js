@@ -86,20 +86,28 @@ const readIdempotencyKey = (req) => {
   return typeof key === "string" && IDEMPOTENCY_KEY.test(key) ? key : null;
 };
 
+// A sent key must be well formed; a missing one is an error only when "required".
+const readRequestIdempotencyKey = (req, required, errors) => {
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey && (required || req.get("Idempotency-Key") !== undefined)) {
+    errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  }
+  return idempotencyKey;
+};
+
 const isPlainObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-// Returns field errors for the request shape itself. Object.fromEntries keeps a
-// client-sent "__proto__" key as plain data.
+// The first ten unsupported fields, with shortened names. Object.fromEntries
+// keeps a client-sent "__proto__" key as plain data.
+const toUnsupportedFieldErrors = (fields) =>
+  Object.fromEntries(fields.slice(0, 10).map((field) => [field.slice(0, 60), "This field cannot be set."]));
+
+// Returns field errors for the request shape itself.
 const checkRequestBody = (body, { allowAutoSave = false, allowVersion = false } = {}) => {
   if (!isPlainObject(body)) {
     return { body: "Send the event request as a JSON object." };
   }
-  const fields = Object.fromEntries(
-    eventModel
-      .getUnsupportedInputFields(body, { allowAutoSave, allowVersion })
-      .slice(0, 10)
-      .map((field) => [field.slice(0, 60), "This field cannot be set."])
-  );
+  const fields = toUnsupportedFieldErrors(eventModel.getUnsupportedInputFields(body, { allowAutoSave, allowVersion }));
   if (allowAutoSave && body.isAutoSave !== undefined && typeof body.isAutoSave !== "boolean") {
     fields.isAutoSave = "Auto-save flag must be true or false.";
   }
@@ -160,10 +168,7 @@ const readSaveRequest = (req, body, { allowAutoSave, requireVersion, requireIdem
   if (errors.body) return { errors };
 
   const expectedVersion = readVersion(body, requireVersion, errors);
-  const idempotencyKey = readIdempotencyKey(req);
-  if (!idempotencyKey && (requireIdempotencyKey || req.get("Idempotency-Key") !== undefined)) {
-    errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
-  }
+  const idempotencyKey = readRequestIdempotencyKey(req, requireIdempotencyKey, errors);
   return { errors, expectedVersion, idempotencyKey, isAutoSave: allowAutoSave && body.isAutoSave === true };
 };
 
@@ -480,20 +485,32 @@ const reassignCoordinator = async (req, res, next) => {
 const toReadinessFailures = (codes) =>
   codes.map((code) => ({ code, message: READINESS_MESSAGES[code] || "This condition is not met yet." }));
 
+// Refusals that say more than { error, code }: the status that does not allow
+// the action (AC3), or each readiness condition that is not met (AC9).
+const LIFECYCLE_REFUSALS = Object.freeze({
+  TRANSITION_NOT_ALLOWED: (res, error) => {
+    const currentStatus = error.currentStatus ?? null;
+    const [status, generalMessage] = DOMAIN_ERRORS.TRANSITION_NOT_ALLOWED;
+    return res.status(status).json({
+      error: currentStatus ? `This action is not allowed while the event is in ${currentStatus}.` : generalMessage,
+      code: "TRANSITION_NOT_ALLOWED",
+      currentStatus,
+    });
+  },
+  READINESS_BLOCKED: (res, error) => {
+    const [status, message] = DOMAIN_ERRORS.READINESS_BLOCKED;
+    return res.status(status).json({ error: message, code: "READINESS_BLOCKED", failures: toReadinessFailures(error.failures || []) });
+  },
+});
+
 // The body carries only the version of the event the coordinator loaded, so an
 // action taken from an outdated page is refused (409) instead of applied.
 const readActionRequest = (req) => {
   const body = req.body ?? {};
   if (!isPlainObject(body)) return { errors: { body: "Send the request as a JSON object." } };
-  const errors = Object.fromEntries(
-    Object.keys(body)
-      .filter((key) => key !== "version")
-      .slice(0, 10)
-      .map((key) => [key.slice(0, 60), "This field cannot be set."])
-  );
+  const errors = toUnsupportedFieldErrors(Object.keys(body).filter((key) => key !== "version"));
   const expectedVersion = readVersion(body, true, errors);
-  const idempotencyKey = readIdempotencyKey(req);
-  if (!idempotencyKey && req.get("Idempotency-Key") !== undefined) errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  const idempotencyKey = readRequestIdempotencyKey(req, false, errors);
   return { errors, expectedVersion, idempotencyKey };
 };
 
@@ -524,26 +541,12 @@ const lifecycleAction = (action) => async (req, res, next) => {
       event: eventModel.toEventView(current.event, req.user, current.access),
     });
   } catch (error) {
-    if (error.name === "EventRequestError" && error.code === "EVENT_VERSION_CONFLICT") {
+    const isRequestError = error.name === "EventRequestError";
+    if (isRequestError && error.code === "EVENT_VERSION_CONFLICT") {
       return sendVersionConflict(req, res, eventId).catch(next);
     }
-    if (error.name === "EventRequestError" && error.code === "TRANSITION_NOT_ALLOWED") {
-      const currentStatus = error.currentStatus ?? null;
-      return res.status(403).json({
-        error: currentStatus
-          ? `This action is not allowed while the event is in ${currentStatus}.`
-          : DOMAIN_ERRORS.TRANSITION_NOT_ALLOWED[1],
-        code: "TRANSITION_NOT_ALLOWED",
-        currentStatus,
-      });
-    }
-    if (error.name === "EventRequestError" && error.code === "READINESS_BLOCKED") {
-      return res.status(409).json({
-        error: DOMAIN_ERRORS.READINESS_BLOCKED[1],
-        code: "READINESS_BLOCKED",
-        failures: toReadinessFailures(error.failures || []),
-      });
-    }
+    const sendRefusal = isRequestError ? LIFECYCLE_REFUSALS[error.code] : undefined;
+    if (sendRefusal) return sendRefusal(res, error);
     return handleError(error, res, next);
   }
 };
