@@ -12,6 +12,8 @@ jest.mock("../../model/eventModel", () => {
     findVisibleEvent: jest.fn(),
     findOwnEvent: jest.fn(),
     findOrganiserEventRequests: jest.fn(),
+    findPublishedAttendeeEvents: jest.fn(),
+    findPublishedAttendeeEvent: jest.fn(),
     findValidationContext: jest.fn(),
   };
 });
@@ -76,6 +78,8 @@ const ROUTES = [
   ["post", "/api/events"],
   ["post", "/api/events/drafts"],
   ["get", "/api/events/mine"],
+  ["get", "/api/events/discovery"],
+  ["get", "/api/events/discovery/42"],
   ["get", "/api/events/42"],
   ["get", "/api/events/42/history"],
   ["put", "/api/events/42"],
