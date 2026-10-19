@@ -1,47 +1,46 @@
 const eventModel = require("../model/eventModel");
+const activityModel = require("../model/activityModel");
+const { getEventAccess, getEditDenial, loadEventForViewer, EVENT_NOT_FOUND } = require("../middleware/authorize");
+const { parseEventId } = require("../middleware/validate");
 const {
   validateDraft,
   validateSubmission,
   validateRequirements,
+  validateOrdinaryFields,
   hasErrors,
+  toWholeNumber,
+  MAX_INTEGER,
 } = require("../validators/eventValidator");
-const { EVENT_STATUS } = require("../config/eventConstants");
+
 const { USER_ROLES } = require("../config/roles");
+const { EVENT_STATUS, EVENT_RELATIONSHIP, EVENT_FIELD_GROUPS } = require("../config/eventConstants");
+
 
 const EVENT_STATUSES = Object.values(EVENT_STATUS);
-const MAX_EVENT_ID = 2147483647;
+const KNOWN_EVENT_FIELDS = new Set(Object.values(EVENT_FIELD_GROUPS).flat());
+const SYSTEM_FIELDS = new Set(EVENT_FIELD_GROUPS.SYSTEM);
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{8,128}$/;
 const IDEMPOTENCY_KEY_MESSAGE =
   "Send an Idempotency-Key header of 8-128 letters, digits, '.', '_', ':' or '-' (a UUID works).";
+const VERSION_MESSAGE = "Send the version of the event you loaded.";
 
 const DOMAIN_ERRORS = Object.freeze({
-  EVENT_NOT_FOUND: [404, "Event request not found."],
+  EVENT_NOT_FOUND: [404, EVENT_NOT_FOUND.error],
   EVENT_NOT_DRAFT: [409, "Only draft requests can be changed or submitted."],
-  NO_ELIGIBLE_COORDINATOR: [
-    409,
-    "No coordinator is currently available. Your request was not submitted.",
-  ],
-  IDEMPOTENCY_KEY_REUSED: [
-    409,
-    "This Idempotency-Key was already used for a different request.",
-  ],
-  IDEMPOTENCY_IN_PROGRESS: [
-    409,
-    "This request is still being processed. Try again shortly.",
-  ],
-  COORDINATOR_CONFLICT: [
-    409,
-    "The selected coordinator is unavailable during this event.",
-  ],
-  INVALID_COORDINATOR: [400, "Select an active Event Coordinator."],
-  COORDINATOR_UNCHANGED: [
-    409,
-    "The selected coordinator is already assigned to this event.",
-  ],
-  ASSIGNMENT_CHANGED: [
-    409,
-    "This event was reassigned by someone else. Refresh and try again.",
-  ],
+
+  NO_ELIGIBLE_COORDINATOR: [409, "No coordinator is currently available. Your request was not submitted."],
+  IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
+  IDEMPOTENCY_IN_PROGRESS: [409, "This request is still being processed. Try again shortly."],
+  EVENT_VERSION_CONFLICT: [409, "This event was changed after you loaded it. Review the current details, then try again."],
+  EDIT_REQUIRES_CHANGE_REQUEST: [403, "A submitted request cannot be edited directly. Request a change instead."],
+  EVENT_READ_ONLY: [403, "You can view this request, but only its owner can ask for changes."],
+  EVENT_NOT_EDITABLE_IN_STATUS: [403, "This event cannot be edited in its current status."],
+  FIELD_NOT_EDITABLE: [403, "You cannot change some of these fields. Nothing was saved."],
+  INVALID_COORDINATOR: [409, "The selected user is not an active event coordinator."],
+  COORDINATOR_CONFLICT: [409, "The selected coordinator is unavailable during this event."],
+  COORDINATOR_UNCHANGED: [409, "The selected coordinator is already assigned to this event."],
+  ASSIGNMENT_CHANGED: [409, "This event was reassigned by someone else. Refresh and try again."],
+
   EVENT_NOT_REASSIGNABLE: [404, "Event request not found."],
 });
 
@@ -50,6 +49,8 @@ const DOMAIN_ERRORS = Object.freeze({
 // Same shape as every other API error: { error, code } plus fields for validation.
 const sendError = (res, status, code, error, fields) =>
   res.status(status).json(fields ? { error, code, fields } : { error, code });
+
+const sendDomainError = (res, code, fields) => sendError(res, DOMAIN_ERRORS[code][0], code, DOMAIN_ERRORS[code][1], fields);
 
 const validationFailed = (res, fields) =>
   sendError(
@@ -62,44 +63,38 @@ const validationFailed = (res, fields) =>
     fields,
   );
 
+
 const eventNotFound = (res) =>
   sendError(res, 404, "EVENT_NOT_FOUND", DOMAIN_ERRORS.EVENT_NOT_FOUND[1]);
 
 const handleError = (error, res, next) => {
   if (error.name === "EventRequestError") {
-    if (error.code === "VALIDATION_FAILED")
-      return validationFailed(res, error.fields || {});
-    if (error.code === "INVALID_CURSOR")
-      return validationFailed(res, { cursor: "Invalid page cursor." });
-    if (error.code === "IDEMPOTENCY_KEY_REQUIRED")
-      return validationFailed(res, { idempotencyKey: IDEMPOTENCY_KEY_MESSAGE });
-    const mapped = DOMAIN_ERRORS[error.code];
-    if (mapped)
-      return sendError(res, mapped[0], error.code, mapped[1], error.fields);
+    if (error.code === "VALIDATION_FAILED") return validationFailed(res, error.fields || {});
+    if (error.code === "INVALID_CURSOR") return validationFailed(res, { cursor: "Invalid page cursor." });
+    if (error.code === "IDEMPOTENCY_KEY_REQUIRED") return validationFailed(res, { idempotencyKey: IDEMPOTENCY_KEY_MESSAGE });
+    if (DOMAIN_ERRORS[error.code]) return sendDomainError(res, error.code, error.fields);
+
   }
   return next(error);
 };
 
-// IDs that cannot exist are "not found", like IDs the user may not see.
-const parseEventId = (value) =>
-  /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_EVENT_ID
-    ? Number(value)
-    : null;
 
 const readIdempotencyKey = (req) => {
   const key = req.get("Idempotency-Key");
   return typeof key === "string" && IDEMPOTENCY_KEY.test(key) ? key : null;
 };
 
+const isPlainObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
 // Returns field errors for the request shape itself. Object.fromEntries keeps a
 // client-sent "__proto__" key as plain data.
-const checkRequestBody = (body, { allowAutoSave = false } = {}) => {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
+const checkRequestBody = (body, { allowAutoSave = false, allowVersion = false } = {}) => {
+  if (!isPlainObject(body)) {
     return { body: "Send the event request as a JSON object." };
   }
   const fields = Object.fromEntries(
     eventModel
-      .getUnsupportedInputFields(body, { allowAutoSave })
+      .getUnsupportedInputFields(body, { allowAutoSave, allowVersion })
       .slice(0, 10)
       .map((field) => [field.slice(0, 60), "This field cannot be set."]),
   );
@@ -129,6 +124,117 @@ const validateWith = async (validate, input) => {
 
 const markReplay = (res, result) => {
   if (result.replayed) res.set("Idempotent-Replayed", "true");
+};
+
+// Event fields this user may not change now. One of them rejects the whole
+// request, including fields the interface hides or disables (SPM-33 AC6).
+const getFieldDenials = (body, access) => {
+  const fields = {};
+  for (const key of Object.keys(body)) {
+    if (!KNOWN_EVENT_FIELDS.has(key) || access.editableFields.includes(key)) continue;
+    if (SYSTEM_FIELDS.has(key)) {
+      fields[key] = "This field is set by the system.";
+    } else if (access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR) {
+      fields[key] = "This field can only be changed through a change request.";
+    } else {
+      fields[key] = "This field cannot be set.";
+    }
+  }
+  return fields;
+};
+
+const readVersion = (body, required, errors) => {
+  if (body.version === undefined && !required) return null;
+  const version = toWholeNumber(body.version);
+  if (!Number.isInteger(version) || version < 1 || version > MAX_INTEGER) {
+    errors.version = VERSION_MESSAGE;
+    return null;
+  }
+  return version;
+};
+
+// Everything in a save request besides the event fields: the version the client
+// loaded, its idempotency key and whether this is an auto-save. "rules" says what
+// the route accepts and requires. The values are only meaningful when "errors",
+// the problems with the request itself, is empty.
+const readSaveRequest = (req, body, { allowAutoSave, requireVersion, requireIdempotencyKey }) => {
+  const errors = checkRequestBody(body, { allowAutoSave, allowVersion: true });
+  if (errors.body) return { errors };
+
+  const expectedVersion = readVersion(body, requireVersion, errors);
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey && (requireIdempotencyKey || req.get("Idempotency-Key") !== undefined)) {
+    errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  }
+  return { errors, expectedVersion, idempotencyKey, isAutoSave: allowAutoSave && body.isAutoSave === true };
+};
+
+// A coordinator's edit must change at least one ordinary field (SPM-33 AC4).
+const validateCoordinatorEdit = (input) =>
+  Object.keys(input).length === 0 ? { body: "Send at least one field to change." } : validateOrdinaryFields(input);
+
+// The owner's draft is validated as a whole: the saved values plus the ones sent.
+const validateOwnerDraft = (existing, input) => validateWith(validateDraft, mergeWithExisting(existing, input));
+
+// The save was made against an older version: nothing changed, and the current
+// values are returned so the user can review them before trying again (AC7).
+const sendVersionConflict = async (req, res, eventId) => {
+  const current = await loadEventForViewer(eventId, req.user);
+  if (!current) return eventNotFound(res);
+  return res.status(409).json({
+    error: DOMAIN_ERRORS.EVENT_VERSION_CONFLICT[1],
+    code: "EVENT_VERSION_CONFLICT",
+    event: eventModel.toEventView(current.event, req.user, current.access),
+  });
+};
+
+// One save path for every direct edit (SPM-33 AC2-AC7). Checks run in the order of
+// the AC6 table: viewing scope (404, by requireVisibleEvent before this), permission
+// to make this edit (403), input (400), then the write, where the database rechecks
+// relationship, status and version under the event row lock (409 for a stale version).
+const saveEventEdit = async (req, res, next, rules) => {
+  const { eventId, event: existing, access } = req.visibleEvent;
+  const actorId = req.user.user_id;
+
+  try {
+    const denial = getEditDenial(access, existing);
+    if (denial) return sendDomainError(res, denial);
+
+    const body = req.body ?? {};
+    const deniedFields = isPlainObject(body) ? getFieldDenials(body, access) : {};
+    if (hasErrors(deniedFields)) return sendDomainError(res, "FIELD_NOT_EDITABLE", deniedFields);
+
+    const { errors: requestErrors, expectedVersion, idempotencyKey, isAutoSave } = readSaveRequest(req, body, rules);
+    if (hasErrors(requestErrors)) return validationFailed(res, requestErrors);
+
+    const input = eventModel.pickEventInput(body);
+    const isCoordinatorEdit = access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR;
+    const errors = isCoordinatorEdit ? validateCoordinatorEdit(input) : await validateOwnerDraft(existing, input);
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const result = isCoordinatorEdit
+      ? await eventModel.updateEventDetails({ actorId, eventId, input, expectedVersion, idempotencyKey })
+      : await eventModel.saveDraft({ organiserId: actorId, eventId, input, isAutoSave, idempotencyKey, expectedVersion });
+
+    markReplay(res, result);
+    const saved = { ...existing, ...result.event };
+    const event = eventModel.toEventView(saved, req.user, getEventAccess(req.user, saved));
+    if (isCoordinatorEdit) return res.status(200).json({ message: "Event details updated.", event });
+    return res.status(200).json({
+      message: isAutoSave ? "Draft auto-saved." : "Draft saved successfully.",
+      event,
+      savedAt: result.event.updated_at, // frontend formats this as "Last auto-saved at HH:MM:SS AM/PM"
+    });
+  } catch (error) {
+    if (error.name === "EventRequestError" && error.code === "EVENT_VERSION_CONFLICT") {
+      return sendVersionConflict(req, res, eventId).catch(next);
+    }
+    // The request was submitted between the read above and the write.
+    if (error.name === "EventRequestError" && error.code === "EVENT_NOT_DRAFT") {
+      return sendDomainError(res, "EDIT_REQUIRES_CHANGE_REQUEST");
+    }
+    return handleError(error, res, next);
+  }
 };
 
 // ---------- handlers ----------
@@ -191,49 +297,16 @@ const createDraft = async (req, res, next) => {
 };
 
 // PUT /api/events/:id/draft — SPM-37 Scenarios 1 & 3 (manual save and auto-save)
-// The 30-second idle timer sends { ...fields, isAutoSave: true }.
-const updateDraft = async (req, res, next) => {
-  try {
-    const eventId = parseEventId(req.params.id);
-    if (!eventId) return eventNotFound(res);
-    const body = req.body ?? {};
-    const requestErrors = checkRequestBody(body, { allowAutoSave: true });
-    if (hasErrors(requestErrors)) return validationFailed(res, requestErrors);
+// The 30-second idle timer sends { ...fields, isAutoSave: true }. "version" and
+// the Idempotency-Key header are optional here so existing clients keep working.
+const updateDraft = async (req, res, next) =>
+  saveEventEdit(req, res, next, { allowAutoSave: true, requireVersion: false, requireIdempotencyKey: false });
 
-    const existing = await eventModel.findOwnEvent(eventId, req.user.user_id);
-    if (!existing) return eventNotFound(res);
-    if (existing.status !== EVENT_STATUS.DRAFT) {
-      return sendError(
-        res,
-        409,
-        "EVENT_NOT_DRAFT",
-        DOMAIN_ERRORS.EVENT_NOT_DRAFT[1],
-      );
-    }
+// PUT /api/events/:id — SPM-33: the owner's manual draft save or the assigned
+// coordinator's edit of ordinary fields, decided by the field edit matrix.
+const updateEventDetails = async (req, res, next) =>
+  saveEventEdit(req, res, next, { allowAutoSave: false, requireVersion: true, requireIdempotencyKey: true });
 
-    const input = eventModel.pickEventInput(body);
-    const errors = await validateWith(
-      validateDraft,
-      mergeWithExisting(existing, input),
-    );
-    if (hasErrors(errors)) return validationFailed(res, errors);
-
-    const isAutoSave = body.isAutoSave === true;
-    const result = await eventModel.saveDraft({
-      organiserId: req.user.user_id,
-      eventId,
-      input,
-      isAutoSave,
-    });
-    return res.status(200).json({
-      message: isAutoSave ? "Draft auto-saved." : "Draft saved successfully.",
-      event: eventModel.toApi(result.event),
-      savedAt: result.event.updated_at, // frontend formats this as "Last auto-saved at HH:MM:SS AM/PM"
-    });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-};
 
 // PUT /api/events/:id/submit — SPM-37 Scenario 4 (submit a saved draft)
 const submitDraft = async (req, res, next) => {
@@ -247,12 +320,16 @@ const submitDraft = async (req, res, next) => {
     const existing = await eventModel.findOwnEvent(eventId, req.user.user_id);
     if (!existing) return eventNotFound(res);
     if (existing.status !== EVENT_STATUS.DRAFT) {
+
       return sendError(
         res,
         409,
         "EVENT_NOT_DRAFT",
         DOMAIN_ERRORS.EVENT_NOT_DRAFT[1],
       );
+
+      return sendDomainError(res, "EVENT_NOT_DRAFT");
+
     }
 
     const input = eventModel.pickEventInput(body);
@@ -297,6 +374,7 @@ const listMyEventRequests = async (req, res, next) => {
   }
 };
 
+
 // GET /api/events/unassigned — coordinator lead assignment queue.
 async function getUnassignedEvents(req, res, next) {
   try {
@@ -307,16 +385,29 @@ async function getUnassignedEvents(req, res, next) {
   }
 }
 
-// GET /api/events/:id — load one request (e.g. to prefill "Edit Draft")
+// GET /api/events/:id — SPM-33 AC1: the event as this user may see it. Read-only:
+// opening an event never changes its status.
 const getEventRequest = async (req, res, next) => {
   try {
-    const eventId = parseEventId(req.params.id);
-    if (!eventId) return eventNotFound(res);
-    const event = await eventModel.findVisibleEvent(eventId, req.user);
-    if (!event) return eventNotFound(res);
-    return res
-      .status(200)
-      .json({ event: eventModel.toApi(event, req.user.user_id) });
+    const { event, access } = req.visibleEvent;
+    return res.status(200).json({ event: eventModel.toEventView(event, req.user, access) });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+// GET /api/events/:id/history — SPM-33 AC8: change history, filtered by audience.
+// Being able to view the event does not by itself show staff-only entries, or
+// entries from before submission, which are for the owner alone.
+const getEventHistory = async (req, res, next) => {
+  try {
+    const { eventId, access } = req.visibleEvent;
+    const { history, nextCursor } = await activityModel.findEventHistory(eventId, {
+      ...req.pagination,
+      audiences: access.historyAudiences,
+    });
+    return res.status(200).json({ history, nextCursor });
+
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -420,9 +511,9 @@ const patchCoordinator = async (req, res, next) => {
     if (!Number.isSafeInteger(body.coordinatorId) || body.coordinatorId < 1) {
       return sendError(
         res,
-        DOMAIN_ERRORS.INVALID_COORDINATOR[0],
+        400,
         "INVALID_COORDINATOR",
-        DOMAIN_ERRORS.INVALID_COORDINATOR[1],
+        "Select an active Event Coordinator.",
       );
     }
     const assignedEvent = await eventModel.assignCoordinator({
@@ -474,12 +565,14 @@ module.exports = {
   createAndSubmit,
   createDraft,
   updateDraft,
+  updateEventDetails,
   submitDraft,
   listMyEventRequests,
   getUnassignedEvents,
   getCoordinatorAvailability,
   patchCoordinator,
   getEventRequest,
+  getEventHistory,
   listAssignedEvents,
   listLeadAssignments,
   listUnassignedEvents,
