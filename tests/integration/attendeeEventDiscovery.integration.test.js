@@ -191,6 +191,31 @@ describe("[SPM-88] attendee event discovery and detail visibility", () => {
     expect(listItem.location).toBeNull();
   });
 
+  test("[SPM-34-AC1/AC5] should_show_an_approved_venue_in_list_and_detail", async () => {
+    const start = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    const end = new Date(Date.parse(start) + 60 * 60 * 1000).toISOString();
+    const eventId = await insertEvent("approved-location", { start_datetime: start, end_datetime: end });
+    const { data, error } = await supabase.from("venue_booking").insert({
+      event_id: eventId,
+      room_id: fixtures.venue.roomId,
+      requested_by: fixtures.accounts.coordinator.userId,
+      start_datetime: start,
+      end_datetime: end,
+      status: "APPROVED",
+    }).select("booking_id").single();
+    if (error) throw new Error(`Fixture booking insert failed: ${error.message}`);
+    recordFixtureIds(runId, "bookingIds", [data.booking_id]);
+
+    const response = await callAs("get", `/api/events/discovery/${eventId}`);
+    const item = (await listAllDiscoveryEvents()).find((event) => event.eventId === eventId);
+    const location = `spm32-${runId} Hall, spm32-${runId} 1 Test Road`;
+    expect(response.status).toBe(200);
+    expect(response.body.event.location).toBe(location);
+    expect(item.location).toBe(location);
+    expect(Object.keys(response.body.event).sort()).toEqual([...detailFields].sort());
+    expect(Object.keys(item).sort()).toEqual([...listFields].sort());
+  });
+
   test("[SPM-34-AC1] should_list_soonest_start_first_and_page_without_skipping_or_repeating", async () => {
     const sharedStart = Date.now() + 5 * 60 * 60 * 1000;
     const at = (offsetMs) => ({
@@ -331,8 +356,7 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     expect(listItem.registrationAvailability).toBe("OPEN");
   });
 
-  test.skip("[SPM-126] should_list_published_preparation_events_and_follow_master_registration_rules", async () => {
-    // Skipped: add PREPARATION once the event_status migration includes it.
+  test("[SPM-126] should_list_published_preparation_events_and_follow_master_registration_rules", async () => {
     const { data, error } = await supabase.from("event").insert({
       title: `spm34-${runId}-preparation`,
       description: "Published preparation event",
@@ -354,11 +378,10 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     if (error) return;
     recordFixtureIds(runId, "eventIds", [data.event_id]);
 
-    const listResponse = await callAs("get", "/api/events/discovery");
+    const events = await listAllDiscoveryEvents();
     const detailResponse = await callAs("get", `/api/events/discovery/${data.event_id}`);
-    expect(listResponse.status).toBe(200);
     expect(detailResponse.status).toBe(200);
-    expect(listResponse.body.events.some((event) => event.eventId === data.event_id)).toBe(true);
+    expect(events.find((event) => event.eventId === data.event_id)?.registrationAvailability).toBe("OPEN");
     expect(detailResponse.body.event.registrationAvailability).toBe("OPEN");
   });
 });

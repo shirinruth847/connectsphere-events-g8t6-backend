@@ -363,6 +363,63 @@ describe("Attendee discovery and registration availability", () => {
     ...overrides,
   });
 
+  test.each(["CONFIRMED", "PREPARATION"])("[SPM-126] should_include_published_%s_events_in_list_and_detail", async (status) => {
+    const row = discoveryRow({ status, registration: [{ count: 0 }] });
+    const list = queryReturning({ data: [row], error: null });
+    const detail = queryReturning({ data: row, error: null });
+    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(detail);
+
+    expect((await eventModel.findPublishedAttendeeEvents({ limit: 10 })).events[0].registrationAvailability).toBe("OPEN");
+    expect((await eventModel.findPublishedAttendeeEvent(7)).registrationAvailability).toBe("OPEN");
+    for (const query of [list, detail]) {
+      expect(query.eq).toHaveBeenCalledWith("is_published", true);
+      expect(query.in).toHaveBeenCalledWith("status", ["CONFIRMED", "PREPARATION"]);
+    }
+  });
+
+  const booking = (status, id = 1, name = "Public Hall") => ({
+    status, room: { venue: { venue_id: id, name, address: "1 Test Road" } },
+  });
+
+  test.each([
+    ["approved venue", [booking("PENDING", 2, "Private venue"), booking("APPROVED")], "Public Hall, 1 Test Road"],
+    ["duplicate bookings at the same venue", [booking("APPROVED"), booking("APPROVED")], "Public Hall, 1 Test Road"],
+    ["no bookings", [], null],
+    ["pending or rejected bookings", [booking("PENDING"), booking("REJECTED"), booking("CANCELLED")], null],
+    ["missing venue relationship", [{ status: "APPROVED", room: null }], null],
+    ["ambiguous approved venues", [booking("APPROVED"), booking("APPROVED", 2, "Other Hall")], null],
+  ])("[SPM-34-AC1/AC5] should_publish_only_a_safe_location_for_%s", async (_label, venue_booking, location) => {
+    const row = discoveryRow({ venue_booking, purpose: "Private purpose" });
+    supabase.from.mockReturnValueOnce(queryReturning({ data: [row], error: null }))
+      .mockReturnValueOnce(queryReturning({ data: row, error: null }));
+
+    const list = (await eventModel.findPublishedAttendeeEvents({ limit: 10 })).events[0];
+    const detail = await eventModel.findPublishedAttendeeEvent(7);
+    for (const item of [list, detail]) {
+      expect(item.location).toBe(location);
+      expect(item).not.toHaveProperty("venue_booking");
+      expect(item).not.toHaveProperty("purpose");
+      expect(JSON.stringify(item)).not.toContain("Private venue");
+    }
+  });
+
+  test.each(["2026-02-31", "2026-02-29", "2026-04-31", "0000-01-01"])("should_reject_invalid_calendar_date_%s_before_querying", async (date) => {
+    const cursor = (key) => Buffer.from(JSON.stringify({ [key]: `${date}T09:00:00.123456Z`, eventId: 1 })).toString("base64url");
+    expect(() => eventModel.decodeDiscoveryCursor(cursor("startDatetime"))).toThrow("INVALID_CURSOR");
+    expect(() => eventModel.decodeCursor(cursor("updatedAt"))).toThrow("INVALID_CURSOR");
+    await expect(eventModel.findPublishedAttendeeEvents({ limit: 10, cursor: cursor("startDatetime") }))
+      .rejects.toMatchObject({ code: "INVALID_CURSOR" });
+    expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  test("should_preserve_a_valid_leap_day_and_microseconds_in_both_cursors", () => {
+    const timestamp = "2028-02-29T09:00:00.123456+08:00";
+    expect(eventModel.decodeDiscoveryCursor(Buffer.from(JSON.stringify({ startDatetime: timestamp, eventId: 1 })).toString("base64url")))
+      .toEqual({ startDatetime: timestamp, eventId: 1 });
+    expect(eventModel.decodeCursor(eventModel.encodeCursor({ updated_at: timestamp, event_id: 1 })))
+      .toEqual({ updatedAt: timestamp, eventId: 1 });
+  });
+
   test("[SPM-34-AC3] should_report_the_same_availability_in_the_list_and_the_detail", async () => {
     const row = discoveryRow();
     const listQuery = queryReturning({ data: [row], error: null });
@@ -519,8 +576,7 @@ describe("Attendee discovery and registration availability", () => {
     })).toBe("OPEN");
   });
 
-  test.skip("[SPM-34-AC3] should_allow_registration_during_preparation_when_enabled_and_window_is_open", () => {
-    // Skipped: add PREPARATION once the event_status migration includes it.
+  test("[SPM-34-AC3] should_allow_registration_during_preparation_when_enabled_and_window_is_open", () => {
     expect(eventModel.computeRegistrationAvailability({
       status: "PREPARATION",
       is_registration_enabled: true,
