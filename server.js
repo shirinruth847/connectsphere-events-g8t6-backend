@@ -10,7 +10,15 @@ if (require.main === module) {
     const port = typeof address === "object" && address ? address.port : PORT;
     console.log(`Server is running on http://localhost:${port}`);
   });
-  startEventCompletionJob();
+  const stopEventCompletionJob = startEventCompletionJob();
+
+  // Stop scheduling new job runs, then let open requests finish before exiting.
+  const shutDown = () => {
+    if (stopEventCompletionJob) stopEventCompletionJob();
+    server.close(() => process.exit(0));
+  };
+  process.once("SIGTERM", shutDown);
+  process.once("SIGINT", shutDown);
 }
 
 module.exports = app;
