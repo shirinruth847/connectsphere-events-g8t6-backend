@@ -197,6 +197,97 @@ describe("SPM-173 coordinator lifecycle actions", () => {
   });
 });
 
+// Exact response bodies, so a restructuring of the controller cannot change them.
+describe("SPM-173 lifecycle response bodies", () => {
+  const VERSION_MESSAGE = "Send the version of the event you loaded.";
+  const KEY_MESSAGE = "Send an Idempotency-Key header of 8-128 letters, digits, '.', '_', ':' or '-' (a UUID works).";
+  const invalid = (fields) => ({ error: "Please correct the highlighted fields.", code: "VALIDATION_FAILED", fields });
+
+  test.each([
+    ["an array", [7], {}, { body: "Send the request as a JSON object." }],
+    ["no version", {}, {}, { version: VERSION_MESSAGE }],
+    ["an unknown field", { version: 7, status: "CONFIRMED" }, {}, { status: "This field cannot be set." }],
+    ["a bad key", { version: 7 }, { "Idempotency-Key": "short" }, { idempotencyKey: KEY_MESSAGE }],
+    [
+      "several problems",
+      { status: "CONFIRMED" },
+      { "Idempotency-Key": "short" },
+      { status: "This field cannot be set.", version: VERSION_MESSAGE, idempotencyKey: KEY_MESSAGE },
+    ],
+  ])("should_describe_%s_in_a_400", async (_name, body, headers, fields) => {
+    const res = await send("post", "/api/events/42/confirm", body, headers);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual(invalid(fields));
+  });
+
+  test("should_report_at_most_ten_unknown_fields_with_shortened_names", async () => {
+    const body = { version: 7, ["x".repeat(80)]: 1 };
+    for (let index = 0; index < 12; index += 1) body[`extra${index}`] = index;
+    const res = await send("post", "/api/events/42/confirm", body);
+    const names = Object.keys(res.body.fields);
+    expect(names).toHaveLength(10);
+    expect(names[0]).toBe("x".repeat(60));
+  });
+
+  test("should_fall_back_to_a_general_message_when_the_status_is_unknown", async () => {
+    eventModel.runLifecycleAction.mockRejectedValue(domainError("TRANSITION_NOT_ALLOWED"));
+    const res = await send("post", "/api/events/42/confirm", { version: 7 });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({
+      error: "This action is not allowed for this event in its current status.",
+      code: "TRANSITION_NOT_ALLOWED",
+      currentStatus: null,
+    });
+  });
+
+  test("should_describe_readiness_codes_including_unknown_ones", async () => {
+    eventModel.runLifecycleAction.mockRejectedValue(domainError("READINESS_BLOCKED", { failures: ["NO_ACTIVE_BOOKING", "NEW_CODE"] }));
+    const res = await send("post", "/api/events/42/submit-for-safety-review", { version: 7 });
+    expect(res.body).toEqual({
+      error: "The event is not ready yet. Resolve the listed items, then try again.",
+      code: "READINESS_BLOCKED",
+      failures: [
+        { code: "NO_ACTIVE_BOOKING", message: "Add at least one venue booking." },
+        { code: "NEW_CODE", message: "This condition is not met yet." },
+      ],
+    });
+  });
+
+  test("should_send_an_empty_list_when_no_readiness_codes_are_given", async () => {
+    eventModel.runLifecycleAction.mockRejectedValue(domainError("READINESS_BLOCKED"));
+    const res = await send("post", "/api/events/42/confirm", { version: 7 });
+    expect(res.status).toBe(409);
+    expect(res.body.failures).toEqual([]);
+  });
+
+  test.each([
+    ["SAFETY_APPROVAL_REQUIRED", 409, "The event needs a safety approval for its current arrangements before it can be confirmed."],
+    ["EVENT_NOT_ENDED", 409, "The event can be completed only after it has ended."],
+    ["COORDINATOR_INVARIANT", 409, "The event's coordinator assignment does not allow this action. Refresh and try again."],
+    ["FORBIDDEN", 403, "You do not have permission to access this resource."],
+    ["EVENT_NOT_FOUND", 404, "Event request not found."],
+  ])("should_answer_%s_with_its_status_and_message", async (code, status, error) => {
+    eventModel.runLifecycleAction.mockRejectedValue(domainError(code));
+    const res = await send("post", "/api/events/42/complete", { version: 7 });
+    expect(res.status).toBe(status);
+    expect(res.body).toEqual({ error, code });
+  });
+
+  test("should_pass_an_unexpected_failure_to_the_error_handler", async () => {
+    eventModel.runLifecycleAction.mockRejectedValue(new Error("boom"));
+    const res = await send("post", "/api/events/42/confirm", { version: 7 });
+    expect(res.status).toBe(500);
+  });
+
+  test("should_answer_not_found_when_the_event_disappears_after_the_action", async () => {
+    eventModel.runLifecycleAction.mockResolvedValue({ event: { event_id: 42 }, replayed: false });
+    eventModel.findVisibleEvent.mockResolvedValueOnce(eventRow()).mockResolvedValueOnce(null);
+    const res = await send("post", "/api/events/42/confirm", { version: 7 });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe("EVENT_NOT_FOUND");
+  });
+});
+
 describe("SPM-173 AC6 organiser label filter", () => {
   beforeEach(() => {
     signedInAs("ORGANISER", 11);
