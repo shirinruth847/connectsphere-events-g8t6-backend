@@ -83,6 +83,15 @@ const notificationsFor = (eventId) =>
     "notification lookup"
   );
 
+// SPM-173 AC7 / Master section 7.1: a submission also tells every active Coordinator
+// Lead. The shared database holds other Leads too, so only the fixture Lead is checked.
+const LEAD_QUEUE_TITLE = "New event request in the queue";
+const withoutLeadQueue = (notifications) => notifications.filter(({ title }) => title !== LEAD_QUEUE_TITLE);
+const leadQueueRecipients = (notifications) =>
+  notifications
+    .filter(({ title }) => title === LEAD_QUEUE_TITLE)
+    .flatMap(({ notification_recipient: recipients }) => recipients.map(({ recipient_id }) => recipient_id));
+
 const eventsTitled = async (title) =>
   (await rows(supabase.from("event").select("event_id").eq("title", title), "title lookup")).length;
 
@@ -117,8 +126,10 @@ describe("POST /api/events (SPM-35)", () => {
     expect(await activityActions(eventId)).toEqual(["EVENT_SUBMITTED"]);
 
     const submitNotifications = await notificationsFor(eventId);
-    expect(submitNotifications.map(({ title }) => title)).toEqual(["Event request received"]);
-    expect(submitNotifications[0].notification_recipient.map(({ recipient_id }) => recipient_id))
+    expect(submitNotifications.map(({ title }) => title).sort()).toEqual(["Event request received", LEAD_QUEUE_TITLE]);
+    expect(leadQueueRecipients(submitNotifications)).toContain(fixtures.accounts.coordinatorLead.userId);
+    const [receipt] = withoutLeadQueue(submitNotifications);
+    expect(receipt.notification_recipient.map(({ recipient_id }) => recipient_id))
       .toEqual([fixtures.accounts.organiserA.userId]);
 
     const assignment = await call("post", `/api/events/${eventId}/coordinator`, "coordinatorLead", {
@@ -134,7 +145,7 @@ describe("POST /api/events (SPM-35)", () => {
     expect(assignedRow.coordinator_id).toBe(fixtures.accounts.coordinatorThree.userId);
     expect(assignedRow.status).toBe("UNDER_REVIEW");
     expect(await activityActions(eventId)).toEqual(["EVENT_SUBMITTED", "COORDINATOR_ASSIGNED"]);
-    const notifications = await notificationsFor(eventId);
+    const notifications = withoutLeadQueue(await notificationsFor(eventId));
     const recipients = notifications.flatMap((item) => item.notification_recipient.map(({ recipient_id }) => recipient_id));
     expect(notifications.map(({ title }) => title).sort()).toEqual([
       "Event coordinator assigned",
@@ -187,7 +198,8 @@ describe("POST /api/events (SPM-35)", () => {
     expect(second.headers["idempotent-replayed"]).toBe("true");
     expect(second.body.event.eventId).toBe(first.body.event.eventId);
     expect(await eventsTitled(body.title)).toBe(1);
-    expect(await notificationsFor(first.body.event.eventId)).toHaveLength(1);
+    const notifications = await notificationsFor(first.body.event.eventId);
+    expect(notifications.map(({ title }) => title).sort()).toEqual(["Event request received", LEAD_QUEUE_TITLE]);
   });
 
   test("[EVT-IDEM-004] should_return_409_when_an_idempotency_key_is_reused_for_a_different_request", async () => {
@@ -313,7 +325,8 @@ describe("drafts (SPM-37)", () => {
 
     expect(submitted.status).toBe(200);
     expect(submitted.body.event.statusLabel).toBe("Submitted");
-    expect(await notificationsFor(eventId)).toHaveLength(1);
+    const notifications = await notificationsFor(eventId);
+    expect(notifications.map(({ title }) => title).sort()).toEqual(["Event request received", LEAD_QUEUE_TITLE]);
     expect(await activityActions(eventId)).toEqual(["DRAFT_CREATED", "EVENT_SUBMITTED"]);
 
     // SPM-33 AC3: a submitted request is read-only; the owner is pointed to a change request.
