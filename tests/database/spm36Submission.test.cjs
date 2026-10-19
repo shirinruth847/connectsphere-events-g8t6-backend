@@ -34,7 +34,7 @@ before(async () => {
   await db.exec("CREATE TRIGGER event_bump_version BEFORE UPDATE ON public.event FOR EACH ROW EXECUTE FUNCTION public._bump_event_version()");
   await db.exec(functionSql(read("20261012144519_spm33_owner_history_and_edit_notice.sql"), "_activity_log_defaults"));
   await db.exec("CREATE TRIGGER activity_log_defaults BEFORE INSERT ON public.activity_log FOR EACH ROW EXECUTE FUNCTION public._activity_log_defaults()");
-  await db.exec(read("20261019120000_spm36_submission_time_and_lead_receipt.sql"));
+  await db.exec(read("20261019183324_spm36_submission_time_and_lead_receipt.sql"));
   await db.exec(read("20261015121555_spm33_assignment_enters_under_review.sql"));
   await db.exec(`INSERT INTO public."user" (user_id, email, name, role, is_active) VALUES
     (1, 'spm36-1@connectsphere.test', 'Owner', 'ORGANISER', true), (2, 'spm36-2@connectsphere.test', 'One Lead', 'COORDINATOR_LEAD', true),
@@ -150,7 +150,7 @@ test("[BE-03] migration backfills recorded history and leaves undocumented legac
       INSERT INTO public.event (event_id,organiser_id,title,status,updated_at) VALUES (1,1,'Recorded','SUBMITTED','2026-10-18'),(2,1,'Unknown','SUBMITTED','2026-10-18');
       INSERT INTO public.activity_log (user_id,entity_name,entity_id,action,timestamp,actor_role,audience) VALUES
       (1,'event',1,'EVENT_SUBMITTED','2026-10-01T10:00:00Z','ORGANISER','ORGANISER_SAFE');`);
-    await legacy.exec(read("20261019120000_spm36_submission_time_and_lead_receipt.sql"));
+    await legacy.exec(read("20261019183324_spm36_submission_time_and_lead_receipt.sql"));
     const { rows } = await legacy.query("SELECT event_id,submitted_at FROM public.event ORDER BY event_id");
     assert.equal(rows[0].submitted_at.toISOString(), "2026-10-01T10:00:00.000Z");
     assert.equal(rows[1].submitted_at, null);

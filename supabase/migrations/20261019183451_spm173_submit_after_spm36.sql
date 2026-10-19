@@ -1,6 +1,6 @@
 -- SPM-173 after SPM-36: keeps both tickets' submission behaviour.
 --
--- 20261019120000 (SPM-36) redefined submit_event_request from the version before
+-- 20261019183324 (SPM-36) redefined submit_event_request from the version before
 -- SPM-173, so applying it writes SUBMITTED directly again. This restores the
 -- SPM-173 path (a new request is inserted as DRAFT, then moved to SUBMITTED by
 -- the shared transition, which also writes its one history entry) and keeps
@@ -8,7 +8,7 @@
 -- organiser and every active Coordinator Lead, and submitted_at set by SPM-36's
 -- trigger on the DRAFT -> SUBMITTED change.
 --
--- Apply after 20261019120000.
+-- Apply after 20261019183324.
 
 CREATE OR REPLACE FUNCTION public.submit_event_request(
   p_organiser_id integer,

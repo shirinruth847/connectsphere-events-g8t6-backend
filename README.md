@@ -73,7 +73,7 @@ and that Lead. It succeeds even when no Coordinator is available. Assignment is
 still the separate Lead action and enters `UNDER_REVIEW`.
 
 Apply the reviewed migration
-`supabase/migrations/20261019120000_spm36_submission_time_and_lead_receipt.sql`
+`supabase/migrations/20261019183324_spm36_submission_time_and_lead_receipt.sql`
 before deploying this backend. It adds `event.submitted_at`, preserves the first
 submission time on later updates, backfills only from recorded submission history,
 and adds active Leads to the existing durable receipt's recipients in the same
