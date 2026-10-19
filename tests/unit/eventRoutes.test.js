@@ -413,3 +413,70 @@ describe("SPM-35 request catalogue", () => {
     expect(eventModel.findRequestOptions).not.toHaveBeenCalled();
   });
 });
+
+
+describe("SPM-36 owned draft submission", () => {
+  beforeEach(() => eventModel.findOwnEvent.mockResolvedValue(eventRow()));
+
+  test("[BE-01/BE-02/BE-03] submits final edits against the existing ID without assigning a Coordinator", async () => {
+    const submittedAt = "2026-10-19T12:00:00.000Z";
+    eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED", coordinator_id: null, submitted_at: submittedAt }), replayed: false });
+    const input = validRequest();
+    const res = await send("put", "/api/events/42/submit", input);
+    expect(res.status).toBe(200);
+    expect(res.body.event).toMatchObject({ eventId: 42, requestId: "REQ-000042", status: "SUBMITTED", statusLabel: "Submitted", submittedAt, isAssignedToCoordinator: false });
+    expect(eventModel.submitEvent).toHaveBeenCalledWith({ organiserId: ORGANISER_ID, eventId: 42, input });
+  });
+
+  test("[BE-02] merges saved mandatory fields when only final title is supplied", async () => {
+    eventModel.findOwnEvent.mockResolvedValue(eventRow(eventModel.toRow(validRequest())));
+    eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED", title: "Final title" }) });
+    const res = await send("put", "/api/events/42/submit", { title: "Final title" });
+    expect(res.status).toBe(200);
+    expect(eventModel.submitEvent).toHaveBeenCalledWith({ organiserId: ORGANISER_ID, eventId: 42, input: { title: "Final title" } });
+  });
+
+  test.each(["title", "purpose", "description", "startDatetime", "endDatetime", "expectedAttendance", "preferredLayoutType"])("[BE-06] rejects blank mandatory field %s without writing", async field => {
+    const res = await send("put", "/api/events/42/submit", { ...validRequest(), [field]: "   " });
+    expect(res.status).toBe(400);
+    expect(res.body.fields[field]).toEqual(expect.any(String));
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test.each(["coordinatorId", "organiserId", "supervisingLeadId", "submittedAt", "status", "requestId"])("[BE-13] rejects client-controlled system field %s as a whole", async field => {
+    const res = await send("put", "/api/events/42/submit", { ...validRequest(), [field]: "tampered" });
+    expect(res.status).toBe(400);
+    expect(res.body.fields[field]).toEqual(expect.any(String));
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test.each(["COORDINATOR_LEAD", "COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER", "ATTENDEE"])("[BE-12] denies draft submission by %s", async role => {
+    signedInAs(role);
+    const res = await send("put", "/api/events/42/submit", validRequest());
+    expect(res.status).toBe(403);
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test("[BE-12] a different organiser cannot submit a private draft", async () => {
+    eventModel.findOwnEvent.mockResolvedValue(null);
+    const res = await send("put", "/api/events/42/submit", validRequest());
+    expect(res.status).toBe(404);
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test.each(["SUBMITTED", "UNDER_REVIEW", "PLANNING", "CANCELLED"])("[BE-14/BE-17] retry after %s never calls the submission writer", async status => {
+    eventModel.findOwnEvent.mockResolvedValue(eventRow({ status, coordinator_id: status === "SUBMITTED" ? null : 20 }));
+    const res = await send("put", "/api/events/42/submit", validRequest());
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("EVENT_NOT_DRAFT");
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test("[BE-19] persistence failure returns an error without a success event", async () => {
+    eventModel.submitEvent.mockRejectedValue(new Error("transaction failed"));
+    const res = await send("put", "/api/events/42/submit", validRequest());
+    expect(res.status).toBe(500);
+    expect(res.body.event).toBeUndefined();
+    expect(res.body.code).toBe("INTERNAL_ERROR");
+  });
+});
