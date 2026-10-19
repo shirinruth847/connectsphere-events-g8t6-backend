@@ -1,3 +1,5 @@
+const { MAX_INTEGER } = require("../validators/eventValidator");
+
 const PAGE_LIMIT_DEFAULT = 50;
 const PAGE_LIMIT_MAX = 100;
 const PAGE_OFFSET_MAX = 10000;
@@ -75,9 +77,15 @@ const validateCursorPagination = (req, res, next) => {
   return next();
 };
 
+// Returns the numeric ID, or null for anything that cannot be an event ID. IDs
+// that cannot exist are "not found", like IDs the user may not see.
+const parseEventId = (value) =>
+  /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_INTEGER ? Number(value) : null;
+
 module.exports = {
   validatePagination,
   validateCursorPagination,
+  parseEventId,
   PAGE_LIMIT_DEFAULT,
   PAGE_LIMIT_MAX,
   PAGE_OFFSET_MAX,
