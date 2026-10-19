@@ -24,12 +24,12 @@ const chain = (result) => {
   return query;
 };
 
-describe("[SPM-174] unassigned event queue", () => {
+describe("[SPM-174/SPM-177] unassigned event queue", () => {
   afterEach(() => {
     jest.clearAllMocks();
   });
 
-  test("TC-SPM-174-AC2: returns submitted unassigned events in start-time order", async () => {
+  test("TC-SPM-174-AC2: returns submitted unassigned events in queue order", async () => {
     const rows = [
       {
         event_id: 2,
@@ -51,7 +51,7 @@ describe("[SPM-174] unassigned event queue", () => {
     expect(supabase.from).toHaveBeenCalledWith("event");
     expect(query.eq).toHaveBeenCalledWith("status", "SUBMITTED");
     expect(query.is).toHaveBeenCalledWith("coordinator_id", null);
-    expect(query.order).toHaveBeenNthCalledWith(1, "start_datetime", { ascending: true });
+    expect(query.order).toHaveBeenNthCalledWith(1, "created_at", { ascending: true });
     expect(query.order).toHaveBeenNthCalledWith(2, "event_id", { ascending: true });
   });
 
@@ -66,7 +66,7 @@ describe("[SPM-174] unassigned event queue", () => {
     jest.spyOn(eventModel, "findUnassignedSubmittedEvents").mockResolvedValue([event]);
     const res = makeResponse();
 
-    await eventController.getUnassignedEvents({}, res, jest.fn());
+    await eventController.listUnassignedEvents({}, res, jest.fn());
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({
@@ -140,7 +140,7 @@ describe("[SPM-174] unassigned event queue", () => {
     expect(users.eq).toHaveBeenNthCalledWith(1, "role", "COORDINATOR");
     expect(users.eq).toHaveBeenNthCalledWith(2, "is_active", true);
     expect(events.not).toHaveBeenCalledWith("coordinator_id", "is", null);
-    expect(events.not).toHaveBeenCalledWith("status", "in", '("DRAFT","REJECTED","CANCELLED")');
+    expect(events.not).toHaveBeenCalledWith("status", "in", '("DRAFT","COMPLETED","REJECTED","CANCELLED")');
     expect(events.order).toHaveBeenCalledWith("start_datetime", { ascending: true });
   });
 
@@ -150,13 +150,14 @@ describe("[SPM-174] unassigned event queue", () => {
       error: { message: "COORDINATOR_CONFLICT" },
     });
 
-    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7 })).rejects.toMatchObject({
+    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7, leadId: 11 })).rejects.toMatchObject({
       name: "EventRequestError",
       code: "COORDINATOR_CONFLICT",
     });
     expect(supabase.rpc).toHaveBeenCalledWith("assign_event_coordinator", {
       p_event_id: 42,
       p_coordinator_id: 7,
+      p_lead_id: 11,
     });
   });
 
@@ -164,7 +165,7 @@ describe("[SPM-174] unassigned event queue", () => {
     const updated = {
       event: {
         event_id: 42,
-        status: "SUBMITTED",
+        status: "UNDER_REVIEW",
         coordinator_id: 7,
         start_datetime: "2026-11-01T10:00:00.000Z",
         end_datetime: "2026-11-01T12:00:00.000Z",
@@ -173,10 +174,7 @@ describe("[SPM-174] unassigned event queue", () => {
     };
     supabase.rpc.mockResolvedValue({ data: updated, error: null });
 
-    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7 })).resolves.toEqual({
-      ...updated.event,
-      coordinator_name: "Alice Coordinator",
-    });
+    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 7, leadId: 11 })).resolves.toEqual(updated.event);
   });
 
   test("[SPM-174-AC3] maps an invalid coordinator to a structured client error", async () => {
@@ -186,7 +184,11 @@ describe("[SPM-174] unassigned event queue", () => {
     });
     const res = makeResponse();
 
-    await eventController.assignCoordinator({ params: { id: "42" }, body: { coordinatorId: 999 } }, res, jest.fn());
+    await eventController.patchCoordinator({
+      params: { id: "42" },
+      body: { coordinatorId: 999 },
+      user: { user_id: 11, role: USER_ROLES.COORDINATOR_LEAD },
+    }, res, jest.fn());
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({
@@ -198,7 +200,11 @@ describe("[SPM-174] unassigned event queue", () => {
   test("[SPM-174-AC2] rejects malformed assignment input before querying the database", async () => {
     const res = makeResponse();
 
-    await eventController.assignCoordinator({ params: { id: "42" }, body: { coordinatorId: "7" } }, res, jest.fn());
+    await eventController.patchCoordinator({
+      params: { id: "42" },
+      body: { coordinatorId: "7" },
+      user: { user_id: 11, role: USER_ROLES.COORDINATOR_LEAD },
+    }, res, jest.fn());
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({

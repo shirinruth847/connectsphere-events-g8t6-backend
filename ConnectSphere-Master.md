@@ -2,9 +2,9 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 1.0 |
-| Updated | 14 October 2026 |
-| Status | Release 1 baseline: customer requirements complete (Week 7 changes and clarification sessions 1–3); repository verification required per ticket |
+| Version | 1.1 |
+| Updated | 18 October 2026 |
+| Status | Release 1 baseline: customer requirements complete (Week 7 changes and clarification sessions 1–3). 1.1 adds the shared frontend workspace agreement, which takes effect when the frontend and backend `fix/main-completed-ticket-baseline` branches are merged. Repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
 | Data platform | Supabase PostgreSQL and Supabase Auth; MongoDB Atlas for venue and equipment detail |
@@ -13,6 +13,22 @@
 This document gives developers and coding agents the durable context needed to build ConnectSphere. It defines the repository layout, architectural boundaries, roles, business rules, data ownership, workflow guarantees, test expectations and agent workflow.
 
 This document intentionally does **not** define a route-by-route API contract, request/response payload catalogue, OpenAPI specification or deployment/runtime architecture. Ticket acceptance criteria, implemented route definitions and tests determine the transport details for each feature. When a ticket changes an enduring business rule or structure, update this master in the same work item.
+
+## Changes from 1.0
+
+Version 1.1 records the frontend team's shared workspace and agent agreement (frontend `docs/team-ui-workflow.md` and `docs/agent-task-template.md`) and corrects the environment and startup sections to the code. No business rule, schema or MongoDB change. Frontend work started on 1.0 must check this table, in particular open branches that use the removed `CoordinatorShell`, coordinator global styles or `lib/api/events.ts`.
+
+| Area | 1.0 said | 1.1 says | Section |
+| --- | --- | --- | --- |
+| Frontend structure | README tree with a root `api/events.tsx` helper; all code to move under `src/` | Current code is root-level `app/`, `components/` and `lib/`; the `src/` move remains the target and moves the shared files unchanged | 2.4, 2.5 |
+| Protected pages | Not defined | One `DashboardShell` for every role; new protected pages use `DashboardWorkspace` and `PageContent`; no second sidebar, mobile menu, profile panel or logout | 2.6 |
+| Navigation and routes | Not defined | Role tabs in `lib/navigation.ts`; route constants, role values and login-return rules in `lib/auth.ts`; unimplemented items have no link and render disabled | 2.6, 3.4 |
+| Feature code | Close to its page | In the role folder for each affected role (`components/organiser/` … `components/attendee/`); `role-dashboard.tsx` only dispatches | 2.6 |
+| Styling | Not defined | `app/globals.css` holds shared tokens, font and base styles only; feature styling is scoped; no global `nav`, `label`, `button`, heading or `.page-header` rules | 2.6 |
+| Agent and review workflow | Ticket workflow only | Frontend agents also follow `docs/agent-task-template.md`; changes to shared UI/auth files need a shared-component reviewer | 9.2 |
+| Frontend checks | Lint, test and build scripts | `npm run lint`, `npm test`, `npm run test:e2e` (includes the production build and type check) and `npm run test:live` for real seed accounts | 11 |
+| Environment and startup check | Frontend `BACKEND_URL` read by `api/events.tsx`; the landing page shows the health check | Frontend uses `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` and `NEXT_PUBLIC_BACKEND_URL`; the end-to-end check is a seed-account login. Backend adds `FRONTEND_ORIGIN`, `ENABLE_COORDINATOR_WORKFLOWS`, `SEED_ACCOUNT_PASSWORD` and `TEST_DATABASE_URL` | 2.7.2, 2.7.4–2.7.8 |
+| Lead workflow routes | Always available | Behind `ENABLE_COORDINATOR_WORKFLOWS`; shared development enables them once SPM-33 is merged | 2.7.2 |
 
 ## Changes from 0.8
 
@@ -53,7 +69,7 @@ The two repositories are a source-code ownership boundary, not a microservice bo
 
 | Area | Confirmed baseline | Agent instruction |
 | --- | --- | --- |
-| Frontend | Next.js App Router, React, TypeScript, `next/font`, Geist | Follow the installed versions in `package.json` and the lockfile. Do not replace Next.js with Vite or a generic SPA layout. |
+| Frontend | Next.js App Router, React, TypeScript, `next/font` with Hanken Grotesk | Follow the installed versions in `package.json` and the lockfile. Do not replace Next.js with Vite or a generic SPA layout. |
 | Backend | Node.js, Express-style routing, JavaScript files (CommonJS), nodemon development command | Preserve the JavaScript and folder conventions in the backend README. The backend stays JavaScript (M2); a TypeScript migration requires an approved ticket. |
 | Database | Supabase PostgreSQL | Keep schema changes versioned in the backend repository before applying them to the shared development project. |
 | Detail store | MongoDB Atlas, shared cluster `spm.ldi4ulx.mongodb.net` (`appName=SPM`), native `mongodb` driver (M1) | Only the backend connects. Collections, validators and indexes change only through versioned scripts in the backend repository (section 6.4). |
@@ -267,33 +283,56 @@ These examples define code shape, not a complete endpoint or authorization imple
 
 Preserve the examples' style without copying weaknesses from boilerplate. In particular, models must not convert thrown failures into ordinary successful return values, generic placeholder names must not spread into domain code, and environment initialization should occur once at application startup rather than being added to every new controller. Correctness, security and transaction rules in this master take precedence when a sample is incomplete.
 
-### 2.4 Frontend: README-confirmed baseline
+### 2.4 Frontend: current structure
 
 ```text
 connectsphere-g8t6/
-├── .next/
 ├── app/
-│   ├── favicon.ico
-│   ├── globals.css
-│   ├── layout.tsx
-│   └── page.tsx
-├── node_modules/
+│   ├── layout.tsx                 # font and the unsaved-changes navigation guard
+│   ├── globals.css                # shared tokens, font and base styles only
+│   ├── page.tsx                   # redirects to /login
+│   ├── login/page.tsx
+│   ├── dashboard/page.tsx         # renders the signed-in role's dashboard
+│   ├── events/new/page.tsx        # /events/create re-exports it
+│   ├── events/[id]/page.tsx
+│   └── my-registrations/page.tsx
+├── components/
+│   ├── layout/                    # DashboardShell, DashboardWorkspace, PageContent
+│   ├── shared/                    # primitives, navigation guard
+│   ├── auth/                      # AuthGate, login form, role-dashboard dispatcher
+│   ├── events/                    # organiser event request form and details
+│   ├── organiser/
+│   ├── coordinator/
+│   ├── coordinator-lead/
+│   ├── venue-staff/
+│   ├── tech-support/
+│   └── attendee/
+├── lib/
+│   ├── api.ts                     # the single backend API client
+│   ├── session.ts                 # trusted profile, logout and session expiry
+│   ├── supabase.ts                # the single Supabase browser client
+│   ├── auth.ts                    # role values, labels, routes, login-return rules
+│   ├── navigation.ts              # role navigation and active tab
+│   └── events.ts                  # event form helpers and display fallbacks
+├── docs/
+│   ├── team-ui-workflow.md
+│   └── agent-task-template.md
+├── tests/                         # *.test.mjs unit tests; e2e/*.spec.mjs browser journeys
+├── scripts/verify-live-flows.cjs  # live seed-account journeys (npm run test:live)
 ├── public/
-├── .gitignore
 ├── AGENTS.md
 ├── CLAUDE.md
 ├── COMMIT_MESSAGES.md
-├── eslint.config.mjs
-├── next-env.d.ts
-├── next.config.ts
-├── package-lock.json
-├── package.json
-├── postcss.config.mjs
 ├── README.md
+├── eslint.config.mjs
+├── next.config.ts
+├── playwright.config.mjs
+├── package.json
+├── package-lock.json
 └── tsconfig.json
 ```
 
-`.next` and `node_modules` are generated directories and must remain ignored. `AGENTS.md` and `CLAUDE.md` contain repository-local agent guidance and must be read before editing. The current landing page is `app/page.tsx` until the planned `src` migration is performed. The startup check in section 2.7 also relies on a root-level `api/events.tsx` helper that the README tree does not list; the `src` migration moves its responsibility into `src/lib/api`.
+`.next`, `node_modules`, `playwright-report` and `test-results` are generated and must remain ignored. `AGENTS.md` and `CLAUDE.md` contain repository-local agent guidance and must be read before editing; `AGENTS.md` points to `docs/team-ui-workflow.md` and `docs/agent-task-template.md`. Coordinator queue, assignment, reassignment and calendar screens are not part of the current structure; they return through their own feature tickets on the shared shell (section 2.6).
 
 ### 2.5 Frontend: target expansion
 
@@ -356,17 +395,37 @@ connectsphere-g8t6/
 
 Route groups organize code and do not change URLs. Dynamic App Router segments use `[eventId]` and `[venueId]`, not Express-style `:id` folder names.
 
+Until the migration is approved and performed, the current structure in section 2.4 and the rules in section 2.6 apply. The migration moves the shared files and role folders under `src/` unchanged; it must not create a second shell, navigation configuration, API client or Supabase client.
+
 ### 2.6 Frontend placement rules
 
-- `src/app` owns routing, layouts, page composition, loading/error boundaries and server/client component boundaries.
-- `src/components` owns reusable presentation components. Domain-specific page orchestration should stay close to its page until genuine reuse exists.
-- `src/lib/api` owns the single browser-to-backend client, shared error normalization and request helpers.
-- `src/lib/auth` owns Supabase browser-session integration and authenticated request setup; it does not define application authorization policy.
-- `src/lib/permissions` may determine what controls to render from trusted server-provided context. It must never be treated as the enforcement layer.
-- `src/lib/validation` may share form-oriented schemas, but backend validation remains authoritative.
-- `src/styles` contains shared styling beyond `globals.css` when needed.
-- `public` contains immutable public assets. Do not place secrets or private documents there.
-- Core business endpoints belong to the Express backend, not `src/app/api`.
+Paths are relative to the frontend root; after the migration in section 2.5 they sit under `src/` with the same responsibilities. Each shared file has one responsibility:
+
+| File or folder | Responsibility |
+| --- | --- |
+| `app/` | URL entrypoints, layouts, page composition, loading/error boundaries and server/client component boundaries |
+| `components/layout/dashboard-shell.tsx` | The one sidebar, brand, profile, logout, mobile menu and content frame for every role |
+| `components/layout/dashboard-workspace.tsx` | Authenticated page wrapper, with an optional exact role restriction |
+| `components/layout/page-content.tsx` | Standard page heading, actions and content spacing |
+| `components/shared/primitives.tsx` | Buttons, inputs, cards, alerts, status chips, loading and empty states |
+| `components/auth/role-dashboard.tsx` | Dispatches the trusted profile to the role's dashboard; holds no feature logic |
+| `components/<role>/` | Feature components for `organiser`, `coordinator`, `coordinator-lead`, `venue-staff`, `tech-support` and `attendee`; the existing organiser event forms stay in `components/events/` |
+| `lib/navigation.ts` | Role navigation items and active-tab selection |
+| `lib/auth.ts` | Exact role values, labels, route constants and safe login destinations; not authorization policy |
+| `lib/api.ts`, `lib/session.ts`, `lib/supabase.ts` | The single backend API client, session checks and the single Supabase browser client |
+| `app/globals.css` | Shared tokens, font and base styles only |
+| `public` | Immutable public assets; no secrets or private documents |
+
+- New protected pages use `DashboardWorkspace` and `PageContent`, applied once: in the route layout or in the page, never both. Do not create or copy another sidebar, mobile navigation, profile panel or logout, and do not nest another `main` element inside the shell. `OrganiserShell`, `OrganiserWorkspace` and `StaffShell` are compatibility aliases only.
+- Role folders are feature boundaries, not personal assignments. Any member may work in any role folder, and a cross-role ticket may change several. Prefer separate feature components over adding all ticket logic to a role's dashboard file.
+- To add a route: agree the ticket ACs, URL, permitted roles and API contract with the frontend and backend owners; add the URL to `ROUTES` and `canViewPath` in `lib/auth.ts`; add the navigation item only to permitted roles in `lib/navigation.ts`, with a stable ID, so that exactly one tab is active; guard the page with `DashboardWorkspace`; extend the journey tests (section 11).
+- A navigation item whose page and access rules are not implemented has no link and renders disabled.
+- Feature styling uses a `*.module.css` file or component utilities with the shared tokens. Do not add global `nav`, `label`, `button`, heading or generic `.page-header` selectors, or replace shared tokens for one feature.
+- Reuse the shared Supabase client, session helpers and `apiRequest`; do not create a second client or login/session flow. Preserve role restrictions, safe return URLs, expired-session handling and logout.
+- Read the role from the trusted backend profile through `useSessionUser` (section 4.1). Navigation and hidden controls are presentation, not authorization.
+- Form validation in the frontend gives instant feedback only; backend validation remains authoritative.
+- Core business endpoints belong to the Express backend, not Next.js route handlers (section 1.2).
+- Changes to the shared files in the table need a shared UI/auth reviewer (section 9.2).
 
 ### 2.7 Local environment setup and startup verification
 
@@ -400,12 +459,16 @@ MONGODB_DB_NAME=connectsphere_dev
 
 | Variable | Required | Read by | Notes |
 | --- | --- | --- | --- |
-| `PORT` | No | `server.js` | Defaults to `8000`. If changed, change the frontend `BACKEND_URL` to match. |
+| `PORT` | No | `server.js` | Defaults to `8000`. If changed, change the frontend `NEXT_PUBLIC_BACKEND_URL` to match. |
 | `SUPABASE_URL` | Yes | `config/supabase.js` | Development project URL. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes, unless `SUPABASE_ANON_KEY` is set | `config/supabase.js` | Bypasses row-level security. Server-only: never place it in the frontend, a commit, Jira or chat. |
 | `SUPABASE_ANON_KEY` | Fallback only | `config/supabase.js` | Used only when the service role key is absent. RLS then applies to backend queries, so behavior can differ from the service-role setup. |
 | `MONGODB_URI` | Yes, once `config/mongodb.js` exists | `config/mongodb.js` | Your own Atlas user. URL-encode special characters in the password (for example `@` becomes `%40`). Server-only: never place it in the frontend, a commit, Jira or chat. |
 | `MONGODB_DB_NAME` | Yes, once `config/mongodb.js` exists | `config/mongodb.js` | `connectsphere_dev` for shared development (M3). Automated tests set their own value (section 11). |
+| `FRONTEND_ORIGIN` | No | `app.js` | The one browser origin allowed by CORS; defaults to `http://localhost:3000`. It must match the frontend's origin exactly, or profile verification fails after Supabase login. |
+| `ENABLE_COORDINATOR_WORKFLOWS` | No | `routes/eventRoutes.js` | `true` enables the Lead queue, coordinator availability, assignment and reassignment routes; any other value returns 404 for them. Read once at startup. Shared development uses `true` once SPM-33 is merged. |
+| `SEED_ACCOUNT_PASSWORD` | Only for seeding and live checks | `supabase/seed/provisionAccounts.js`, frontend `npm run test:live` | Password of the synthetic `dev-*` seed accounts (section 10.4). Private: never in the frontend, a commit, Jira or chat. |
+| `TEST_DATABASE_URL` | Only for integration suites that write audit rows | `tests/fixtures/adminCleanup.js` | Privileged test-only PostgreSQL connection used to remove fixture audit rows. Supply it only to test commands, never to the application runtime or browser. |
 
 `config/supabase.js` throws `Missing Supabase environment variables in .env` during startup when `SUPABASE_URL` or both keys are missing. The backend never reads `MDB_MCP_CONNECTION_STRING`; that user-level variable belongs to the MongoDB MCP server (section 10.1), even if it holds the same credentials. Email and SMS provider variables are added by the ticket that introduces each provider (M6). `.env` is ignored by `.gitignore`; never commit it. When a work item introduces a new backend variable, add it to this table and the backend README in the same work item.
 
@@ -442,15 +505,20 @@ cd connectsphere-g8t6
 npm install
 ```
 
-Create `.env.local` in the frontend root (`connectsphere-g8t6/`):
+Copy `.env.example` to `.env.local` in the frontend root (`connectsphere-g8t6/`) and fill in the project's public values:
 
 ```dotenv
-BACKEND_URL=http://localhost:8000
+NEXT_PUBLIC_SUPABASE_URL=https://rvwiflsedoujspmzfrbq.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=<publishable key from the Supabase dashboard: Project Settings → API Keys>
+NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
 ```
 
 | Variable | Required | Read by | Notes |
 | --- | --- | --- | --- |
-| `BACKEND_URL` | Yes | `api/events.tsx` | Base URL of the running backend, without a trailing slash. Read on the server by `app/page.tsx` (a server component), so it has no `NEXT_PUBLIC_` prefix. |
+| `NEXT_PUBLIC_SUPABASE_URL` | Yes | `lib/supabase.ts` | Development project URL for browser sign-in. |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Yes, unless `NEXT_PUBLIC_SUPABASE_ANON_KEY` is set | `lib/supabase.ts` | Public browser key. The legacy `NEXT_PUBLIC_SUPABASE_ANON_KEY` is also accepted. Never the service-role key. |
+| `NEXT_PUBLIC_BACKEND_URL` | No | `next.config.ts`, `lib/api.ts` | Base URL of the running backend, without a trailing slash. Defaults to `http://localhost:8000`. |
+| `BACKEND_URL` | No | `next.config.ts` | Build-time fallback when `NEXT_PUBLIC_BACKEND_URL` is unset. |
 
 A variable that must reach browser code needs the Next.js `NEXT_PUBLIC_` prefix and is then visible to every user. It must never contain a service-role key, database password or private MCP credential. `.env*` files are ignored by `.gitignore`; never commit them. Next.js reads `.env.local` at startup, so restart the dev server after editing it. When a work item introduces a new frontend variable, add it to this table and the frontend README in the same work item.
 
@@ -460,19 +528,21 @@ With the backend already running, start the frontend:
 npm run dev
 ```
 
+`npm run dev` pins port 3000 and fails with `EADDRINUSE` rather than moving to another port, because the backend accepts only its `FRONTEND_ORIGIN`.
+
 #### 2.7.5 Frontend startup check
 
-1. Open `http://localhost:3000`.
-2. The page displays the pretty-printed `{"message": "App is working well"}` response. `app/page.tsx` fetches it from the backend health check through `api/events.tsx`, so this confirms frontend → backend → Supabase end to end.
-3. The frontend terminal logs `http://localhost:8000/api/healthcheck`. If it logs `undefined/api/healthcheck`, `BACKEND_URL` was not loaded.
+1. Open `http://localhost:3000`. It redirects to `/login`, and the page shows no Supabase configuration error.
+2. Sign in with a synthetic seed account (section 10.4). The browser lands on that role's home (section 3.4) with the shared sidebar and the account's name. This confirms frontend → Supabase Auth → backend `GET /api/auth/me` → Supabase end to end.
+3. The browser console shows no CORS error for `http://localhost:8000/api/auth/me`, and Logout returns to `/login`.
 
-If a work item removes the health check from the landing page (for example the `src` migration in section 2.5), it must provide an equivalent end-to-end check and update this section in the same work item.
+If a work item changes the login entry or the profile check, it must keep an equivalent end-to-end check and update this section in the same work item.
 
 #### 2.7.6 Environment file check
 
 Run this check before starting either server. It catches missing, misnamed, committed or mismatched environment files, which otherwise show up later as confusing startup or data errors. Applies to developers and coding agents alike.
 
-**Never reveal secrets.** An agent may read the environment files to run this check, but it reports only file names, variable names and pass/fail. It never prints, logs, copies or asks for the value of `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `MONGODB_URI`, provider keys or `MDB_MCP_CONNECTION_STRING`, and it never asks the developer to paste a value into the conversation. Only the non-secret values listed in step 4 may be shown.
+**Never reveal secrets.** An agent may read the environment files to run this check, but it reports only file names, variable names and pass/fail. It never prints, logs, copies or asks for the value of `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `MONGODB_URI`, `TEST_DATABASE_URL`, `SEED_ACCOUNT_PASSWORD`, provider keys or `MDB_MCP_CONNECTION_STRING`, and it never asks the developer to paste a value into the conversation. Only the non-secret values listed in step 4 may be shown.
 
 1. **Files exist with exact names.** `.env` is in the backend root and `.env.local` is in the frontend root. On Windows, confirm neither was saved as `.env.txt` or `.env.local.txt` (`dir /a` or `ls -a` shows hidden files).
 2. **Files are not committed.** In each repository, `git check-ignore <file>` prints the file name and `git ls-files <file>` prints nothing. If a file is tracked, stop: tell the developer, do not commit anything, and treat the credentials in it as exposed. The developer must remove it from the repository and have the keys rotated (Supabase keys in the dashboard; Atlas passwords through the Atlas admin).
@@ -481,13 +551,17 @@ Run this check before starting either server. It catches missing, misnamed, comm
    | File | Always required | Required once `config/mongodb.js` exists |
    | --- | --- | --- |
    | Backend `.env` | `SUPABASE_URL`; `SUPABASE_SERVICE_ROLE_KEY` or `SUPABASE_ANON_KEY` | `MONGODB_URI`, `MONGODB_DB_NAME` |
-   | Frontend `.env.local` | `BACKEND_URL` | — |
+   | Frontend `.env.local` | `NEXT_PUBLIC_SUPABASE_URL`; `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` or `NEXT_PUBLIC_SUPABASE_ANON_KEY` | — |
 
    Variables added later by a work item (section 2.7.2) join this table in the same work item.
 4. **Non-secret values match the team setup.** These may be shown when they differ:
    - `SUPABASE_URL` is `https://rvwiflsedoujspmzfrbq.supabase.co`.
    - `MONGODB_DB_NAME` is exactly `connectsphere_dev` (M3). Any other value puts the developer in a private database whose documents do not match the shared Supabase project (section 6.5).
-   - `BACKEND_URL` is `http://localhost:8000` (or the backend's `PORT`), with no trailing slash.
+   - `NEXT_PUBLIC_SUPABASE_URL` is `https://rvwiflsedoujspmzfrbq.supabase.co`.
+   - `NEXT_PUBLIC_BACKEND_URL`, when set, is `http://localhost:8000` (or the backend's `PORT`), with no trailing slash.
+   - Backend `FRONTEND_ORIGIN`, when set, is `http://localhost:3000`.
+   - `ENABLE_COORDINATOR_WORKFLOWS`, when set, is `true` or `false`.
+   - `TEST_DATABASE_URL`, if present, is used only by test commands; it never appears in frontend files.
 5. **Secret values have the right shape, checked without printing them.** `MONGODB_URI` starts with `mongodb+srv://`, its host is `spm.ldi4ulx.mongodb.net`, and it contains no database name that conflicts with `MONGODB_DB_NAME`. A wrong username, wrong password or unencoded special character cannot be detected here; it appears as `authentication failed` when the backend connects (see section 2.7.8).
 6. **No MCP variable in the application.** `MDB_MCP_CONNECTION_STRING` appears nowhere in either repository or environment file (section 4.3).
 
@@ -523,15 +597,18 @@ A coding agent must run these checks itself, including starting both servers and
 | `git ls-files .env` or `git ls-files .env.local` lists the file | The environment file was committed | Stop; remove it from the repository and have the exposed keys rotated (section 2.7.6) |
 | Venues created by teammates show missing details, or your new venues stay inactive for others | `MONGODB_DB_NAME` is not `connectsphere_dev` | Correct it and restart the backend |
 | Backend exits with `Cannot find module '…'` | A file on the branch requires a module that is not committed | Code problem: stop and report as in section 2.7.7 |
-| Backend exits with `EADDRINUSE` | Port already in use | Stop the other process, or change `PORT` and `BACKEND_URL` together |
+| Backend exits with `EADDRINUSE` | Port already in use | Stop the other process, or change `PORT` and `NEXT_PUBLIC_BACKEND_URL` together |
 | Health check returns 500; backend log shows `Invalid API key` | Wrong key or key from another project | Copy the key again from project `rvwiflsedoujspmzfrbq` |
 | Health check returns 500; backend log shows `fetch failed` or `ENOTFOUND` | Wrong `SUPABASE_URL` or no network access | Check the URL and connectivity |
 | Backend start or health check times out connecting to MongoDB | Your IP is not on Atlas Network Access | Ask the Atlas admin to add your current IP, then restart |
 | MongoDB `authentication failed` | Wrong Atlas username/password, or special characters in the password are not URL-encoded | Fix `MONGODB_URI` and restart |
 | MongoDB `not authorized` on a write | Your Atlas user lacks the "Read and write to any database" role | Ask the Atlas admin to grant the role |
-| Frontend logs `undefined/api/healthcheck` | `.env.local` missing, misnamed or not loaded | Create it as in section 2.7.4 and restart the frontend |
-| Frontend page shows `fetch failed` / `ECONNREFUSED` | Backend not running or on a different port | Start the backend; make `BACKEND_URL` match `PORT` |
-| Frontend page shows `Failed to fetch data` | Backend returned a non-2xx response | Pass section 2.7.3 first |
+| Login page says to add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | `.env.local` missing, misnamed or not loaded | Create it as in section 2.7.4 and restart the frontend |
+| Sign-in shows `Failed to fetch`, or a protected page shows "Could not open your workspace" | Backend not running, on a different port, or blocked by CORS | Start the backend; make `NEXT_PUBLIC_BACKEND_URL` match `PORT` and `FRONTEND_ORIGIN` match the frontend origin |
+| Sign-in shows "Could not verify your account." | `GET /api/auth/me` returned a non-2xx response other than 401/403 | Pass section 2.7.3 first, then check the backend log |
+| Lead queue, assignment or reassignment requests return 404 | `ENABLE_COORDINATOR_WORKFLOWS` is not `true` | Set it in the backend `.env` and restart the backend |
+| Supabase sign-in succeeds but the profile request is blocked by CORS | The frontend runs on an origin other than `FRONTEND_ORIGIN`, for example port 3001 because 3000 was busy | Stop the other frontend. `npm run dev` pins port 3000 and fails with `EADDRINUSE` instead of moving. For a deliberate alternate port, change `FRONTEND_ORIGIN` and restart the backend |
+| Hydration warning about an extra attribute on `<html>`, such as `data-scribe-recorder-ready` | A browser extension injects it | Disable the extension for localhost. Do not suppress hydration diagnostics |
 
 Passing the startup gate is a precondition, not verification of the task. Before claiming a task is verified, inspect `package.json` in the relevant repository and run its actual lint, test and build scripts. Do not invent missing scripts or infer success from the development server alone.
 
@@ -608,6 +685,20 @@ Payments, pricing, full reporting/export suites, general document management, re
 | `/my-registrations` | Current user's registrations, invitations and withdrawal actions |
 | `/notifications` | Durable inbox and read state |
 
+`/events/create` is an alias of `/events/new`. Every signed-in role works inside the shared shell (section 2.6); only the navigation and page content vary by role. After login, a user lands on their role's home:
+
+| Role value | Display label | Home |
+| --- | --- | --- |
+| `ORGANISER` | Event Organiser | `/dashboard` |
+| `COORDINATOR_LEAD` | Event Coordinator Lead | `/dashboard` |
+| `COORDINATOR` | Event Coordinator | `/dashboard` |
+| `VENUE_STAFF` | Venue Staff | `/dashboard` |
+| `TECH_SUPPORT` | Technical Support | `/dashboard` |
+| `SAFETY_OFFICER` | Safety Officer | Not implemented yet; added by its ticket |
+| `ATTENDEE` | Attendee | `/my-registrations` |
+
+`/dashboard` renders the signed-in role's dashboard. A URL in the first table appears in navigation only once its page and access rules are implemented; until then the item renders disabled. A role landing page is an extension point for that role's tickets, not a claim that its workflows exist.
+
 The event workspace should expose overview, requirements, clarification, assignment, venue arrangements (one entry per venue booking or hold, each with its own status), technical arrangements, safety review, changes, registrations and history according to permissions. The coordinator field shows "Unassigned" until a Lead assigns a coordinator, then the coordinator's name.
 
 A saved draft is not submitted, a held venue is not a booked venue, an expired hold is not a booking, a waitlist entry is not a confirmed registration, an approved resource is not a confirmed event, a safety-approved event is not confirmed until the coordinator confirms it, and a requested change has no effect until the coordinator accepts it.
@@ -632,6 +723,8 @@ The database stores the detailed states in section 5.2. Organiser-facing pages s
 
 "Approved" is display wording only; there is no `APPROVED` state.
 
+These labels replace wording in tickets written before 1.0; for example, SPM-35's "Pending Approval" for a submitted request is shown as "Submitted". Frontend fallback labels, used only when a response has no label, match this table.
+
 ## 4. Authentication and Authorization
 
 ### 4.1 Authentication sequence
@@ -642,7 +735,7 @@ The database stores the detailed states in section 5.2. Organiser-facing pages s
 4. The backend loads the active application profile, trusted roles and organization memberships.
 5. The controller/model operation checks role, relationship, allowed fields and lifecycle state.
 
-Do not trust a decoded-only token, a body-supplied actor ID, an `X-User-ID` header or user-editable metadata for permissions. Role switching in the UI changes presentation only; it cannot expand server permissions.
+Do not trust a decoded-only token, a body-supplied actor ID, an `X-User-ID` header or user-editable metadata for permissions. Role switching in the UI changes presentation only; it cannot expand server permissions. The frontend takes the role from the backend profile through `useSessionUser`, never from an email address, display label or client-editable Auth metadata. On logout the frontend asks the backend to revoke the session, and protected content is rechecked when the page is restored from browser history.
 
 ### 4.2 Access rules
 
@@ -1093,23 +1186,25 @@ The frontend must not duplicate lifecycle or allocation truth. It may use types 
 ### 9.2 Ticket workflow
 
 1. As soon as the prompt is received, run the design reference gate in section 10.5. For a task that creates or changes UI, do not plan, start servers or edit files until the design gate is satisfied.
-2. Read the repository's `AGENTS.md` or equivalent instructions, README, this master, relevant source files and current git status.
+2. Read the repository's `AGENTS.md` or equivalent instructions, README, this master, relevant source files and current git status. Preserve existing changes and stashes, and work on a feature branch, never directly on main. In the frontend, also read `docs/team-ui-workflow.md` and follow `docs/agent-task-template.md`; give the agent the actual ticket ID, Jira link and task in its start message and keep the template unchanged. The template is an instruction agreement, not a permission barrier; required checks and review are enforced in the repository.
 3. Pass the startup gate in section 2.7.7 for both repositories, including the environment file check in section 2.7.6. Do not continue until it passes.
 4. Read the Jira ticket, acceptance criteria, linked test cases, dependencies and relevant comments.
 5. Identify the owning repository and whether coordinated work is needed in the other repository.
 6. Verify current package versions, scripts, PostgreSQL schema/migrations, MongoDB collections/validators and existing implementation before designing the change.
 7. If the code being changed contains `// PROVISIONAL Qn` markers or `[Qn]` test prefixes from v0.8, align that code with the 1.0 rules (see "Changes from 0.8") and remove the markers in the same work item.
-8. Implement within the file-placement rules in section 2. Keep business decisions in the backend.
+8. Implement within the file-placement rules in section 2. Keep business decisions in the backend. Implement the ticket and its necessary supporting changes only: do not overwrite shared layouts, discard others' work or import unrelated pending features to make tests pass. If shared baseline files are missing, report the gap rather than creating a competing implementation. For a necessary change to shared auth, navigation, layout, tokens or API contracts, explain the impact and flag the files for shared-component review. Do not push, merge, publish or change repository settings unless instructed.
 9. Add or update PostgreSQL migrations or MongoDB schema scripts before applying schema changes. Use namespaced synthetic fixtures.
-10. Run the real repository's lint/test/build commands and the relevant role journeys.
+10. Run the real repository's lint/test/build commands and the relevant role journeys (section 11). For UI changes, check desktop and mobile placement and capture both. For navigation or auth changes, check permitted and denied roles, direct URLs, login destination, active tab, expired session and logout. When touching event workflows, preserve draft, save and submission behavior. Do not weaken assertions, disable access controls or suppress hydration diagnostics to hide failures. For documentation-only changes, review links and the diff; application tests need not be rerun.
 11. Update the README if setup, scripts, environment variables or actual structure changed. Update this master if an enduring architecture or business rule changed.
-12. Report the startup gate result, including the environment check; the design reference used (Figma frame and frame-to-URL mapping, existing reference page, or developer override and reason) or that the design gate did not apply; any v0.8 provisional markers found and how they were resolved; what changed; commands/results; database mutations; unresolved gaps; and counterpart work still required.
+12. Report the startup gate result, including the environment check; the design reference used (Figma frame and frame-to-URL mapping, existing reference page, or developer override and reason) or that the design gate did not apply; any v0.8 provisional markers found and how they were resolved; what changed; commands/results, including checks not run; database mutations and remaining fixtures; shared files flagged for review; unresolved gaps; and counterpart work still required.
+
+Frontend pull requests use `.github/pull_request_template.md` and the `Frontend checks / UI and journeys` workflow. Feature owners work in their feature components and pages; a shared UI/auth reviewer approves changes to the shared files in section 2.6. Requiring that status check and review, and blocking direct pushes to main, are repository-owner settings.
 
 If Jira acceptance criteria or linked tests are inaccessible, report the exact gap. Do not invent them and do not mark the ticket complete based only on assumptions in this document.
 
 ### 9.3 Compatibility between repositories
 
-Coordinate related frontend and backend work with the same Jira issue. Prefer additive backend changes while the frontend adopts them. Do not remove behavior still used by the other repository. Test mocks must remain clearly distinguishable from live integration and must be updated when the implemented backend behavior changes.
+Coordinate related frontend and backend work with the same Jira issue. Agree the URL, permitted roles and request/response contract before parallel work starts. Do not rename an API property, workflow status or route in one repository alone; document the agreed change and link the corresponding PR in the other repository. Prefer additive backend changes while the frontend adopts them. Do not remove behavior still used by the other repository. Test mocks must remain clearly distinguishable from live integration and must be updated when the implemented backend behavior changes.
 
 ## 10. MCP-Assisted Agent Workflow
 
@@ -1185,6 +1280,8 @@ Auth account creation and database seeding are separate capabilities and are not
 
 Maintain repeatable backend seed/fixture files for both stores (`supabase/seed`, `mongodb/seed`) plus a manifest of created IDs. Make setup idempotent and record partial progress. Cleanup only records and Auth accounts owned by the current test run, in dependency-safe order. Never use a shared-database reset as routine cleanup and never send test invitations to real users.
 
+Private seed-account credentials are shared through the team's password manager. Only local test processes read them; never paste them into chat, PRs, Jira or committed files, and never share `.env` files, database passwords or service-role keys. Tests may create and remove their own namespaced fixtures only in the authorized environment, verify the cleanup and report anything left. Do not modify real users.
+
 ### 10.5 Design reference gate
 
 UI work is built from a team design reference, preferably a Figma frame. Every agent runs this gate when it receives a prompt, before planning, starting servers or editing files. Reading files, the ticket and the design is permitted while the gate runs.
@@ -1242,6 +1339,7 @@ Run the gate once per task. Follow-up prompts in the same task reuse the referen
 | Design | Link | Notes |
 | --- | --- | --- |
 | ConnectSphere screens (Figma file "SPM") | `https://www.figma.com/design/4yEqzlF2xryGHF7f9a5s7d/SPM` | One page ("Page 1") with screens grouped under attendee, organiser, coordinator, venue staff and technical support headings. Use it for context; build from frame-specific links. |
+| Shared dashboard frame (code) | `components/layout/dashboard-shell.tsx`, taken from the `shree` organiser layout | The frame for every role: 225px desktop sidebar, the shared purple, brand/profile/logout placement and a 1280px maximum content width. Only navigation and page content vary by role; the organiser keeps its search/filter header. |
 
 Add a row when the team creates another design file or library. Screenshot URLs returned by the Figma MCP are short-lived and private; do not paste them into Jira or committed files.
 
@@ -1266,7 +1364,9 @@ Jira contains ticket-specific acceptance criteria and test cases. The matrix bel
 | Cross-store | PostgreSQL commits before any MongoDB write, rollback leaves MongoDB untouched, MongoDB down after commit is retried, stale or repeated entries are ignored, stale detail is flagged, new records stay inactive until detail exists, blocking checks never read MongoDB, search falls back to PostgreSQL-only results |
 | Notification delivery | Email/SMS sent only after commit, one delivery per recipient and channel, retry with backoff, provider failure keeps the in-app notification, SMS only for urgent triggers |
 | Database/security | Frontend cannot bypass backend or reach either store, runtime cannot grant roles/alter schema/delete audit, MongoDB validators reject rule-bearing or oversized fields, migrations and schema scripts remain compatible and fixtures in both stores clean up safely |
-| UI | Loading/empty/error/conflict states, preserved form input, role-aware controls, keyboard use, mobile usability and live backend journeys |
+| UI | Loading/empty/error/conflict states, preserved form input, role-aware controls, keyboard use, mobile usability and live backend journeys; for every role, its destination, shared sidebar geometry, role-specific navigation, exactly one active tab, mobile menu and Escape, and logout |
+
+Frontend checks run from `connectsphere-g8t6`: `npm ci`, `npm run lint`, `npm test` (helper and validation unit tests) and `npm run test:e2e`, which runs the production build and type check and then Playwright journeys on port 3100 with mocked Auth and API. `npm run test:live` repeats the core journeys against locally running applications on ports 3000 and 8000 with existing synthetic seed accounts and removes only its own event rows. Mocked journeys do not replace live checks (section 9.3). Visual changes need desktop and mobile screenshots; automation checks geometry and journeys, not pixels.
 
 Use unit tests for pure rules, real PostgreSQL integration tests for constraints/locks/transactions and focused Playwright journeys for complete user flows. Automated tests that need MongoDB run against a local in-memory MongoDB (`mongodb-memory-server`) locally and in CI, never against Atlas: CI runners have changing IP addresses that the Atlas Network Access list will not accept (M7). Concurrency tests require separate connections. Record the actual commands, environment and results. Never claim a check ran when it did not.
 
@@ -1322,6 +1422,9 @@ IDs: `D` items predate v0.8, `Q` items were raised during the Week 7 review, `T`
 | T21 | Organiser pages show eight status labels mapped by the backend (section 3.5) | Matches the dashboard design while keeping detailed states for workflow rules |
 | T22 | An organiser withdraws an event directly while it is still in the unassigned queue | No coordinator exists yet to review a cancellation request |
 | T23 | Events assigned before v0.8 have no supervising Lead and are visible to every Lead until one takes over supervision | Keeps existing work visible without inventing a supervision history |
+| T24 | Every role uses one shared dashboard shell; protected pages use `DashboardWorkspace` and `PageContent`; role tabs live in `lib/navigation.ts` and route and role rules in `lib/auth.ts` (sections 2.6, 3.4) | Separate role shells and unscoped global styles broke other members' layouts; one frame keeps navigation, logout and mobile behavior consistent |
+| T25 | Feature code lives in role folders that any member may work in; global CSS holds shared foundations only | Lets any member take any ticket without growing a shared dashboard file or overriding other layouts |
+| T26 | Changes to shared UI and auth files need a shared-component reviewer; frontend PRs pass lint, unit and browser checks | These files affect every role |
 
 Retired: T1 and T2 (buffer conflict scan and per-booking stored buffers), replaced by T16.
 
@@ -1377,6 +1480,7 @@ If this master, Jira, a repository README and implemented code disagree, surface
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 1.1 | 2026-10-18 | Accepted; takes effect when the frontend and backend `fix/main-completed-ticket-baseline` branches are merged | Recorded the frontend shared workspace and agent agreement from frontend `docs/team-ui-workflow.md` and `docs/agent-task-template.md`; see "Changes from 1.0". Current frontend structure (2.4) with the `src/` migration kept as the target (2.5); shared-file responsibilities, role folders, the add-a-route procedure, scoped styling and auth/session reuse (2.6); backend `FRONTEND_ORIGIN`, `ENABLE_COORDINATOR_WORKFLOWS`, `SEED_ACCOUNT_PASSWORD` and `TEST_DATABASE_URL` (2.7.2); frontend `NEXT_PUBLIC_*` variables replacing the retired `api/events.tsx` `BACKEND_URL` setup, the seed-account login as the end-to-end startup check, and matching environment checks and troubleshooting (2.7.4–2.7.8); master labels over pre-1.0 ticket wording (3.5); role homes and disabled unimplemented navigation (3.4); trusted-profile role source and logout revocation (4.1); agent template, scope limits, shared-component review and PR checks (9.2); cross-repository contract renames (9.3); seed credentials and fixtures (10.4); shared frame as design reference (10.5.7); frontend check commands (11); T24–T26 (12.1.2); Hanken Grotesk font (1.1). `docs/main-repair-baseline.md` is a branch report and is not copied into this master. Jira request: none (frontend branch documentation; branch commits reference SPM-32, SPM-35 and SPM-37). Compatibility: frontend structure, process and environment documentation; the only API change is the new organiser-only `GET /api/events/request-options` and the opt-in gate on Lead workflow routes; no business rule, PostgreSQL or MongoDB change. Open frontend branches that use the removed `CoordinatorShell`, coordinator global styles, `components/shared/status-chip.tsx` or `lib/api/events.ts` (SPM-174, SPM-177, SPM-33) must move to the shared shell. Verified implementation/database version: frontend `fix/main-completed-ticket-baseline` @ `502cc14` (not yet on main `229e56d`); backend `fix/main-completed-ticket-baseline` @ `f41a445` (not yet on main `a3f51c6`); verified with backend unit tests 342/342, auth/signup integration 64/64 (event and reassignment suites need `TEST_DATABASE_URL`), frontend lint, 8 unit tests, 29/29 browser journeys and the live seed-account run; PostgreSQL migration head `20261015121555` unchanged (the backend branch's own migration history ends at `20261008090000`; SPM-33 adds the rest); no MongoDB scripts |
 | 1.0 | 2026-10-14 | Release 1 baseline | Applied the customer's Session 3 answers and the team's remaining decisions; see "Changes from 0.8" at the top of this document. Lifecycle reordered to safety review → confirmed → preparation, with explicit "Start preparation" (5.2, 5.3); assignment moves events to `UNDER_REVIEW` and organisers can withdraw unassigned events (5.2); supervising Lead per event, Lead/Coordinator role exclusion, transfer requests, Lead handover and the deactivation rule (3.1, 5.8); per-booking time windows and a coordinator-chosen primary venue (5.4.2); setup/turnaround changes refused while future bookings exist (5.4.1); operating hours checked on the whole occupied range as a warning (5.4); hold limits (5.4.3); venue unavailability handled by restoration, replacement as a change request, or cancellation (5.4.4); per-venue safety rejection, organiser-visible comments and no automatic resets (5.9); simplified change workflow (5.7); registration open in `CONFIRMED` and `PREPARATION` and capped by the primary venue (5.6); organiser status labels (3.5). Also updated sections 3, 4.2, 6, 7.1, 8, 9.2, 11 and 12; removed the provisional decision gate (former 10.6). Jira request: none recorded (Customer Clarification Session 3; team decisions of 14 October 2026). Compatibility: changes 0.8 schema plans — event state order and check constraint; `events` gains supervising Lead, transfer request and previously-confirmed flag; new `event_supervision` table; `venue_bookings` gains a booking window and primary flag and drops stored setup/turnaround minutes and the main-space flag; `safety_reviews` gains organiser comments, internal notes and rejected booking IDs; `event_change_requests` simplified; `BUFFER_CONFLICT` incident type removed; role-exclusion trigger. No migrations or schema scripts written yet. Verified implementation/database version: none (documentation only) |
 | 0.8 | 2026-10-07 | Week 7 customer changes; MongoDB Atlas detail store; provisional decision gate | Applied the six Week 7 customer changes: configurable venue setup/turnaround time with occupied-range conflict checks and conflict flagging (5.4.1); venue blocks after booking with incidents and replacement (5.4.4); multiple venues per event (5.4.2); expiring tentative holds with in-transaction expiry (5.4.3); the Event Coordinator Lead role with an unassigned queue replacing round-robin assignment (5.8); and the Safety Officer role with the `SAFETY_REVIEW` and provisional `PREPARATION` states (5.2, 5.3, 5.9). Added MongoDB Atlas as a second data store for descriptive venue and equipment detail, with PostgreSQL remaining the system of record: rewrote section 1 (two stores, engines as backend modules, C4 alignment in 1.3); added `config/mongodb.js`, `mongodb/`, `jobs/` and detail/conflict/outbox models (2.2, 2.3); added Atlas prerequisites, environment variables and troubleshooting, and a new environment file check that reports only names and pass/fail (2.7.6; startup gate and troubleshooting renumbered to 2.7.7 and 2.7.8); split section 6 into PostgreSQL and MongoDB catalogues with cross-store rules (6.4, 6.5); added the outbox write path (7.3); added email/SMS delivery after commit (8); added the MongoDB MCP server and Atlas write rules (10.1–10.4). Also updated sections 3, 4.2, 4.3, 5, 9, 11, 12.1 and 12.2; added section 10.6 (provisional decision gate for Q1, Q3, Q4, Q6); recorded temporary baselines (including M1–M8), team decisions, resolved decisions (D01, D03, D06, D08) and superseded clarifications in 12.1. Jira request: none recorded (Week 7 Customer Changes document; team MongoDB setup). Compatibility: schema changes required in PostgreSQL (new `event_assignments`, `safety_reviews`, `outbox_entries` and `notification_deliveries` tables; new `venue_bookings` columns; descriptive venue and equipment fields move out of `venues` and `equipment`; occupied-range exclusion constraint replaces the event-interval constraint; one-primary-booking constraint removed; `staff_assignment_cursors` retired; seven roles) and a new MongoDB database `connectsphere_dev`. New backend variables `MONGODB_URI` and `MONGODB_DB_NAME`. No migrations or schema scripts written yet. Verified implementation/database version: none (documentation only) |
 | 0.7 | 2026-09-30 | Design reference gate added | Added section 10.5: a design reference gate for UI tasks covering Figma frame links, fallback to existing pages, developer override, purpose-based page URLs, design authority, follow-up prompts and the team design reference list. Added Figma to sections 10.1 and 10.2, made the gate step 1 of the section 9.2 ticket workflow and added design precedence to section 12.2. Jira request: none (direct developer request). Compatibility: documentation only; no code or database change |

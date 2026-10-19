@@ -270,7 +270,7 @@ describe("GET /api/events/mine (organiser data scoping)", () => {
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(byId.get(fixtures.events.ownSubmitted)).toEqual(expect.objectContaining({
       status: "SUBMITTED",
-      statusLabel: "Pending Approval",
+      statusLabel: "Submitted",
       isOwner: true,
     }));
     expect(byId.get(fixtures.events.ownDraft)).toEqual(expect.objectContaining({ status: "DRAFT", statusLabel: "Draft", isOwner: true }));

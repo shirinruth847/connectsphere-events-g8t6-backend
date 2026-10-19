@@ -1,3 +1,4 @@
+process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 // Route-level unit tests for SPM-35/SPM-37: real Express app, routes, middleware,
 // controller and validator. Only the model functions that reach Supabase are mocked.
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
@@ -6,6 +7,7 @@ jest.mock("../../model/eventModel", () => {
   const actual = jest.requireActual("../../model/eventModel");
   return {
     ...actual,
+    findRequestOptions: jest.fn(),
     saveDraft: jest.fn(),
     submitEvent: jest.fn(),
     findVisibleEvent: jest.fn(),
@@ -20,6 +22,7 @@ jest.mock("../../model/eventModel", () => {
 
 const request = require("supertest");
 const app = require("../../server");
+const supabase = require("../../config/supabase");
 const userModel = require("../../model/userModel");
 const eventModel = require("../../model/eventModel");
 const { MESSAGES } = require("../../validators/eventValidator");
@@ -79,6 +82,8 @@ const ROUTES = [
   ["post", "/api/events/drafts"],
   ["get", "/api/events/mine"],
   ["get", "/api/events/42"],
+  ["get", "/api/events/42/history"],
+  ["put", "/api/events/42"],
   ["put", "/api/events/42/draft"],
   ["put", "/api/events/42/submit"],
 ];
@@ -105,22 +110,41 @@ describe("authentication and role checks", () => {
         const res = await send(method, path, method === "patch" ? { coordinatorId: 7 } : undefined);
 
         expect(res.status).toBe(200);
+        if (method === "patch") {
+          expect(eventModel.assignCoordinator).toHaveBeenCalledWith({
+            eventId: 42,
+            coordinatorId: 7,
+            leadId: ORGANISER_ID,
+          });
+        }
       }
     );
+
+    test("a regular coordinator cannot reassign an event", async () => {
+      signedInAs("COORDINATOR");
+
+      const res = await send("patch", "/api/events/42/coordinator", {
+        coordinatorId: 8,
+        expectedCoordinatorId: 7,
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("FORBIDDEN");
+      expect(supabase.rpc).not.toHaveBeenCalled();
+    });
 
     test("should_list_unassigned_requests_for_a_coordinator_lead", async () => {
       signedInAs("COORDINATOR_LEAD");
       eventModel.findUnassignedSubmittedEvents.mockResolvedValue([
         {
-          eventId: 42,
-          requestId: "REQ-000042",
+          event_id: 42,
           status: "SUBMITTED",
           title: "SMU Alumni Gala 2026",
-          startDatetime: "2026-11-01T09:00:00.000Z",
-          endDatetime: "2026-11-01T10:00:00.000Z",
-          expectedAttendance: 100,
-          organisation: { organisationId: 11, name: "Org A" },
-          createdAt: "2026-10-07T07:14:14.406209+00:00",
+          start_datetime: "2026-11-01T09:00:00.000Z",
+          end_datetime: "2026-11-01T10:00:00.000Z",
+          expected_attendance: 100,
+          organisation: { organisation_id: 11, name: "Org A" },
+          created_at: "2026-10-07T07:14:14.406209+00:00",
         },
       ]);
 
@@ -144,7 +168,11 @@ describe("authentication and role checks", () => {
       expect(res.body.event).toEqual(
         expect.objectContaining({ eventId: 42, status: "SUBMITTED" })
       );
-      expect(eventModel.assignCoordinator).toHaveBeenCalledWith({ eventId: 42, coordinatorId: 7 });
+      expect(eventModel.assignCoordinator).toHaveBeenCalledWith({
+        eventId: 42,
+        coordinatorId: 7,
+        leadId: ORGANISER_ID,
+      });
     });
 
     test("should_reject_an_invalid_coordinator_id_before_assignment", async () => {
@@ -192,7 +220,7 @@ describe("authentication and role checks", () => {
 });
 
 describe("POST /api/events (SPM-35)", () => {
-  test("[SPM-35-TC-001] should_return_201_with_request_id_and_pending_approval_when_request_is_valid", async () => {
+  test("[SPM-35-TC-001] should_return_201_with_request_id_and_submitted_label_when_request_is_valid", async () => {
     eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED", title: "Tech Conference 2026" }), replayed: false });
 
     const res = await send("post", "/api/events", validRequest(), { "Idempotency-Key": KEY });
@@ -200,7 +228,13 @@ describe("POST /api/events (SPM-35)", () => {
     expect(res.status).toBe(201);
     expect(res.body.message).toBe("Your event request has been submitted successfully.");
     expect(res.body.event).toEqual(
-      expect.objectContaining({ eventId: 42, requestId: "REQ-000042", status: "SUBMITTED", statusLabel: "Pending Approval" })
+      expect.objectContaining({
+        eventId: 42,
+        requestId: "REQ-000042",
+        status: "SUBMITTED",
+        statusLabel: "Submitted",
+        statusNote: "Waiting for a coordinator",
+      })
     );
     expect(res.headers["idempotent-replayed"]).toBeUndefined();
     expect(eventModel.submitEvent).toHaveBeenCalledWith(
@@ -336,14 +370,14 @@ describe("POST /api/events/drafts (SPM-37)", () => {
 
 describe("PUT /api/events/:id/draft (SPM-37)", () => {
   test("[SPM-37-S3] should_auto_save_with_the_auto_save_flag_and_message", async () => {
-    eventModel.findOwnEvent.mockResolvedValue(eventRow());
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     eventModel.saveDraft.mockResolvedValue({ event: eventRow({ expected_attendance: 200 }), replayed: false });
 
     const res = await send("put", "/api/events/42/draft", { expectedAttendance: 200, isAutoSave: true });
 
     expect(res.status).toBe(200);
     expect(res.body.message).toBe("Draft auto-saved.");
-    expect(eventModel.findOwnEvent).toHaveBeenCalledWith(42, ORGANISER_ID);
+    expect(eventModel.findVisibleEvent).toHaveBeenCalledWith(42, expect.objectContaining({ user_id: ORGANISER_ID }));
     expect(eventModel.saveDraft).toHaveBeenCalledWith(
       expect.objectContaining({ eventId: 42, isAutoSave: true, input: { expectedAttendance: 200 } })
     );
@@ -356,12 +390,12 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
 
       expect(res.status).toBe(404);
       expect(res.body.code).toBe("EVENT_NOT_FOUND");
-      expect(eventModel.findOwnEvent).not.toHaveBeenCalled();
+      expect(eventModel.findVisibleEvent).not.toHaveBeenCalled();
     }
   );
 
   test("[TC-AUTH-013] should_return_404_when_the_draft_belongs_to_another_organiser", async () => {
-    eventModel.findOwnEvent.mockResolvedValue(null);
+    eventModel.findVisibleEvent.mockResolvedValue(null);
 
     const res = await send("put", "/api/events/42/draft", { title: "Gala" });
 
@@ -369,16 +403,23 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
     expect(eventModel.saveDraft).not.toHaveBeenCalled();
   });
 
-  test("[SPM-37-S2] should_return_409_when_the_request_is_no_longer_a_draft", async () => {
-    eventModel.findOwnEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
+  // SPM-33 AC3 replaces the earlier 409 EVENT_NOT_DRAFT on this route.
+  test("[SPM-37-S2] should_return_403_pointing_to_a_change_request_when_the_request_is_no_longer_a_draft", async () => {
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));
 
     const res = await send("put", "/api/events/42/draft", { title: "Gala" });
 
-    expect(res.status).toBe(409);
-    expect(res.body).toEqual({ error: "Only draft requests can be changed or submitted.", code: "EVENT_NOT_DRAFT" });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({
+      error: "A submitted request cannot be edited directly. Request a change instead.",
+      code: "EDIT_REQUIRES_CHANGE_REQUEST",
+    });
+    expect(eventModel.saveDraft).not.toHaveBeenCalled();
   });
 
   test("[SPM-37-S3] should_return_400_when_the_auto_save_flag_is_not_boolean", async () => {
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow());
+
     const res = await send("put", "/api/events/42/draft", { title: "Gala", isAutoSave: "yes" });
 
     expect(res.status).toBe(400);
@@ -386,7 +427,7 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
   });
 
   test("[SPM-37-S1] should_validate_the_merged_draft_when_a_change_conflicts_with_saved_values", async () => {
-    eventModel.findOwnEvent.mockResolvedValue(
+    eventModel.findVisibleEvent.mockResolvedValue(
       eventRow({ start_datetime: "2026-11-01T09:00:00+00:00", end_datetime: "2026-11-01T17:00:00+00:00" })
     );
 
@@ -417,7 +458,7 @@ describe("PUT /api/events/:id/submit (SPM-37)", () => {
     const res = await send("put", "/api/events/42/submit", validRequest());
 
     expect(res.status).toBe(200);
-    expect(res.body.event.statusLabel).toBe("Pending Approval");
+    expect(res.body.event.statusLabel).toBe("Submitted");
     expect(eventModel.submitEvent).toHaveBeenCalledWith(expect.objectContaining({ eventId: 42, organiserId: ORGANISER_ID }));
   });
 });
@@ -468,5 +509,21 @@ describe("GET /api/events/:id and /mine", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.fields).toEqual({ cursor: "Invalid page cursor." });
+  });
+});
+
+
+describe("SPM-35 request catalogue", () => {
+  test("returns names and layout choices to an organiser without writing", async () => {
+    eventModel.findRequestOptions.mockResolvedValue({ venues: [{ venueId: 1, name: "Main Hall" }], layouts: ["NO_PREFERENCE", "THEATRE"] });
+    const res = await send("get", "/api/events/request-options");
+    expect(res.status).toBe(200);
+    expect(res.body.venues).toEqual([{ venueId: 1, name: "Main Hall" }]);
+    expect(eventModel.saveDraft).not.toHaveBeenCalled();
+  });
+  test.each(["ATTENDEE", "COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT"])("denies request options to %s", async role => {
+    signedInAs(role);
+    expect((await send("get", "/api/events/request-options")).status).toBe(403);
+    expect(eventModel.findRequestOptions).not.toHaveBeenCalled();
   });
 });

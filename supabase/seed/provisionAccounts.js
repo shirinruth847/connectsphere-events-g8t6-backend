@@ -130,8 +130,8 @@ const provision = async () => {
   console.log(`Accounts ready (namespace "${NAMESPACE}"). The password is SEED_ACCOUNT_PASSWORD from .env.`);
 };
 
-// Removes only what the manifest lists. Profiles referenced by events or
-// registrations are kept and reported rather than force-deleted.
+// Removes only what the manifest lists. Profiles referenced by events,
+// registrations or change history are kept and reported rather than force-deleted.
 const cleanup = async () => {
   const manifest = loadManifest();
   const failures = [];
