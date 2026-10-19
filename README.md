@@ -44,6 +44,8 @@ Returns:
 
 These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it, because SPM-33's coordinator view needs assigned events.
 
+The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/discovery/:id` (SPM-34), require an `ATTENDEE` bearer token instead.
+
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
 | `POST /api/events` | Event fields; `Idempotency-Key` header | `201 { message, event }`, status `SUBMITTED` | `400 VALIDATION_FAILED`, `409 NO_ELIGIBLE_COORDINATOR`, `409 IDEMPOTENCY_KEY_REUSED` |
