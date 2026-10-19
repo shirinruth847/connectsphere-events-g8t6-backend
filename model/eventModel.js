@@ -2,7 +2,16 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
-const { NO_LAYOUT_PREFERENCE, STATUS_LABELS } = require("../config/eventConstants");
+const {
+  EVENT_STATUS,
+  NO_LAYOUT_PREFERENCE,
+  STATUS_LABELS,
+  STATUS_NOTES,
+  EVENT_RELATIONSHIP,
+  HISTORY_AUDIENCE,
+  EVENT_FIELD_GROUPS,
+  COORDINATOR_EDITABLE_STATUSES,
+} = require("../config/eventConstants");
 const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
 
 // Allowlist: the ONLY fields a client may set. status, organiser_id, coordinator_id etc.
@@ -26,6 +35,8 @@ const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS])
 const EVENT_SELECT =
   "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
+// The assigned coordinator's view also names the organiser they are working with.
+const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
 const LIST_SELECT =
   "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
 
@@ -37,8 +48,11 @@ const MAX_LOOKUP_IDS = 50;
 
 // ---------- input mapping ----------
 
-const getUnsupportedInputFields = (body = {}, { allowAutoSave = false } = {}) =>
-  Object.keys(body).filter((key) => !INPUT_FIELDS.has(key) && !(allowAutoSave && key === "isAutoSave"));
+const getUnsupportedInputFields = (body = {}, { allowAutoSave = false, allowVersion = false } = {}) =>
+  Object.keys(body).filter(
+    (key) =>
+      !INPUT_FIELDS.has(key) && !(allowAutoSave && key === "isAutoSave") && !(allowVersion && key === "version")
+  );
 
 const pickEventInput = (body = {}) => {
   const input = {};
@@ -77,15 +91,28 @@ const toRequirementPayload = (input) => ({
 });
 
 // Identical normalized input gives an identical hash, whatever the JSON key order was.
-const hashRequest = (row, requirements) =>
+// Updates add the event and the version they were made against as scope, so a key
+// reused for another event or another edit is reported instead of replayed.
+const hashRequest = (row, requirements, scope = []) =>
   crypto
     .createHash("sha256")
-    .update(JSON.stringify([row, requirements.venuePreferences ?? null, requirements.equipmentRequirements ?? null]))
+    .update(
+      JSON.stringify([row, requirements.venuePreferences ?? null, requirements.equipmentRequirements ?? null, ...scope])
+    )
     .digest("hex");
 
 // ---------- output mapping ----------
 
 const formatRequestId = (eventId) => `REQ-${String(eventId).padStart(6, "0")}`;
+
+// What a request is waiting for, when that is worth telling the organiser. A
+// submitted request waits in the unassigned queue until a Lead assigns it; a
+// request awaiting clarification waits for the organiser.
+const toStatusNote = (row) => {
+  if (row.status === EVENT_STATUS.SUBMITTED && row.coordinator_id == null) return STATUS_NOTES.WAITING_FOR_COORDINATOR;
+  if (row.status === EVENT_STATUS.AWAITING_CLARIFICATION) return STATUS_NOTES.RETURNED_FOR_ACTION;
+  return null;
+};
 
 const parseAccessibility = (value) => {
   if (typeof value !== "string" || !value.startsWith("[")) return value;
@@ -107,6 +134,7 @@ const toApi = (row, viewerUserId) => {
     requestId: formatRequestId(row.event_id),
     status: row.status,
     statusLabel: STATUS_LABELS[row.status] || row.status,
+    statusNote: toStatusNote(row),
     title: row.title,
     purpose: row.purpose,
     description: row.description,
@@ -131,17 +159,40 @@ const toApi = (row, viewerUserId) => {
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // Sent back as "version" when saving, to detect a save over someone else's change.
+    ...(row.version === undefined ? {} : { version: row.version }),
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
     isAssignedToCoordinator: row.coordinator_id != null,
     ...(viewerUserId === undefined ? {} : { isOwner: row.organiser_id === viewerUserId }),
   };
 };
 
+// The event as one signed-in user may see it (SPM-33 AC1). "access" comes from
+// getEventAccess; permissions tell the interface which controls to offer and are
+// enforced again on every save.
+const toEventView = (row, user, access) => ({
+  ...toApi(row, user.user_id),
+  ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
+    ? {
+        coordinatorId: row.coordinator_id,
+        organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
+      }
+    : {}),
+  viewerRelationship: access.relationship,
+  permissions: {
+    canEdit: access.canEdit,
+    editableFields: access.editableFields,
+    canViewDraftHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.OWNER_ONLY),
+    canViewStaffHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.STAFF_ONLY),
+  },
+});
+
 const toListItem = (row, viewerUserId) => ({
   eventId: row.event_id,
   requestId: formatRequestId(row.event_id),
   status: row.status,
   statusLabel: STATUS_LABELS[row.status] || row.status,
+  statusNote: toStatusNote(row),
   title: row.title,
   startDatetime: row.start_datetime,
   endDatetime: row.end_datetime,
@@ -171,6 +222,9 @@ const DOMAIN_CODES = new Set([
   "IDEMPOTENCY_KEY_REQUIRED",
   "IDEMPOTENCY_KEY_REUSED",
   "IDEMPOTENCY_IN_PROGRESS",
+  "EVENT_VERSION_CONFLICT",
+  "EVENT_NOT_EDITABLE_IN_STATUS",
+  "FIELD_NOT_EDITABLE",
 ]);
 
 // submit_event_request reports "<field>:<reason>" pairs in the error detail.
@@ -189,6 +243,27 @@ const SUBMISSION_FAILURES = Object.freeze({
   "registrationCapacity:REQUIRED": MESSAGES.registrationCapacityRequired,
   "registrationCapacity:INVALID": MESSAGES.registrationCapacityInvalid,
 });
+
+// update_event_details reports the same "<field>:<reason>" pairs.
+const DETAILS_FAILURES = Object.freeze({
+  "title:REQUIRED": MESSAGES.titleRequired,
+  "title:INVALID": MESSAGES.textInvalid,
+  "title:TOO_LONG": MESSAGES.titleTooLong,
+  "purpose:REQUIRED": MESSAGES.purposeRequired,
+  "purpose:INVALID": MESSAGES.textInvalid,
+  "purpose:TOO_LONG": MESSAGES.purposeTooLong,
+  "description:REQUIRED": MESSAGES.descriptionRequired,
+  "description:INVALID": MESSAGES.textInvalid,
+  "description:TOO_LONG": MESSAGES.descriptionTooLong,
+});
+
+const toFieldErrors = (details, messages) => {
+  const fields = {};
+  for (const failure of String(details || "").split(",")) {
+    if (messages[failure]) fields[failure.split(":")[0]] = messages[failure];
+  }
+  return fields;
+};
 
 const RPC_FIELD_ERRORS = Object.freeze({
   DRAFT_TITLE_REQUIRED: { title: MESSAGES.titleRequired },
@@ -214,11 +289,10 @@ const toEventRequestError = (error) => {
 
   if (DOMAIN_CODES.has(message)) return eventRequestError(message);
   if (message === "INVALID_EVENT_SUBMISSION") {
-    const fields = {};
-    for (const failure of String(error.details || "").split(",")) {
-      if (SUBMISSION_FAILURES[failure]) fields[failure.split(":")[0]] = SUBMISSION_FAILURES[failure];
-    }
-    return eventRequestError("VALIDATION_FAILED", fields);
+    return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, SUBMISSION_FAILURES));
+  }
+  if (message === "INVALID_EVENT_DETAILS") {
+    return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, DETAILS_FAILURES));
   }
   if (RPC_FIELD_ERRORS[message]) return eventRequestError("VALIDATION_FAILED", RPC_FIELD_ERRORS[message]);
 
@@ -254,10 +328,20 @@ const callEventRpc = async (name, args) => {
   };
 };
 
-// Creating a draft (eventId null) needs an idempotency key; updates are naturally idempotent.
-const saveDraft = async ({ organiserId, eventId = null, input, isAutoSave = false, idempotencyKey = null }) => {
+// Creating a draft (eventId null) needs an idempotency key. On an update the key
+// and the expected version are optional: a key stops a retried manual save from
+// writing a second history entry, and a version blocks a save over a newer one.
+const saveDraft = async ({
+  organiserId,
+  eventId = null,
+  input,
+  isAutoSave = false,
+  idempotencyKey = null,
+  expectedVersion = null,
+}) => {
   const row = toRow(input);
   const requirements = toRequirementPayload(input);
+  const scope = eventId === null ? [] : [eventId, expectedVersion];
   return callEventRpc("save_event_draft", {
     p_organiser_id: organiserId,
     p_event_id: eventId,
@@ -266,7 +350,28 @@ const saveDraft = async ({ organiserId, eventId = null, input, isAutoSave = fals
     p_equipment_requirements: requirements.equipmentRequirements ?? null,
     p_is_auto_save: isAutoSave,
     p_idempotency_key: idempotencyKey,
-    p_request_hash: idempotencyKey ? hashRequest(row, requirements) : null,
+    p_request_hash: idempotencyKey ? hashRequest(row, requirements, scope) : null,
+    ...(expectedVersion === null ? {} : { p_expected_version: expectedVersion }),
+  });
+};
+
+// SPM-33 AC4: the assigned coordinator's direct edit of ordinary fields. The
+// database rechecks assignment, status and version under the event row lock,
+// so a coordinator reassigned away a moment ago cannot save.
+const updateEventDetails = async ({ actorId, eventId, input, expectedVersion, idempotencyKey }) => {
+  const changes = {};
+  for (const field of EVENT_FIELD_GROUPS.ORDINARY) {
+    const value = input[field];
+    if (value !== undefined) changes[FIELD_MAP[field]] = typeof value === "string" ? value.trim() : value;
+  }
+  return callEventRpc("update_event_details", {
+    p_actor_id: actorId,
+    p_event_id: eventId,
+    p_changes: changes,
+    p_expected_version: expectedVersion,
+    p_editable_statuses: [...COORDINATOR_EDITABLE_STATUSES],
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest(changes, {}, [eventId, expectedVersion]),
   });
 };
 
@@ -300,8 +405,12 @@ const buildOrganiserVisibilityFilter = (user) => {
   return `${ownRequests},and(organisation_id.in.(${organisationIds.join(",")}),status.neq.DRAFT)`;
 };
 
+// One read for every role (SPM-33 AC1, SPM-180 AC3): returns the row only when it is
+// inside the user's viewing scope, so callers answer "not found" for everything else.
+// Venue Staff, Technical Support, Leads and attendees have no scope through this view.
 const findVisibleEvent = async (eventId, user) => {
-  let query = supabase.from("event").select(EVENT_SELECT).eq("event_id", eventId);
+  const select = user.role === "COORDINATOR" ? COORDINATION_SELECT : EVENT_SELECT;
+  let query = supabase.from("event").select(select).eq("event_id", eventId);
   if (user.role === "COORDINATOR") {
     query = query.eq("coordinator_id", user.user_id).neq("status", "DRAFT");
   } else if (user.role === "ORGANISER") {
@@ -498,7 +607,7 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
   };
 };
 
-// Edits are owner-only, so a colleague's visible request is "not found" here.
+// Submitting is owner-only, so a colleague's visible request is "not found" here.
 const findOwnEvent = async (eventId, organiserId) => {
   const { data, error } = await supabase
     .from("event")
@@ -602,18 +711,38 @@ const findValidationContext = async (input) => {
   };
 };
 
+// Request creation only needs catalogue names/IDs and supported layouts.
+// This read does not reserve a venue or expose internal venue planning data.
+const findRequestOptions = async () => {
+  const [venues, rooms] = await Promise.all([
+    supabase.from("venue").select("venue_id,name").order("name", { ascending: true }),
+    supabase.from("room").select("layout_type"),
+  ]);
+  for (const result of [venues, rooms]) if (result.error) throw dbError(result.error);
+  return {
+    venues: venues.data.map(row => ({ venueId: row.venue_id, name: row.name })),
+    layouts: [...new Set([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)])].filter(Boolean),
+  };
+};
+
 module.exports = {
+  findRequestOptions,
   getUnsupportedInputFields,
   pickEventInput,
   toRow,
   toApi,
+  toEventView,
   toListItem,
   formatRequestId,
+  toStatusNote,
+  parseAccessibility,
+  eventRequestError,
   hashRequest,
   toRequirementPayload,
   toEventRequestError,
   saveDraft,
   submitEvent,
+  updateEventDetails,
   buildOrganiserVisibilityFilter,
   findVisibleEvent,
   findCoordinatorEvents,

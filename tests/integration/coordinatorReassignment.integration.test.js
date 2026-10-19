@@ -1,3 +1,4 @@
+process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 // SPM-180 acceptance test against real Supabase Auth, PostgREST and RPC.
 // Auth fixtures and all event data are namespaced and removed after the run.
 const request = require("supertest");
@@ -41,6 +42,7 @@ const eventRow = (eventId) => rows(
 );
 
 beforeAll(async () => {
+  await require("../fixtures/adminCleanup").assertAuditCleanupAvailable();
   fixtures = await createAuthFixtures(runId);
 });
 
