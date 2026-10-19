@@ -448,8 +448,9 @@ const findVisibleEvent = async (eventId, user) => {
   }
   const { data, error } = await query.maybeSingle();
   if (error) throw dbError(error);
-  if (!data) return null;
-  return toListItem(data, user && user.user_id);
+  // Authorization middleware needs the relationship identifiers on the row.
+  // Do not reduce this to a public list item before it derives access.
+  return data;
 };
 
 const findCoordinatorEvents = async (coordinatorId) => {
