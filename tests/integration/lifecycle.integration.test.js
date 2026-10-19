@@ -349,10 +349,12 @@ describe("SPM-173 coordinator actions through the API", () => {
     createdEventIds.push(eventId);
     recordFixtureIds(runId, "eventIds", [eventId]);
 
+    // One receipt shared by the owner and every active Lead (SPM-36 shape).
     const { data } = await supabase.from("notification").select("title,notification_recipient(recipient_id)").eq("event_id", eventId);
-    const recipientsByTitle = Object.fromEntries(data.map((row) => [row.title, row.notification_recipient.map((r) => r.recipient_id)]));
-    expect(recipientsByTitle["Event request received"]).toEqual([userId("organiserA")]);
-    expect(recipientsByTitle["New event request in the queue"]).toContain(userId("coordinatorLead"));
+    expect(data.map(({ title }) => title)).toEqual(["Event request received"]);
+    const { data: leads } = await supabase.from("user").select("user_id").eq("role", "COORDINATOR_LEAD").eq("is_active", true);
+    expect(data[0].notification_recipient.map(({ recipient_id }) => recipient_id).sort((a, b) => a - b))
+      .toEqual([userId("organiserA"), ...leads.map(({ user_id }) => user_id)].sort((a, b) => a - b));
   });
 
   test("[SPM-173-TC-10] the organiser filters by label", async () => {
