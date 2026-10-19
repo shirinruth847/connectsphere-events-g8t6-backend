@@ -619,6 +619,37 @@ const findOwnEvent = async (eventId, organiserId) => {
   return data;
 };
 
+// SPM-41 clarification rounds. The two user joins are named by foreign key
+// because the table references "user" twice.
+const CLARIFICATION_SELECT =
+  "clarification_id,round_number,status,message,requested_at,requested_by,response,responded_at,responded_by," +
+  "requester:user!clarifications_requested_by_fkey(name),responder:user!clarifications_responded_by_fkey(name)";
+
+const toClarification = (row) => ({
+  clarificationId: row.clarification_id,
+  round: row.round_number,
+  status: row.status,
+  message: row.message,
+  requestedAt: row.requested_at,
+  requestedBy: { userId: row.requested_by, name: row.requester ? row.requester.name : null },
+  response: row.response ?? null,
+  respondedAt: row.responded_at ?? null,
+  respondedBy:
+    row.responded_by == null ? null : { userId: row.responded_by, name: row.responder ? row.responder.name : null },
+});
+
+// Every round for one event, newest first. Callers check that the reader may see
+// the event; every relationship that can see it may read its rounds (SPM-41).
+const findEventClarifications = async (eventId) => {
+  const { data, error } = await supabase
+    .from("clarifications")
+    .select(CLARIFICATION_SELECT)
+    .eq("event_id", eventId)
+    .order("round_number", { ascending: false });
+  if (error) throw dbError(error);
+  return data.map(toClarification);
+};
+
 // PostgREST timestamptz text, e.g. 2026-10-07T07:14:14.406209+00:00. The cursor keeps the
 // exact text: converting through Date would drop microseconds and skip or repeat rows.
 const CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::\d{2})?)$/;
@@ -752,6 +783,8 @@ module.exports = {
   assignCoordinator,
   reassignCoordinator,
   findOwnEvent,
+  findEventClarifications,
+  toClarification,
   findOrganiserEventRequests,
   encodeCursor,
   decodeCursor,

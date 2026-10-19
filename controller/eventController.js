@@ -358,6 +358,18 @@ const getEventHistory = async (req, res, next) => {
   }
 };
 
+// SPM-41: the owner, same-organisation organisers (read-only) and the assigned
+// coordinator all see the questions and responses; requireVisibleEvent has
+// already answered "not found" for anyone else.
+const getEventClarifications = async (req, res, next) => {
+  try {
+    const clarifications = await eventModel.findEventClarifications(req.visibleEvent.eventId);
+    return res.status(200).json({ clarifications });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
 const listAssignedEvents = async (req, res, next) => {
   try {
     const events = await eventModel.findCoordinatorEvents(req.user.user_id);
@@ -468,6 +480,7 @@ module.exports = {
   listMyEventRequests,
   getEventRequest,
   getEventHistory,
+  getEventClarifications,
   listAssignedEvents,
   assignCoordinator,
   listLeadAssignments,

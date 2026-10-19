@@ -11,6 +11,7 @@ const {
   listMyEventRequests,
   getEventRequest,
   getEventHistory,
+  getEventClarifications,
   listAssignedEvents,
   assignCoordinator,
   listLeadAssignments,
@@ -49,6 +50,7 @@ if (process.env.ENABLE_COORDINATOR_WORKFLOWS === "true") {
 }
 router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
+router.get("/:id/clarifications", anySignedInUser, requireVisibleEvent, getEventClarifications);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
 router.put("/:id/draft", organiserOnly, requireVisibleEvent, updateDraft);
