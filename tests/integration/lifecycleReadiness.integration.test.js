@@ -1,7 +1,7 @@
 process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 // SPM-173 readiness, submit for safety review and confirmation (AC8-AC10).
 // Needs every SPM-173 migration INCLUDING the Master resource tables
-// (20261019100300 and 20261019100400), which are applied only after the
+// (supabase/drafts/20261019100300 and 20261019100400), which are applied only after the
 // SPM-179/SPM-186 owners agree, plus TEST_DATABASE_URL.
 const crypto = require("crypto");
 const request = require("supertest");
