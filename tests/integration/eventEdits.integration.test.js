@@ -89,12 +89,14 @@ const inDays = (days) => new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISO
 const setStatus = (eventId, status) =>
   rows(supabase.from("event").update({ status }).eq("event_id", eventId).like("title", `spm32-${runId}%`).select("event_id"), `set ${status}`);
 
+// The fixtures record coordinatorLead as each event's supervising Lead, and only
+// that Lead may reassign (SPM-174).
 const reassign = (eventId, fromKey, toKey) =>
   supabase.rpc("reassign_event_coordinator", {
     p_event_id: eventId,
     p_coordinator_id: userId(toKey),
     p_expected_coordinator_id: userId(fromKey),
-    p_lead_id: userId("lead"),
+    p_lead_id: userId("coordinatorLead"),
   });
 
 const loadEvent = async (key, eventId) => {
@@ -111,10 +113,7 @@ const historyFor = async (key, eventId) => {
 
 beforeAll(async () => {
   fixtures = await createAuthFixtures(runId, {
-    extraAccounts: [
-      { key: "coordinator2", role: "COORDINATOR" },
-      { key: "lead", role: "COORDINATOR_LEAD" },
-    ],
+    extraAccounts: [{ key: "coordinator2", role: "COORDINATOR" }],
   });
 });
 
@@ -650,7 +649,7 @@ describe("assigned coordinator edits (AC4-AC8)", () => {
   test("[SPM-33-TC-19] should_hide_the_reassignment_record_from_the_owner_but_not_the_coordinator", async () => {
     const stored = await storedHistory(eventId);
     expect(stored.filter(({ action }) => action === "COORDINATOR_REASSIGNED")).toEqual([
-      expect.objectContaining({ audience: "STAFF_ONLY", actor_role: "COORDINATOR_LEAD", user_id: userId("lead") }),
+      expect.objectContaining({ audience: "STAFF_ONLY", actor_role: "COORDINATOR_LEAD", user_id: userId("coordinatorLead") }),
     ]);
 
     const ownerResponse = await call("get", `/api/events/${eventId}/history?limit=100`, "organiserA");
