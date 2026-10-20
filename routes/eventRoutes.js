@@ -28,10 +28,6 @@ const { USER_ROLES } = require("../config/roles");
 const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
 const coordinatorOnly = [requireAuth, requireRole(USER_ROLES.COORDINATOR)];
 const leadOnly = [requireAuth, requireRole(USER_ROLES.COORDINATOR_LEAD)];
-const coordinatorOperations = [
-  requireAuth,
-  requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD),
-];
 // No role gate on these: requireVisibleEvent answers "not found" unless the event is
 // inside the user's viewing scope, rather than a role error that confirms it exists
 // (SPM-33). It runs last in each chain, so earlier checks keep their precedence.
@@ -44,14 +40,13 @@ router.get("/request-options", organiserOnly, getRequestOptions);
 router.get("/mine", organiserOnly, validateCursorPagination, listMyEventRequests); // must stay above "/:id"
 // Pending coordinator workflows are opt-in on this completed-ticket baseline.
 if (process.env.ENABLE_COORDINATOR_WORKFLOWS === "true") {
-  // SPM-177 lets coordinators and Leads inspect the queue and available schedules.
-  router.get("/unassigned", coordinatorOperations, listUnassignedEvents); // must stay above "/:id"
-  router.get("/coordinator-availability", coordinatorOperations, getCoordinatorAvailability);
+  // Queue, cross-coordinator schedules and assignment are Lead-only.
+  router.get("/unassigned", leadOnly, listUnassignedEvents); // must stay above "/:id"
+  router.get("/coordinator-availability", leadOnly, getCoordinatorAvailability);
   router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/:id"
   router.post("/:id/coordinator", leadOnly, assignCoordinator);
-  // PATCH assigns an unassigned event for coordinators or Leads; only Leads may
-  // reassign an event by including expectedCoordinatorId.
-  router.patch("/:id/coordinator", coordinatorOperations, patchCoordinator);
+  // PATCH assigns an unassigned request, or reassigns with expectedCoordinatorId.
+  router.patch("/:id/coordinator", leadOnly, patchCoordinator);
 } else {
   router.all(["/unassigned", "/coordinator-availability", "/assignments", "/:id/coordinator"], (req, res) => res.status(404).json({ error: "Not found.", code: "NOT_FOUND" }));
 }

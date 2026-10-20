@@ -97,28 +97,21 @@ describe("authentication and role checks", () => {
   });
 
   describe("[SPM-174] coordinator lead assignment routes", () => {
-    test.each(["get", "patch"])(
-      "should_allow_a_regular_coordinator_to_call_the_%s_route",
-      async (method) => {
-        signedInAs("COORDINATOR");
-        const path = method === "get" ? "/api/events/unassigned" : "/api/events/42/coordinator";
-        if (method === "get") {
-          eventModel.findUnassignedSubmittedEvents.mockResolvedValue([]);
-        } else {
-          eventModel.assignCoordinator.mockResolvedValue(eventRow({ status: "SUBMITTED", coordinator_id: 7 }));
-        }
-        const res = await send(method, path, method === "patch" ? { coordinatorId: 7 } : undefined);
-
-        expect(res.status).toBe(200);
-        if (method === "patch") {
-          expect(eventModel.assignCoordinator).toHaveBeenCalledWith({
-            eventId: 42,
-            coordinatorId: 7,
-            leadId: ORGANISER_ID,
-          });
-        }
-      }
-    );
+    test.each([
+      ["get", "/api/events/unassigned"],
+      ["get", "/api/events/coordinator-availability"],
+      ["patch", "/api/events/42/coordinator"],
+      ["post", "/api/events/42/coordinator"],
+    ])("[SPM-177 AC4] denies a regular Coordinator %s %s", async (method, path) => {
+      signedInAs("COORDINATOR");
+      const res = await send(method, path, method === "get" ? undefined : { coordinatorId: 7 });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("FORBIDDEN");
+      expect(eventModel.findUnassignedSubmittedEvents).not.toHaveBeenCalled();
+      expect(eventModel.findCoordinatorAvailability).not.toHaveBeenCalled();
+      expect(eventModel.assignCoordinator).not.toHaveBeenCalled();
+      expect(supabase.rpc).not.toHaveBeenCalled();
+    });
 
     test("a regular coordinator cannot reassign an event", async () => {
       signedInAs("COORDINATOR");

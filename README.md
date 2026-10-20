@@ -42,9 +42,9 @@ Returns:
 
 ### Event Requests (SPM-35, SPM-37)
 
-These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Coordinator queue and initial assignment routes, plus Lead assignment and reassignment routes, exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it because SPM-33's coordinator view needs assigned events.
+These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, initial assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it because SPM-33's coordinator view needs assigned events.
 
-When `ENABLE_COORDINATOR_WORKFLOWS=true`, coordinators and Leads can use `GET /api/events/unassigned` and `GET /api/events/coordinator-availability`. Either role can initially assign a queued request with `PATCH /api/events/:id/coordinator` and `{ "coordinatorId": number }`. Only Leads can use the assignment workspace or reassign an event; reassignment uses `PATCH` with both `coordinatorId` and `expectedCoordinatorId`, while the legacy Lead assignment endpoint is `POST /api/events/:id/coordinator`.
+When `ENABLE_COORDINATOR_WORKFLOWS=true`, only active Coordinator Leads can read `/api/events/unassigned`, read `/api/events/coordinator-availability`, or initially assign with `PATCH /api/events/:id/coordinator` and `{ "coordinatorId": number }`. `POST` remains the Lead-only initial-assignment compatibility endpoint. Reassignment uses `PATCH` with `coordinatorId` and `expectedCoordinatorId`.
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
@@ -61,7 +61,7 @@ When `ENABLE_COORDINATOR_WORKFLOWS=true`, coordinators and Leads can use `GET /a
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
 - **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the organiser's receipt notification in one database transaction (`submit_event_request`). The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
-- **Assignment** (`PATCH /api/events/:id/coordinator` for a Coordinator or Lead, or `POST /api/events/:id/coordinator` for a Lead) takes a request from the queue. When the opt-in workflows are enabled, one transaction (`assign_event_coordinator`) sets the coordinator, moves the request from `SUBMITTED` to `UNDER_REVIEW` (Master section 5.2), records the staff-only history entry `COORDINATOR_ASSIGNED` and notifies the organiser and coordinator. A follow-up migration permits active coordinators to make this initial assignment and records the assigning actor's actual role.
+- **Assignment** (`PATCH` or `POST /api/events/:id/coordinator`, Lead only) sets the coordinator and supervising Lead, enters `UNDER_REVIEW`, records staff-only assignment history/activity and notifies the organiser and coordinator in one transaction. Apply `20261020090000_spm177_lead_only_assignment.sql` after its reviewed prerequisites; it restores Lead-only RPC authorization and drops the obsolete two-argument overload without changing business rows. Normal authorized event details return `coordinatorName` (name or null) as the point of contact.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
@@ -297,7 +297,7 @@ Existing event write/validation contracts are preserved. Request creation gains
 an organiser-only, read-only `GET /api/events/request-options` response containing
 `venues: [{ venueId, name }]` and `layouts: [layoutType]`; it creates no holds.
 
-Queue reads and initial assignment by Coordinators or Leads, plus Lead assignment
+Lead-only queue reads, availability, initial assignment
 and reassignment endpoints, exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`;
 unset or any other value returns 404. Shared development sets it to `true` (see
 `.env.example`) because SPM-33's coordinator view and edits need assigned events.

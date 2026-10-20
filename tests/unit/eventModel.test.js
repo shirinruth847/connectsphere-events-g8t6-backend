@@ -411,3 +411,24 @@ describe("SPM-180 reassignment RPC", () => {
     }
   );
 });
+
+
+describe("[SPM-177 AC2] coordinator point of contact", () => {
+  test("fresh scoped reads fetch only the coordinator's display name", async () => {
+    const row = { event_id: 42, organiser_id: 11, coordinator_id: 20, status: "UNDER_REVIEW", coordinator: { name: "Alex Coordinator" } };
+    const query = queryReturning({ data: row, error: null });
+    supabase.from.mockReturnValue(query);
+    const result = await eventModel.findVisibleEvent(42, { user_id: 11, role: "ORGANISER", organisation_ids: [] });
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("coordinator:user!event_coordinator_id_fkey(name)"));
+    expect(eventModel.toApi(result, 11).coordinatorName).toBe("Alex Coordinator");
+    expect(eventModel.toApi(result, 11)).not.toHaveProperty("coordinator.email");
+  });
+  test("unassigned or unavailable coordinator names are null", () => {
+    expect(eventModel.toApi({ event_id: 42, status: "SUBMITTED", coordinator_id: null }).coordinatorName).toBeNull();
+    expect(eventModel.toApi({ event_id: 42, status: "UNDER_REVIEW", coordinator_id: 20 }).coordinatorName).toBeNull();
+  });
+  test("a revoked Lead permission is returned as a domain denial", async () => {
+    supabase.rpc.mockResolvedValue({ data: null, error: { message: "FORBIDDEN" } });
+    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 20, leadId: 11 })).rejects.toMatchObject({ code: "FORBIDDEN", name: "EventRequestError" });
+  });
+});

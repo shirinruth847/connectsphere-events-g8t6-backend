@@ -74,19 +74,19 @@ describe("[SPM-174/SPM-177] unassigned event queue", () => {
     });
   });
 
-  test("TC-SPM-174-AC4: permits Coordinator profiles", () => {
+  test("TC-SPM-174-AC4: rejects Coordinator profiles", () => {
     const next = jest.fn();
-    const middleware = requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD);
+    const middleware = requireRole(USER_ROLES.COORDINATOR_LEAD);
 
     middleware({ user: { role: USER_ROLES.COORDINATOR } }, makeResponse(), next);
 
-    expect(next).toHaveBeenCalledTimes(1);
+    expect(next).not.toHaveBeenCalled();
   });
 
   test("TC-SPM-174-AC4: rejects non-coordinator roles", () => {
     const next = jest.fn();
     const res = makeResponse();
-    const middleware = requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD);
+    const middleware = requireRole(USER_ROLES.COORDINATOR_LEAD);
 
     middleware({ user: { role: USER_ROLES.ORGANISER } }, res, next);
 

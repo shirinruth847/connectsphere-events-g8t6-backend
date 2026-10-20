@@ -23,6 +23,7 @@ const IDEMPOTENCY_KEY_MESSAGE =
 const VERSION_MESSAGE = "Send the version of the event you loaded.";
 
 const DOMAIN_ERRORS = Object.freeze({
+  FORBIDDEN: [403, "Only an active Coordinator Lead may assign coordinators."],
   EVENT_NOT_FOUND: [404, EVENT_NOT_FOUND.error],
   EVENT_NOT_DRAFT: [409, "Only draft requests can be changed or submitted."],
   NO_ELIGIBLE_COORDINATOR: [409, "No coordinator is currently available. Your request was not submitted."],
