@@ -11,6 +11,16 @@ const EVENT_STATUS = Object.freeze({
   CANCELLED: "CANCELLED",
 });
 
+const USER_ROLES = Object.freeze({
+  ORGANISER: "ORGANISER",
+  COORDINATOR: "COORDINATOR",
+  COORDINATOR_LEAD: "COORDINATOR_LEAD",
+});
+
+const NOTIFICATION_TYPES = Object.freeze({
+  STATUS_CHANGE: "STATUS_CHANGE",
+});
+
 // Organiser-facing label for each stored status (Master section 3.5). Listed by
 // name because SAFETY_REVIEW and PREPARATION are not in the live event_status
 // enum yet; an unknown status falls back to its stored code.
@@ -131,6 +141,8 @@ const VENUE_BOOKING_STATUS_LABELS = Object.freeze({
 
 module.exports = {
   EVENT_STATUS,
+  USER_ROLES,
+  NOTIFICATION_TYPES,
   STATUS_LABELS,
   STATUS_NOTES,
   EVENT_TYPE_LABELS,

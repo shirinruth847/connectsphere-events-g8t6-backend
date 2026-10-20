@@ -41,6 +41,28 @@ Returns:
 ```
 
 HTTP 200 confirms both stores: the Supabase key is accepted and MongoDB answers a `ping`. Without `MONGODB_URI`, or when Atlas is unreachable, it returns `500 INTERNAL_ERROR` and the backend log names the cause.
+### Unassigned Event Queue
+
+`GET /api/events/unassigned`
+
+Returns submitted event requests that do not yet have a coordinator assigned.
+This endpoint requires an authenticated `COORDINATOR_LEAD` profile and returns
+the event summary fields used for assignment.
+
+```json
+{
+  "events": [
+    {
+      "eventId": 42,
+      "requestId": "REQ-000042",
+      "status": "SUBMITTED",
+      "title": "Example event",
+      "startDatetime": "2026-10-20T09:00:00.000Z",
+      "endDatetime": "2026-10-20T12:00:00.000Z"
+    }
+  ]
+}
+```
 
 ### Event Requests (SPM-35, SPM-36, SPM-37)
 
@@ -227,12 +249,12 @@ The browser signs in **directly with Supabase Auth** (`supabase.auth.signInWithP
 
 Errors use one shape: `{ "error": "<safe message>", "code": "<MACHINE_CODE>" }`, plus `fields` for validation errors. Authenticated requests send `Authorization: Bearer <access_token>`, and their responses carry `Cache-Control: no-store`. Only `FRONTEND_ORIGIN` may call the API from a browser.
 
-| Method & path | Access | Input | Success | Errors |
-| --- | --- | --- | --- | --- |
-| `GET /api/auth/me` | Any signed-in user | — | `200 { user: { user_id, email, name, role, roles, home_path } }` | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
-| `POST /api/auth/logout` | Bearer token, if any | — | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })` | — (idempotent) |
-| `GET /api/events/mine` | `ORGANISER` | See Event Requests above | Own requests plus submitted requests from the organiser's organisations; colleagues' drafts are never listed | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN` |
-| `GET /api/registrations/mine` | `ATTENDEE` | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN` |
+| Method & path                 | Access               | Input                                            | Success                                                                                                                                                                                                     | Errors                                                                                      |
+| ----------------------------- | -------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `GET /api/auth/me`            | Any signed-in user   | —                                                | `200 { user: { user_id, email, name, role, roles, home_path } }`                                                                                                                                            | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
+| `POST /api/auth/logout`       | Bearer token, if any | —                                                | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })`                                                                   | — (idempotent)                                                                              |
+| `GET /api/events/mine`        | `ORGANISER`          | See Event Requests above                         | Own requests plus submitted requests from the organiser's organisations; colleagues' drafts are never listed                                                                                                | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN`                                             |
+| `GET /api/registrations/mine` | `ATTENDEE`           | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN`                                                               |
 
 - `home_path` is `/dashboard` for organisers and staff and `/my-registrations` for attendees.
 - `roles` is a list so the contract survives multi-role users; the schema currently stores one role per user.
@@ -424,6 +446,25 @@ Format: `<type>/<ticket-id>-<short-description>` or `<type>/<short-description>`
    git checkout main
    git pull origin main
    ```
+### SPM-174 development fixture
+
+The Lead queue and assignment/reassignment integration, staged overlap guard,
+deployment order and isolated/hosted test commands are documented in
+[the SPM-174 integration plan](docs/test-plans/spm-174.md).
+
+After applying the Supabase migrations and provisioning the namespaced accounts, create a
+synthetic submitted request with no coordinator:
+
+```bash
+npm run seed:unassigned
+```
+
+The fixture is recorded in `supabase/seed/manifests/` (ignored by git) and can be removed
+without affecting other data:
+
+```bash
+npm run seed:unassigned:cleanup
+```
 
 
 ## Completed-ticket repair baseline
@@ -465,3 +506,9 @@ Do not delete applied migration files or reset the shared database to remove
 pending UI features. Current live assignment transitions to UNDER_REVIEW.
 The full integration run passed 81 tests against the configured development
 database; reconstruction from local migration history remains a separate check.
+
+SPM-177 Lead-only assignment correction and isolated regression checks are documented
+in [the SPM-177 test plan](docs/test-plans/spm-177.md). The corrective migration
+retires the obsolete two-argument assignment function and preserves atomic
+assignment, history, activity and notifications. Shared deployment requires
+review of target migration history; no hosted migration was applied here.
