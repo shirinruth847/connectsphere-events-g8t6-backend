@@ -112,12 +112,13 @@ const ALLOWED_FROM = {
 
 // Inserts an event inside the rolled-back transaction, owned by organiserA with
 // the fixture coordinator, plus an open round claimed by the Safety Officer, so
-// that only the state decides whether an action is allowed.
+// that only the state decides whether an action is allowed. Its day is one no
+// committed fixture event uses, so the coordinator's schedule never overlaps.
 const insertEventInState = async (client, status, { coordinator = true } = {}) => {
   const { rows } = await client.query(
     `INSERT INTO public.event (title, purpose, description, organiser_id, coordinator_id, status, expected_attendance,
        start_datetime, end_datetime, preferred_layout_type)
-     VALUES ($1, 'p', 'd', $2, $3, $4, 50, '2027-05-01T01:00:00Z', '2027-05-01T03:00:00Z', 'THEATRE')
+     VALUES ($1, 'p', 'd', $2, $3, $4, 50, '2028-01-01T01:00:00Z', '2028-01-01T03:00:00Z', 'THEATRE')
      RETURNING event_id, version`,
     [`spm32-${runId} state ${status}`, userId("organiserA"), coordinator ? userId("coordinator") : null, status]
   );
@@ -379,8 +380,8 @@ describe("SPM-173 completion job", () => {
       return rows[0];
     });
     const preparing = await lifecycleEvent({ status: "PREPARATION", start_datetime: endsSoon.start_at, end_datetime: endsSoon.end_at });
-    const confirmed = await lifecycleEvent({ status: "CONFIRMED", start_datetime: "2026-01-01T01:00:00Z", end_datetime: "2026-01-01T03:00:00Z" });
-    const planning = await lifecycleEvent({ status: "PLANNING", start_datetime: "2026-01-01T01:00:00Z", end_datetime: "2026-01-01T03:00:00Z" });
+    const confirmed = await lifecycleEvent({ status: "CONFIRMED", start_datetime: "2026-01-02T01:00:00Z", end_datetime: "2026-01-02T03:00:00Z" });
+    const planning = await lifecycleEvent({ status: "PLANNING", start_datetime: "2026-01-03T01:00:00Z", end_datetime: "2026-01-03T03:00:00Z" });
 
     const statusesAfterRun = () =>
       inRolledBackTransaction(async (client) => {

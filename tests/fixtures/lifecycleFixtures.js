@@ -35,7 +35,16 @@ const check = ({ data, error }, step) => {
   return data;
 };
 
-// A committed fixture event, recorded in the run's manifest for cleanup.
+// A committed fixture event, recorded in the run's manifest for cleanup. Each
+// one gets its own day unless the caller sets the times, because one coordinator
+// may not hold overlapping active events (SPM-174 schedule guard).
+let nextFixtureDay = 0;
+const nextFixtureSlot = () => {
+  const day = new Date(Date.UTC(2027, 4, 1 + nextFixtureDay++));
+  const at = (hour) => new Date(day.getTime() + hour * 3600000).toISOString();
+  return { start_datetime: at(1), end_datetime: at(3) };
+};
+
 const createLifecycleEvent = async (fixtures, overrides = {}) => {
   const row = check(
     await supabase
@@ -49,8 +58,7 @@ const createLifecycleEvent = async (fixtures, overrides = {}) => {
         coordinator_id: fixtures.accounts.coordinator.userId,
         status: "PLANNING",
         expected_attendance: 50,
-        start_datetime: "2027-05-01T01:00:00Z",
-        end_datetime: "2027-05-01T03:00:00Z",
+        ...nextFixtureSlot(),
         preferred_layout_type: "THEATRE",
         ...overrides,
       })
