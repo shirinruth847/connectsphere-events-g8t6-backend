@@ -9,6 +9,8 @@
     "seed:accounts": "node supabase/seed/provisionAccounts.js",
     "seed:accounts:cleanup": "node supabase/seed/provisionAccounts.js cleanup",
     "mongo:migrate": "node mongodb/migrate.js",
+    "seed:venue-calendar": "node mongodb/seed/venueCalendarSeed.js",
+    "seed:venue-calendar:cleanup": "node mongodb/seed/venueCalendarSeed.js cleanup",
     "dev": "nodemon server.js"
   },
   "author": "",

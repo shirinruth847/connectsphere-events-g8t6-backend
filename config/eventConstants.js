@@ -107,10 +107,34 @@ const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "PREPARATION",
 ]);
 
+// Values of the event_type check constraint (SPM-181) and their display labels.
+const EVENT_TYPE_LABELS = Object.freeze({
+  CONFERENCE: "Conference",
+  WORKSHOP: "Workshop",
+  SEMINAR: "Seminar",
+  NETWORKING: "Networking",
+  SOCIAL: "Social",
+  TRAINING: "Training",
+  OTHER: "Other",
+});
+
+// Staff-facing venue booking labels (SPM-181); the frontend never maps states.
+const VENUE_BOOKING_STATUS_LABELS = Object.freeze({
+  HELD: "Held",
+  PENDING: "Pending",
+  APPROVED: "Approved",
+  REJECTED: "Rejected",
+  EXPIRED: "Expired",
+  RELEASED: "Released",
+  CANCELLED: "Cancelled",
+});
+
 module.exports = {
   EVENT_STATUS,
   STATUS_LABELS,
   STATUS_NOTES,
+  EVENT_TYPE_LABELS,
+  VENUE_BOOKING_STATUS_LABELS,
   NO_LAYOUT_PREFERENCE,
   MIN_LEAD_TIME_HOURS,
   EVENT_RELATIONSHIP,

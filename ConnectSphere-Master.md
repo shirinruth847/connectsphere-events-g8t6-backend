@@ -2,17 +2,30 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 1.1 |
-| Updated | 18 October 2026 |
+| Version | 1.2 |
+| Updated | 20 October 2026 |
 | Status | Release 1 baseline: customer requirements complete (Week 7 changes and clarification sessions 1–3). 1.1 adds the shared frontend workspace agreement, which takes effect when the frontend and backend `fix/main-completed-ticket-baseline` branches are merged. Repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
-| Data platform | Supabase PostgreSQL and Supabase Auth; MongoDB Atlas for venue and equipment detail |
+| Data platform | Supabase PostgreSQL and Supabase Auth; MongoDB Atlas for venue and equipment detail, venue setup/turnaround times and the venue calendar (holds and blocks) |
 | Canonical copy | Backend repository; frontend consumes an accessible synchronized copy |
 
 This document gives developers and coding agents the durable context needed to build ConnectSphere. It defines the repository layout, architectural boundaries, roles, business rules, data ownership, workflow guarantees, test expectations and agent workflow.
 
 This document intentionally does **not** define a route-by-route API contract, request/response payload catalogue, OpenAPI specification or deployment/runtime architecture. Ticket acceptance criteria, implemented route definitions and tests determine the transport details for each feature. When a ticket changes an enduring business rule or structure, update this master in the same work item.
+
+## Changes from 1.1
+
+Version 1.2 moves venue setup/turnaround times, tentative holds and operational blocks from PostgreSQL to MongoDB (team decision T27). Venue bookings stay in PostgreSQL. Code that relied on the 1.1 rule "MongoDB is never consulted by a blocking rule" must follow sections 5.4, 6.5 and 7.4.
+
+| Area | 1.1 said | 1.2 says | Section |
+| --- | --- | --- | --- |
+| Setup/turnaround minutes | PostgreSQL `venues.setup_minutes`, `turnaround_minutes` | MongoDB `venue_details.setupMinutes`, `turnaroundMinutes`; the legacy PostgreSQL `venue.setup_turnaround_min` is read-only until removed | 5.4.1, 6.2, 6.4 |
+| Holds | `venue_bookings` rows in `HELD` state | `venue_calendar` documents of type `HOLD`; converting a hold creates a `PENDING` booking in PostgreSQL | 5.4.3, 6.4 |
+| Operational blocks | PostgreSQL `venue_blocks` | `venue_calendar` documents of type `BLOCK` | 5.4.4, 6.4 |
+| Availability calendar | Computed from PostgreSQL only | Merged from PostgreSQL bookings and MongoDB holds and blocks by `venueConflictModel.js` | 5.4.5 |
+| Blocking checks | PostgreSQL only | Booking-against-booking overlap stays a PostgreSQL constraint; checks against holds and blocks read MongoDB, and refuse when MongoDB is unavailable | 5.4, 6.5, 7.4 |
+| MongoDB writes | Only through the outbox | Detail and calendar edits are direct writes through the venue detail and calendar models; the outbox still refreshes display copies | 6.5, 7.3 |
 
 ## Changes from 1.0
 
@@ -59,7 +72,7 @@ ConnectSphere is a **modular monolith**, not a microservices system.
 - The backend is started from `server.js` and is organized using the existing `routes`, `controller`, `middleware`, `model` and `config` layers.
 - Business data lives in two stores, and only the backend connects to either of them:
   - **Supabase PostgreSQL** is the system of record for workflow state, allocation, audit and every rule that must hold atomically. All PostgreSQL work for one operation can share one database transaction.
-  - **MongoDB Atlas** holds descriptive venue and equipment detail used for search, suitability warnings and display. MongoDB writes never take part in a PostgreSQL transaction; they are applied after commit (section 7.3).
+  - **MongoDB Atlas** holds descriptive venue and equipment detail used for search, suitability warnings and display, and owns each venue's setup/turnaround times and calendar: tentative holds and operational blocks (T27). MongoDB writes never take part in a PostgreSQL transaction (sections 7.3 and 7.4).
 - Supabase Auth provides identity. The backend remains the authority for application roles, relationships, workflow state and business-data writes.
 - Business areas, including booking conflict detection and the operational safety check, are code modules inside the same backend process. Do not create independently deployed services, service-to-service APIs, further databases or message brokers unless a future approved architecture decision requires them.
 
@@ -92,7 +105,7 @@ Exact library versions and available scripts come from each repository's `packag
 | Backend jobs | Scheduled internal work (expiry, completion, MongoDB sync, notification delivery) that calls model operations |
 | Backend configuration | Construct external clients and read validated environment configuration |
 | PostgreSQL | Durable state, referential integrity, uniqueness, conflict prevention, transaction isolation and the sync/delivery queues |
-| MongoDB Atlas | Descriptive venue and equipment documents; never consulted by a blocking rule check |
+| MongoDB Atlas | Descriptive venue and equipment documents, venue setup/turnaround times, tentative holds and operational blocks. Consulted by the hold and block checks (section 7.4); never by booking-against-booking or capacity checks |
 | Supabase Auth | Signup, login, token issuance, refresh and Auth-user lifecycle |
 | Email and SMS providers | External delivery of notifications already committed in PostgreSQL |
 
@@ -106,12 +119,12 @@ The team's C4 diagrams must describe this architecture. At container level:
 | --- | --- | --- |
 | Web Application | Next.js / React / TypeScript | Role-based views for all seven roles |
 | Backend API | Node.js / Express / JavaScript | Contains booking conflict detection and the safety check as components, not as separate containers |
-| Main Database | Supabase PostgreSQL | System of record, including holds, bookings, availability, reservations, assignments, safety reviews, notifications and audit |
-| Catalogue Detail Store | MongoDB Atlas | `venue_details` and `equipment_details` collections in one database; may be drawn as two containers only if labelled as collections of the same database |
+| Main Database | Supabase PostgreSQL | System of record, including venue bookings, reservations, assignments, safety reviews, notifications and audit |
+| Catalogue Detail Store | MongoDB Atlas | `venue_details`, `venue_calendar` and `equipment_details` collections in one database; may be drawn as separate containers only if labelled as collections of the same database |
 | Supabase Auth | External system | Identity provider |
 | Email Service, SMS Service | External systems | Receive committed notifications from the backend |
 
-The venue availability calendar is computed from PostgreSQL and must not be shown as stored in MongoDB. Booking conflict detection and the safety check belong in a component diagram of the Backend API.
+The venue availability calendar is computed by the Backend API from PostgreSQL bookings and the MongoDB `venue_calendar` holds and blocks. Booking conflict detection and the safety check belong in a component diagram of the Backend API.
 
 ## 2. Repository Structure and Developer Setup
 
@@ -177,6 +190,7 @@ connectsphere-events-g8t6-backend/
 │   ├── venueModel.js
 │   ├── venueConflictModel.js
 │   ├── venueDetailModel.js
+│   ├── venueCalendarModel.js
 │   ├── equipmentModel.js
 │   ├── equipmentDetailModel.js
 │   ├── registrationModel.js
@@ -207,6 +221,7 @@ connectsphere-events-g8t6-backend/
 │   ├── unit/
 │   ├── integration/
 │   └── fixtures/
+├── validators/
 ├── COMMIT_MESSAGES.md
 ├── README.md
 ├── package.json
@@ -222,8 +237,8 @@ The `supabase`, `mongodb`, `jobs` and `tests` directories are controlled extensi
 - `routes/*.js` declare route paths and middleware order. Route files must remain thin.
 - `controller/*.js` deal with transport input and output. A controller must not trust actor IDs or roles supplied by the request body.
 - `model/*.js` own database queries and domain changes. Cross-domain changes must share one PostgreSQL transaction/client rather than opening unrelated writes.
-- `venueDetailModel.js` and `equipmentDetailModel.js` are the only files that query MongoDB. Every other model reaches MongoDB through them. They read documents and apply outbox entries; they never decide a blocking rule.
-- `venueConflictModel.js` holds booking conflict detection: occupied-range calculation, overlap and block checks, overdue-hold expiry and the check that refuses setup/turnaround changes while future bookings exist. `safetyModel.js` holds the operational safety check. Both are modules, not services.
+- `venueDetailModel.js`, `venueCalendarModel.js` and `equipmentDetailModel.js` are the only files that query MongoDB. Every other model reaches MongoDB through them. They read and write documents and apply outbox entries; the rules that use the documents live in `venueConflictModel.js` and the domain models.
+- `venueConflictModel.js` holds booking conflict detection: occupied-range calculation, overlap checks against bookings, holds and blocks, hold expiry, the availability calendar and the check that refuses setup/turnaround changes while future bookings or holds exist. `safetyModel.js` holds the operational safety check. Both are modules, not services.
 - `jobs/*.js` run scheduled internal work. A job claims work with a durable lease and calls model operations; it contains no business rules of its own. `jobs/runner.js` is started from `server.js` and exposes no HTTP trigger.
 - `middleware/auth.js` verifies the Supabase access token and establishes the authenticated identity.
 - `middleware/authorize.js` applies role and relationship policies after authentication. Hiding a frontend button is not authorization.
@@ -676,10 +691,10 @@ Payments, pricing, full reporting/export suites, general document management, re
 | URL | Main purpose |
 | --- | --- |
 | `/login`, `/signup` | Authentication and permitted external onboarding |
-| `/dashboard` | Role-specific drafts, assignments and outstanding work |
-| `/events`, `/events/new`, `/events/[eventId]` | Event discovery/list, creation and role-aware workspace |
+| `/dashboard` | Role-specific drafts, assignments and outstanding work; for Venue Staff, the venue booking requests ("My Requests", SPM-181) |
+| `/events`, `/events/new`, `/events/[eventId]` | Event discovery/list, creation and role-aware workspace; Venue Staff open an event through its venue bookings, with `?booking=<id>` selecting one (SPM-181) |
 | `/assignments` | Lead's unassigned queue, supervised events, transfer requests and handovers |
-| `/venues`, `/venues/[venueId]` | Venue catalogue, details, setup/turnaround configuration, blocks, suitability and calendar information |
+| `/venues`, `/venues/[venueId]` | Venue catalogue with search and filters (Coordinators, Leads); venue management, status and details including setup/turnaround (Venue Staff, "My Venues"; `/venues/[venueId]` is Venue Staff only); the availability calendar at `/venues?view=availability` (Coordinators, Venue Staff); blocks and suitability |
 | `/technical-requests` | Technical review and preparation queue |
 | `/safety-reviews` | Safety Officer's review queue and review workspace |
 | `/my-registrations` | Current user's registrations, invitations and withdrawal actions |
@@ -864,8 +879,8 @@ Attendee discovery is limited to events in `CONFIRMED` or `PREPARATION` that are
 ### 5.4 Venue rules
 
 - The baseline treats each venue as one independently bookable space; the draft `Room` entity is not authoritative.
-- Venue booking states are `HELD`, `PENDING`, `APPROVED`, `REJECTED`, `EXPIRED`, `RELEASED` and `CANCELLED`. `HELD`, `PENDING` and `APPROVED` are active and occupy the venue.
-- Blocking checks read PostgreSQL only. Layout, facility and accessibility information comes from MongoDB `venue_details` (section 6.4).
+- Venue booking states are `PENDING`, `APPROVED`, `REJECTED`, `RELEASED` and `CANCELLED`; `PENDING` and `APPROVED` are active and occupy the venue. Tentative holds are not bookings: they are `HOLD` entries in the MongoDB venue calendar (section 5.4.3), and an active hold also occupies the venue.
+- Capacity and booking-against-booking checks read PostgreSQL. Setup/turnaround minutes, active holds and blocks are read from MongoDB (sections 6.4 and 7.4); when MongoDB is unavailable, no hold, booking or block can be created and the calendar shows no availability. Layout, facility and accessibility information comes from MongoDB `venue_details`.
 - Each booking is checked on its own requirements and its own booking window. Capacity against the booking's expected attendance, and availability over the booking's occupied range against active bookings, active holds and blocks, are blocking checks.
 - Supported layout, required facilities, accessibility and operating hours produce warnings shown to the coordinator and Venue Staff; Venue Staff decide. The operating-hours check covers the whole occupied range, from setup start to turnaround end; any part outside the venue's hours produces a warning, not a block.
 - Coordinators cannot override blocking checks or Venue Staff decisions. There are no staff overrides for venue conflicts.
@@ -876,9 +891,9 @@ Attendee discovery is limited to events in `CONFIRMED` or `PREPARATION` that are
 
 #### 5.4.1 Setup and turnaround time
 
-- Venue Staff set `setup_minutes` and `turnaround_minutes` for each venue when the venue is created, as non-negative whole minutes. Zero is allowed, and each venue may have different values. There is no per-event override.
-- A booking's occupied range is `[booking_start − setup_minutes, booking_end + turnaround_minutes)`, computed and stored when the hold or booking is created. Availability, suitability, conflict detection and the booking exclusion constraint use the occupied range, not the advertised booking time. For example, a booking from 10:00 to 12:00 at a venue with 30 minutes of setup and 45 minutes of turnaround occupies `[09:30, 12:45)`. Another booking's setup may start at 12:45; starting at 12:44 is a conflict.
-- Setup and turnaround times can be changed only while the venue has no active hold or booking whose occupied range ends in the future. Otherwise the change is refused, and the response lists the holds and bookings that prevent it so Venue Staff can see which events are affected. Existing bookings therefore never change underneath an event.
+- Venue Staff set `setupMinutes` and `turnaroundMinutes` for each venue in its MongoDB `venue_details` document, as non-negative whole minutes. Zero is allowed, and each venue may have different values. There is no per-event override. A venue without these values cannot receive holds or bookings.
+- A booking's occupied range is `[booking_start − setupMinutes, booking_end + turnaroundMinutes)`, computed from the venue's MongoDB minutes and stored with the hold or booking when it is created (on the PostgreSQL booking row, or in the hold document). Availability, suitability, conflict detection and the booking exclusion constraint use the occupied range, not the advertised booking time. For example, a booking from 10:00 to 12:00 at a venue with 30 minutes of setup and 45 minutes of turnaround occupies `[09:30, 12:45)`. Another booking's setup may start at 12:45; starting at 12:44 is a conflict.
+- Setup and turnaround times can be changed only while the venue has no active hold (MongoDB) or booking (PostgreSQL) whose occupied range ends in the future. Otherwise the change is refused, and the response lists the holds and bookings that prevent it so Venue Staff can see which events are affected. Existing bookings therefore never change underneath an event.
 - Equipment reservations do not use venue buffers (section 5.5).
 
 #### 5.4.2 Multiple venues for one event
@@ -892,21 +907,21 @@ Attendee discovery is limited to events in `CONFIRMED` or `PREPARATION` that are
 
 #### 5.4.3 Tentative holds
 
-- Venue Staff create a hold for an event in `PLANNING` at the coordinator's request. A hold is a venue booking in `HELD` state with a required `hold_expires_at`. Holds apply to venues only, never to equipment.
+- Venue Staff create a hold for an event in `PLANNING` at the coordinator's request. A hold is a `HOLD` entry in the MongoDB `venue_calendar` collection with a required `holdExpiresAt`; it is not a PostgreSQL booking. Holds apply to venues only, never to equipment.
 - A hold expires 7 days after creation, or 24 hours before its occupied range starts, whichever is earlier. If the occupied range starts less than 24 hours from now, no hold is possible and the coordinator submits a booking request directly.
 - Venue Staff may extend a hold once, at the coordinator's request and before it expires, by up to 7 more days, within the same 24-hours-before-setup limit.
-- Active holds occupy the venue. Two events cannot hold overlapping occupied ranges at the same venue.
-- The coordinator converts a hold by confirming the held venue, which submits it as a booking request before expiry. The booking moves from `HELD` to `PENDING`, keeping the slot, and Venue Staff then approve or reject it.
-- At expiry a hold moves to `EXPIRED`, the venue becomes available to other requests, and the hold can no longer be converted or extended. An expired hold is never treated as a booking. The event stays in `PLANNING`.
-- A PostgreSQL exclusion constraint cannot depend on the current time, so an overdue hold that the expiry job has not yet processed would still block the venue. Every operation that creates, converts or extends a hold or booking at a venue therefore first moves that venue's overdue holds to `EXPIRED` inside the same transaction, using database time. Converting or extending an overdue hold fails even if the job has not run.
+- Active holds occupy the venue. Two events cannot hold overlapping occupied ranges at the same venue, and a hold cannot overlap an active booking or block.
+- The coordinator converts a hold by confirming the held venue, which submits it as a booking request before expiry. A `PENDING` booking is created in PostgreSQL with the hold's occupied range and the hold becomes `CONVERTED`, so the slot is kept, and Venue Staff then approve or reject the booking.
+- At expiry a hold becomes `EXPIRED`, the venue becomes available to other requests, and the hold can no longer be converted or extended. An expired hold is never treated as a booking. The event stays in `PLANNING`.
+- A hold whose `holdExpiresAt` has passed is expired whatever its stored status: every check and the calendar treat it as expired at the time of reading, so an overdue hold never blocks the venue even if the expiry job has not run. Converting or extending an overdue hold fails. The job only records the `EXPIRED` status and sends the expiry notifications.
 - The coordinator and Venue Staff are notified 24 hours before a hold expires (immediately, if the hold lasts less than 24 hours) and again when it expires.
 - A hold is released when the event is rejected or cancelled, when the coordinator or Venue Staff release it, or when the booking is updated.
 
 #### 5.4.4 Operational blocks, replacement and restoration
 
-- Venue Staff create venue blocks with a reason (`MAINTENANCE`, `EQUIPMENT_FAILURE`, `RENOVATION`, `SAFETY`, `OTHER`), an interval and a note. Blocks have no setup or turnaround time and are shown on the venue calendar.
-- Creating a block is never refused because of existing bookings. Blocks are not part of the booking exclusion constraint; new holds and bookings are checked against blocks under the venue lock.
-- In the block transaction, every active hold or booking whose occupied range overlaps the block receives a `VENUE_BLOCK` incident and the event's arrangement version increases. The coordinator and Venue Staff are notified, and the organiser is told that their venue arrangement is affected and what happens next. Attendees are not notified about an unresolved internal issue. The event is not cancelled or rejected automatically, the booking is not deleted, and the original event information is preserved.
+- Venue Staff create venue blocks with a reason (`MAINTENANCE`, `EQUIPMENT_FAILURE`, `RENOVATION`, `SAFETY`, `OTHER`), an interval and a note. A block is a `BLOCK` entry in the MongoDB `venue_calendar` collection. Blocks have no setup or turnaround time and are shown on the venue calendar.
+- Creating a block is never refused because of existing bookings. Blocks are not part of the booking exclusion constraint; new holds and bookings are checked against active blocks before they are written (section 7.4).
+- When a block is created, every active hold or booking whose occupied range overlaps the block receives a `VENUE_BLOCK` incident and the event's arrangement version increases. The coordinator and Venue Staff are notified, and the organiser is told that their venue arrangement is affected and what happens next. Attendees are not notified about an unresolved internal issue. The event is not cancelled or rejected automatically, the booking is not deleted, and the original event information is preserved.
 - The event keeps its current state while the coordinator decides the next action. An open blocking incident prevents submission for safety review and confirmation. An open safety review on the event is closed as `SUPERSEDED` and the event returns to `PLANNING`.
 - The coordinator's options are:
   1. **Restore the original booking.** If the block is lifted or shortened so that the venue is free for the booking's whole occupied range, Venue Staff confirm the restoration. The incident is resolved and the event keeps its state.
@@ -916,9 +931,9 @@ Attendee discovery is limited to events in `CONFIRMED` or `PREPARATION` that are
 
 #### 5.4.5 Venue search and calendar data
 
-- Search runs in two steps. First, `venueDetailModel.js` filters `venue_details` on required layout, facilities and accessibility to produce candidate IDs and warnings. Second, `venueModel.js` checks those candidates in PostgreSQL for active state, capacity, operating hours and availability over the occupied range. Results combine blocking failures and warnings.
-- When MongoDB is unavailable, search returns PostgreSQL-only results with layout, facility and accessibility marked "not checked" (M4).
-- The venue availability calendar is computed from PostgreSQL holds, bookings and blocks. MongoDB holds no calendar or availability data.
+- Search runs in two steps. First, `venueDetailModel.js` filters `venue_details` on required layout, facilities and accessibility to produce candidate IDs and warnings. Second, `venueModel.js` checks those candidates in PostgreSQL for active state, capacity and operating hours, and `venueConflictModel.js` checks availability over the occupied range against PostgreSQL bookings and MongoDB holds and blocks. Results combine blocking failures and warnings.
+- When MongoDB is unavailable, search returns PostgreSQL-only results with layout, facility and accessibility marked "not checked" (M4), and availability is reported as unknown, never as available.
+- The venue availability calendar merges PostgreSQL bookings (`PENDING` and `APPROVED`) with MongoDB holds and blocks, using each venue's MongoDB setup/turnaround minutes for bookings. It distinguishes available periods, bookings, active holds (with expiry), blocks (with reason and note) and operating-hours warnings. If MongoDB cannot be read, the calendar returns an error rather than showing any period as available.
 
 ### 5.5 Equipment and technical-support rules
 
@@ -990,7 +1005,7 @@ The Event Organiser may request cancellation at any time; the assigned coordinat
 
 The supplied database and UML diagrams are design references and may contain errors. Use the following catalogues and actual verified migrations as the working data baseline. Never generate migrations or collections solely by copying a draft diagram.
 
-PostgreSQL is the system of record. MongoDB holds descriptive detail that no blocking rule depends on. Each field has exactly one owning store; the other store may hold only a reference or a read copy.
+PostgreSQL is the system of record for workflow state, bookings and audit. MongoDB owns descriptive venue and equipment detail, venue setup/turnaround times and the venue calendar of holds and blocks (T27). Each field has exactly one owning store; the other store may hold only a reference or a read copy.
 
 ### 6.1 Storage conventions
 
@@ -1007,14 +1022,13 @@ Retain events, bookings, requests, registrations, assignments, safety reviews an
 | `profiles` | Auth-linked user ID, name, phone, active state and timestamps; no password |
 | `user_roles` | Unique user/role pairs for the seven application roles; `COORDINATOR_LEAD` and `COORDINATOR` never on the same user; staff assignment is trusted only |
 | `organisations`, `organisation_memberships` | Verified memberships; never infer membership from editable email/domain text |
-| `events` | Owner, optional organization, first submission timestamp (preserved on later edits and assignment), nullable coordinator, nullable supervising Lead, open transfer request (requester, reason, time), lifecycle, requirements, timing, attendance, registration policy, publication, versions including `arrangement_version`, previously-confirmed flag and confirmation snapshot |
+| `events` | Owner, optional organization, first submission timestamp (preserved on later edits and assignment), nullable coordinator, nullable supervising Lead, open transfer request (requester, reason, time), lifecycle, event type, requirements, timing, attendance, registration policy, publication, versions including `arrangement_version`, previously-confirmed flag and confirmation snapshot |
 | `event_assignments` | Coordinator assignment history: event, coordinator, assigning Lead, assigned and ended times, optional reason |
 | `event_supervision` | Supervising-Lead history: event, Lead, started and ended times, reason (assignment, handover or takeover) |
 | `clarifications` | Preserved question/response rounds with state and timestamps |
 | `event_comments` | Event conversation with organizer-shared or internal visibility; not a formal approval |
-| `venues` | Rule-bearing venue fields: name, location, capacity, operating hours, non-negative `setup_minutes` and `turnaround_minutes`, active state and version. Descriptive detail lives in MongoDB `venue_details` (section 6.4). |
-| `venue_blocks` | Reason, time-bounded operational unavailability, note, creator, and lift/shorten history |
-| `venue_bookings` | Event, venue, label, booking window within the event interval, per-booking expected attendance/layout/requirements, primary-venue flag, occupied range, state (`HELD` to `CANCELLED`), hold expiry/extension/reminder times, `replaces_booking_id`, safety-rejection reason, requirement version, decision and preparation states |
+| `venues` | Rule-bearing venue fields: name (unique in any letter case), location, capacity, operating hours, active state (`is_active`: false once deleted as unusable), operational status set by Venue Staff (`ACTIVE`, `INACTIVE`, `UNDER_MAINTENANCE`, with a reason for maintenance), contact person and contact email/number, created/updated time and user, and version. Only active venues in `ACTIVE` status can be chosen for new requests or bookings. Descriptive detail and setup/turnaround minutes live in MongoDB `venue_details` (section 6.4); the legacy `setup_turnaround_min` column is read-only and is removed once nothing reads it. |
+| `venue_bookings` | Event, venue, unique booking reference, label, booking window within the event interval, per-booking expected attendance/layout/requirements, primary-venue flag, occupied range (stored at creation), state (`PENDING` to `CANCELLED`), the converted hold's MongoDB ID, `replaces_booking_id`, safety-rejection reason, requirement version, decision and preparation states |
 | `equipment` | Rule-bearing equipment fields: name, category, storage location (reference only), nonnegative total quantity, active state and version. Specifications live in MongoDB `equipment_details`. |
 | `equipment_unavailability` | Time-bounded damaged/maintenance/other unavailable quantities |
 | `technical_requests` | Event requirement version, assigned reviewer, support need, decision/preparation state and version |
@@ -1044,12 +1058,12 @@ The initial draft diagrams include names such as `User`, `Registration`, `Event`
 | No coordinator in `SUBMITTED`; exactly one from `UNDER_REVIEW` onward while active | Check constraint on state and coordinator, and locked assignment/reassignment |
 | A user is never both Lead and Coordinator | Trigger on `user_roles` |
 | A user with active work is not deactivated | Check in the deactivation operation: no active assigned or supervised events |
-| At most one active booking per event and venue | Partial unique constraint on event and venue for `HELD`, `PENDING` and `APPROVED` |
-| No active occupied-range overlap per venue | PostgreSQL range/exclusion constraint on venue and occupied range, using half-open intervals, for `HELD`, `PENDING` and `APPROVED` |
-| Every hold has an expiry no later than 24 hours before its occupied range starts | Check constraint on `HELD` rows |
+| At most one active booking per event and venue | Partial unique constraint on event and venue for `PENDING` and `APPROVED` |
+| No active booking occupied-range overlap per venue | PostgreSQL range/exclusion constraint on venue and occupied range, using half-open intervals, for `PENDING` and `APPROVED` |
+| Every hold has an expiry no later than 24 hours before its occupied range starts | `venue_calendar` validator requires `holdExpiresAt`; the hold operation enforces the limit (section 7.4) |
 | A booking window lies within its event's interval | Trigger, rechecked when event timing changes |
 | At most one primary venue per event | Partial unique constraint on active bookings with the primary flag |
-| Setup/turnaround change only without future active bookings | Check in the venue update operation under the venue lock |
+| Setup/turnaround change only without future active bookings or holds | Check in the detail update operation against PostgreSQL bookings and MongoDB holds (section 7.4) |
 | No equipment reservation beyond usable stock | Locked stock/commitment rows and segment-based calculation in one transaction |
 | One active canonical technical request per event | Partial unique constraint and explicit versioned replacement |
 | At most one open safety review per event | Partial unique constraint on `OPEN` reviews |
@@ -1062,7 +1076,7 @@ The initial draft diagrams include names such as `User`, `Registration`, `Event`
 | One delivery per notification, recipient and channel | Unique triple |
 | Audit and inbox recipient history remains stable | Append-only audit permissions and unique recipient pairs |
 
-Index event owner/organization/coordinator/supervising Lead and status (including the unassigned queue: `SUBMITTED`); venue-booking occupied ranges and hold expiry; venue-block intervals; equipment reservation and unavailability intervals; open safety reviews; pending outbox entries and deliveries by next attempt time; registration event/state/queue order; notification recipient/read state; and activity event/time/ID. Add indexes only from real query needs and verify them with query plans when performance matters.
+Index event owner/organization/coordinator/supervising Lead and status (including the unassigned queue: `SUBMITTED`); venue-booking occupied ranges; equipment reservation and unavailability intervals; open safety reviews; pending outbox entries and deliveries by next attempt time; registration event/state/queue order; notification recipient/read state; and activity event/time/ID. Add indexes only from real query needs and verify them with query plans when performance matters.
 
 ### 6.4 MongoDB collections
 
@@ -1070,22 +1084,23 @@ The MongoDB database is `connectsphere_dev` for shared development (M3). Automat
 
 | Collection | Contents |
 | --- | --- |
-| `venue_details` | `_id` equal to the PostgreSQL venue UUID (while `venue.venue_id` is still an integer, its decimal string); `pg_version`; description; facilities; accessibility features; supported layouts with per-layout notes; emergency-access information; known restrictions; display-only copies of name and location |
+| `venue_details` | `_id` equal to the PostgreSQL venue UUID (while `venue.venue_id` is still an integer, its decimal string); `pg_version`; description; facilities; accessibility features; supported layouts with per-layout notes; emergency-access information; known restrictions; `setupMinutes` and `turnaroundMinutes` (owned here); `version` (stale-write and calendar serialisation, section 7.4); updated time and user; optional `fixture` tag for development data; display-only copies of name and location |
+| `venue_calendar` | One document per hold or block: `venueId`, `type` (`HOLD`, `BLOCK`), interval and occupied range, `status` (holds `ACTIVE`, `CONVERTED`, `EXPIRED`, `RELEASED`; blocks `ACTIVE`, `LIFTED`), hold `eventId`, `label`, `holdExpiresAt`, extension and converted booking ID, block `reason` and `note`, creator, timestamps, `version` and optional `fixture` tag. Indexed by venue and occupied range |
 | `equipment_details` | `_id` equal to the PostgreSQL equipment UUID; `pg_version`; specifications; technical notes; handling and setup notes; display-only copies of name and category |
 | `_schema_migrations` | Applied script names and timestamps |
 
-Every collection has a JSON Schema validator with bounded field sizes. Documents must not hold rule-bearing values (capacity, operating hours, setup/turnaround time, quantities, availability, holds or bookings), participant data or credentials. Display-only copies are refreshed by the outbox and are never used for decisions. Files such as photos or floor plans are outside the baseline (section 3.3).
+Every collection has a JSON Schema validator with bounded field sizes. Documents must not hold capacity, operating hours, quantities, bookings, participant data or credentials. Setup/turnaround minutes, holds and blocks are the exception (T27): MongoDB owns them. Display-only copies are refreshed by the outbox and are never used for decisions. Files such as photos or floor plans are outside the baseline (section 3.3).
 
 ### 6.5 Cross-store rules
 
 | Rule | Detail |
 | --- | --- |
 | Shared identity | Venue and equipment UUIDs are generated in PostgreSQL and reused as the MongoDB `_id`. |
-| Single write path | Every application write to MongoDB is an outbox entry created inside the PostgreSQL transaction of the operation that caused it, then applied after commit (section 7.3). Nothing writes to MongoDB directly from a controller. |
+| Write paths | Display copies of PostgreSQL fields (name, location) are refreshed through outbox entries created inside the PostgreSQL transaction (section 7.3). Venue Staff edits to `venue_details` and every `venue_calendar` write are direct writes through `venueDetailModel.js` and `venueCalendarModel.js` (section 7.4). Nothing writes to MongoDB from a controller. |
 | Ordering | Detail edits also increase the PostgreSQL record's version. An entry carries the PostgreSQL version it reflects. Applying it is a conditional update that succeeds only when the document's `pg_version` is lower, so a late or repeated entry cannot overwrite newer data. |
-| New records | A new venue or equipment item stays inactive in PostgreSQL until its detail document has been applied. |
+| New records | A new venue is saved `ACTIVE` in PostgreSQL (SPM-73) and its detail document is written straight after. Until the document has setup/turnaround minutes, the venue cannot receive holds or bookings. A new equipment item stays inactive until its detail document has been applied. |
 | Reads | Models may read MongoDB directly through the detail models. A document whose `pg_version` is behind PostgreSQL is returned with a "details may be out of date" flag. |
-| Rule checks | Blocking checks (capacity, availability, conflicts, quantities, readiness) read PostgreSQL only. MongoDB detail feeds warnings, search filters, the safety checklist and display. |
+| Rule checks | Capacity, booking-against-booking overlap, quantities and readiness read PostgreSQL. Checks against holds and blocks, and the occupied range, use MongoDB `venue_calendar` and `venue_details` (section 7.4). Other MongoDB detail feeds warnings, search filters, the safety checklist and display. |
 | Audit | Activity logs for detail edits are written in PostgreSQL in the same transaction as the outbox entry. |
 
 ## 7. Transactions and Concurrency
@@ -1103,11 +1118,11 @@ Use an explicit lock order: event IDs, then venue IDs, then equipment IDs, each 
 | Transfer request / Lead handover | Request or supervision change, history, activity and notification |
 | User deactivation | Check for active assigned or supervised events, profile state, activity |
 | Clarification/resubmission | Round, response/amendments, lifecycle, activity and notification |
-| Hold create/extend/convert/expire | Overdue-hold expiry for the venue, suitability and occupied-range checks, hold state, arrangement version, activity and notification |
+| Hold create/extend/convert/expire | Cross-store: see section 7.4. Converting a hold commits the `PENDING` booking, arrangement version, activity and notification in one PostgreSQL transaction, then marks the hold `CONVERTED` |
 | Venue decision | Overdue-hold expiry, current event/venue checks, new commitment, release of the replaced booking when the decision approves a replacement, incident resolution, arrangement version, activity and notification |
 | Booking restoration | Block no longer overlapping, Venue Staff confirmation, incident resolution, withdrawal of an open replacement request where chosen, activity and notification |
 | Venue block create/lift | Block, overlap scan, incident creation, arrangement versions, safety-review supersession, activity and notifications to coordinator, Venue Staff and organiser |
-| Setup/turnaround change | Venue lock, check for future active holds/bookings (refuse and list them if any), venue values, activity |
+| Setup/turnaround change | Cross-store: see section 7.4 |
 | Technical approval | Every availability check, every reservation, support decision, request state, arrangement version, activity and notification |
 | Safety submission/decision | Preconditions, review round, checklist and outcome, lifecycle, activity and notification |
 | Confirm / start preparation | Readiness and safety checks, lifecycle, confirmation snapshot, preparation unlock, activity and notification |
@@ -1120,7 +1135,7 @@ Never publish a success notification or response before commit. Any failure roll
 
 ### 7.2 Interval and equipment calculation
 
-All scheduling uses half-open intervals. Venue availability and conflicts use each booking's occupied range: `[event_start − setup_minutes, event_end + turnaround_minutes)`, using the minutes stored on the booking (section 5.4.1).
+All scheduling uses half-open intervals. Venue availability and conflicts use each booking's occupied range: `[booking_start − setupMinutes, booking_end + turnaroundMinutes)`, using the minutes stored on the booking or hold when it was created (section 5.4.1).
 
 Equipment uses the event interval without venue buffers. For equipment, split the request interval at reservation and unavailability start/end points. For each segment calculate total stock minus active reserved quantity minus unavailable quantity. The minimum across all segments is the available amount.
 
@@ -1137,8 +1152,18 @@ For example, stock is five; one reservation uses three from 09:00–10:00 and an
 | --- | --- |
 | MongoDB unavailable after commit | PostgreSQL changes stand; the entry is retried; reads flag the detail as possibly out of date |
 | Entry applied twice or out of order | The version condition ignores the stale or repeated write |
-| MongoDB unavailable during venue search or a booking decision | Results come from PostgreSQL only; layout, facility and accessibility warnings show as "not checked" (M4); blocking checks are unaffected |
+| MongoDB unavailable during venue search or a booking decision | Search results come from PostgreSQL only; layout, facility and accessibility warnings show as "not checked" (M4). Hold, booking and block creation and the calendar refuse (section 7.4) |
 | PostgreSQL transaction rolls back | No outbox entry exists, so MongoDB is never touched |
+
+### 7.4 Venue calendar writes (T27)
+
+Holds, blocks and setup/turnaround minutes live in MongoDB, so operations that combine them with PostgreSQL bookings cannot share one transaction.
+
+1. **Calendar writes for one venue are serialised on `venue_details.version`.** A setup/turnaround or detail change reads the version, runs its checks and writes only if the version is unchanged, increasing it; otherwise it is refused as a stale write (`409`). A hold or block create, extend, release, lift or conversion does the same inside a MongoDB transaction that also writes the `venue_calendar` document, so two calendar writes for one venue cannot both pass their checks.
+2. **Checks read both stores.** A new hold or booking is refused if its occupied range overlaps an active booking (PostgreSQL), an active unexpired hold or an active block (MongoDB). The PostgreSQL exclusion constraint remains the final guard between bookings.
+3. **Order of writes.** When an operation changes both stores (hold conversion, block incidents), PostgreSQL commits first. The MongoDB write follows; if it fails, it is retried and the inconsistency is logged for the consistency monitor. Activity records for MongoDB-only changes are appended to PostgreSQL `activity_log` after the MongoDB write succeeds.
+4. **Accepted gap.** A PostgreSQL booking created at the same moment as a MongoDB hold or block on the same venue is not covered by either store's lock. The check in step 2 runs immediately before each write, which keeps the window to the time between that check and the write. T27 accepts this window; the consistency monitor reports any overlap it finds.
+5. **MongoDB unavailable.** No hold, block, booking or setup/turnaround change can be made, and the calendar returns an error instead of availability.
 
 ## 8. Notifications and Internal Work
 
@@ -1166,7 +1191,7 @@ Email and SMS are additional channels. The originating transaction creates one `
 
 Use a unique originating action key to prevent duplicate notifications, and the unique delivery triple (section 6.3) to prevent duplicate email or SMS. Notification possession never restores access to an event after permissions change.
 
-Internal work such as waitlist-offer expiry, hold reminders and expiry, completion of events whose end has passed, MongoDB sync, email/SMS delivery, registration-window reconciliation and consistency monitoring stays inside the backend repository. It must use database time, durable claiming/leases and bounded batches so restarts or multiple processes cannot duplicate work. Correctness cannot rely on a browser being open or an in-memory timer; for holds, the in-transaction expiry in section 5.4.3 guarantees correctness even when the job is late. There are no public maintenance-job triggers.
+Internal work such as waitlist-offer expiry, hold reminders and expiry, completion of events whose end has passed, MongoDB sync, email/SMS delivery, registration-window reconciliation and consistency monitoring stays inside the backend repository. It must use database time, durable claiming/leases and bounded batches so restarts or multiple processes cannot duplicate work. Correctness cannot rely on a browser being open or an in-memory timer; for holds, treating an overdue hold as expired at read time (section 5.4.3) guarantees correctness even when the job is late. There are no public maintenance-job triggers.
 
 ## 9. Cross-Repository Development
 
@@ -1361,7 +1386,7 @@ Jira contains ticket-specific acceptance criteria and test cases. The matrix bel
 | Registration | Window/capacity checks, capacity capped by the primary venue and rechecked when the primary changes, registration open only in `CONFIRMED` and `PREPARATION`, paused during reconfirmation, duplicate attempt, concurrent last place, FIFO invitations, expiry, withdrawal/re-entry and participant privacy |
 | Changes/cancellation | Current values unchanged while a request is open, one open request per event, acceptance moves the event to planning and invalidates safety approval, arrangements not reset automatically, attendees see the confirmation snapshot until reconfirmation, capacity-reduction conflict and cancellation release |
 | Notifications/history | Correct audiences, no proposed-change announcement, durability, deduplication and filtered history |
-| Cross-store | PostgreSQL commits before any MongoDB write, rollback leaves MongoDB untouched, MongoDB down after commit is retried, stale or repeated entries are ignored, stale detail is flagged, new records stay inactive until detail exists, blocking checks never read MongoDB, search falls back to PostgreSQL-only results |
+| Cross-store | Holds and blocks read from MongoDB block bookings and holds; overdue holds never block; MongoDB down refuses hold/booking/block creation and calendar availability; PostgreSQL commits before any MongoDB write, rollback leaves MongoDB untouched, MongoDB down after commit is retried, stale or repeated entries are ignored, stale detail is flagged, new records stay inactive until detail exists, blocking checks never read MongoDB, search falls back to PostgreSQL-only results |
 | Notification delivery | Email/SMS sent only after commit, one delivery per recipient and channel, retry with backoff, provider failure keeps the in-app notification, SMS only for urgent triggers |
 | Database/security | Frontend cannot bypass backend or reach either store, runtime cannot grant roles/alter schema/delete audit, MongoDB validators reject rule-bearing or oversized fields, migrations and schema scripts remain compatible and fixtures in both stores clean up safely |
 | UI | Loading/empty/error/conflict states, preserved form input, role-aware controls, keyboard use, mobile usability and live backend journeys; for every role, its destination, shared sidebar geometry, role-specific navigation, exactly one active tab, mobile menu and Escape, and logout |
@@ -1425,6 +1450,7 @@ IDs: `D` items predate v0.8, `Q` items were raised during the Week 7 review, `T`
 | T24 | Every role uses one shared dashboard shell; protected pages use `DashboardWorkspace` and `PageContent`; role tabs live in `lib/navigation.ts` and route and role rules in `lib/auth.ts` (sections 2.6, 3.4) | Separate role shells and unscoped global styles broke other members' layouts; one frame keeps navigation, logout and mobile behavior consistent |
 | T25 | Feature code lives in role folders that any member may work in; global CSS holds shared foundations only | Lets any member take any ticket without growing a shared dashboard file or overriding other layouts |
 | T26 | Changes to shared UI and auth files need a shared-component reviewer; frontend PRs pass lint, unit and browser checks | These files affect every role |
+| T27 | MongoDB owns venue setup/turnaround minutes and the venue calendar (tentative holds and operational blocks); venue bookings stay in PostgreSQL. Checks against holds and blocks read MongoDB and refuse when it is unavailable, with the cross-store gap in section 7.4 accepted | Developer decision of 20 October 2026, made while implementing SPM-73/SPM-74: venue configuration and calendar data belong with the venue detail documents |
 
 Retired: T1 and T2 (buffer conflict scan and per-booking stored buffers), replaced by T16.
 
@@ -1442,7 +1468,7 @@ These have not been confirmed by the customer or the whole team. Change them thr
 | D11 | Jira test visibility | Resolve custom-field/test-management permissions or obtain an export before claiming ticket completion |
 | M1 | MongoDB driver | Native `mongodb` driver; collection validators enforce structure, so no second schema layer (Mongoose) |
 | M2 | Backend language | Stays JavaScript (CommonJS); the C4 diagrams' TypeScript labels are corrected rather than the code migrated |
-| M3 | MongoDB names | Database `connectsphere_dev`; collections `venue_details` and `equipment_details`, with `_id` equal to the PostgreSQL UUID |
+| M3 | MongoDB names | Database `connectsphere_dev`; collections `venue_details`, `venue_calendar` and `equipment_details`; detail `_id` equal to the PostgreSQL UUID |
 | M4 | Search when MongoDB is unavailable | Return PostgreSQL-only results with layout, facility and accessibility marked "not checked" |
 | M5 | Notification channels | In-app for everything; email for every notification type; SMS only for cancellation and venue blocks affecting events starting within 48 hours |
 | M6 | Email and SMS providers | Not chosen; decided by the first ticket that sends each channel, with environment variables added to section 2.7.2 |
@@ -1480,6 +1506,9 @@ If this master, Jira, a repository README and implemented code disagree, surface
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 1.2 | 2026-10-20 | Implemented on backend and frontend `SPM-181-review-venue-req` (with SPM-73 merged in); takes effect when merged | T27: MongoDB owns venue setup/turnaround minutes (`venue_details.setupMinutes`, `turnaroundMinutes`) and the venue calendar of holds and blocks (`venue_calendar`); venue bookings stay in PostgreSQL. Checks against holds and blocks read MongoDB and refuse when it is unavailable, with the cross-store window of section 7.4 accepted. Sections changed: Changes from 1.1, 1, 1.2, 1.3, 2.2, 2.3, 3.4, 5.4, 5.4.1, 5.4.3, 5.4.4, 5.4.5, 6, 6.2 (`venue_blocks` and the `HELD` booking state removed), 6.3, 6.4, 6.5, 7.1, 7.2, 7.3, new 7.4, 8, 11, 12.1.2 (T27) and 12.1.3 (M3). Jira request: none for the rule itself (developer decision while implementing SPM-73 and SPM-74). Compatibility: MongoDB script `0002_venue_calendar` (validator adds the minutes, `version` and `fixture`; new `venue_calendar` collection and index); the legacy PostgreSQL `venue.setup_turnaround_min` is read-only until a later migration removes it. New routes `GET /api/venues/availability` (Coordinators, Venue Staff) and `PUT /api/venues/:venueId/details` (Venue Staff); `GET /api/venues` gains search/filter parameters and `setupMinutes`, `turnaroundMinutes` and `filtersNotChecked`; `GET /api/venues/:venueId` adds `details` and `detailStatus`. No hold or block is created by any route yet (later tickets); `npm run seed:venue-calendar` adds development fixtures tagged `spm74-dev`. Verified implementation/database version: MongoDB `0002_venue_calendar` applied to `connectsphere_dev`; PostgreSQL head `20261020090836`; backend unit tests 850/850; frontend lint, 44 unit tests and the browser suite (101 passed on the full run, the four failing new tests fixed and the 22 venue tests rerun green); live API and seed-account checks for Venue Staff and Coordinator. The SPM-72/73 live integration suites could not run: the shared fixture fails on the database trigger `event_guard_coordinator_schedule` (`COORDINATOR_CONFLICT`), which is not in this branch's migrations |
+| 1.1.3 | 2026-10-20 | Implemented on backend and frontend `SPM-181-review-venue-req`; takes effect when merged | Venue Staff review of venue booking requests. PostgreSQL `venue_booking` (the live name of `venue_bookings`) gains a generated unique `booking_reference` and the per-booking label, expected attendance, layout and requirement fields already listed in 6.2; `event` gains a nullable `event_type` with a check constraint (6.2). Venue Staff's `/dashboard` lists booking requests and `/events/[eventId]` shows their read-only booking view (3.4). No business rule change; booking decisions remain a later SPM-24 story. Jira request: SPM-181. Compatibility: additive columns only; the organiser form does not collect `event_type` yet; `homeForRole` returns Venue Staff to `/dashboard` as 3.4 already states. The live `booking_status` enum still lacks `HELD`, `EXPIRED` and `RELEASED` and is an enum rather than text with a check (5.4, 6.1); unchanged here. Verified implementation/database version: PostgreSQL migration `20261020070631_spm181_venue_booking_details` applied to the development project; backend unit tests 629/629 |
+| 1.1.2 | 2026-10-19 | Implemented on backend `feature/SPM-73-venue-catalog-maintenance`, merged into `SPM-181-review-venue-req`; migration applied 2026-10-20 as `20261020090836` | Venue maintenance by Venue Staff (6.2): operational `status` (`ACTIVE`, `INACTIVE`, `UNDER_MAINTENANCE`) separate from `is_active`, contact details, created/updated user and time, version, case-insensitive unique names, positive capacity; create, update and status change are atomic with their `activity_log` entry; taking a venue out of service with upcoming bookings needs confirmation and never changes bookings. Conflict surfaced, not resolved: SPM-73 AC6 saves a created venue as Active and bookable at once, while 6.5 keeps new records inactive until their detail document is applied through the outbox. The outbox does not exist, so the implementation follows Jira and creates no detail document; 6.5 applies once the outbox ticket lands. Jira request: SPM-73. Compatibility: additive PostgreSQL migration `20261020090836_spm73_venue_catalogue_maintenance` (defaults keep every existing venue `ACTIVE`, version 1); `GET /api/events/request-options` and venue-preference validation now exclude venues that are not `ACTIVE`; no MongoDB change. Verified implementation/database version: migration dry-run in a rolled-back transaction on the development project (all function paths); backend unit tests 672/672; live integration suite written but not run until the migration is applied |
 | 1.1.1 | 2026-10-19 | Implemented on backend `feature/SPM-72-view-venue`; takes effect when merged | MongoDB is now required for backend startup: `config/mongodb.js`, `mongodb/schemas/venue_details.json`, `mongodb/migrations/0001_venue_details.js` and `npm run mongo:migrate` exist, and the health check pings MongoDB (2.7.1–2.7.3). `venue_details._id` is the integer `venue_id` as a string until venues move to UUID keys (6.4). PostgreSQL `venue.is_active` records the venue active state of 6.2: `false` means the venue was deleted as unusable (SPM-210) and its row is kept for history. Jira request: SPM-72 (review fixes). Compatibility: every developer needs `MONGODB_URI` and `MONGODB_DB_NAME`; `connectsphere_dev` and `venue_details` were created with `npm run mongo:migrate` on 2026-10-19. SPM-73's operational status (Active, Inactive, Under Maintenance) is a separate column on top of `is_active`. No business rule change. Verified implementation/database version: PostgreSQL migration `20261019025616_spm72_venue_active_state` applied to the development project; backend unit tests 539/539 and `venue.integration.test.js` 14/14 with in-memory MongoDB |
 | 1.1 | 2026-10-18 | Accepted; takes effect when the frontend and backend `fix/main-completed-ticket-baseline` branches are merged | Recorded the frontend shared workspace and agent agreement from frontend `docs/team-ui-workflow.md` and `docs/agent-task-template.md`; see "Changes from 1.0". Current frontend structure (2.4) with the `src/` migration kept as the target (2.5); shared-file responsibilities, role folders, the add-a-route procedure, scoped styling and auth/session reuse (2.6); backend `FRONTEND_ORIGIN`, `ENABLE_COORDINATOR_WORKFLOWS`, `SEED_ACCOUNT_PASSWORD` and `TEST_DATABASE_URL` (2.7.2); frontend `NEXT_PUBLIC_*` variables replacing the retired `api/events.tsx` `BACKEND_URL` setup, the seed-account login as the end-to-end startup check, and matching environment checks and troubleshooting (2.7.4–2.7.8); master labels over pre-1.0 ticket wording (3.5); role homes and disabled unimplemented navigation (3.4); trusted-profile role source and logout revocation (4.1); agent template, scope limits, shared-component review and PR checks (9.2); cross-repository contract renames (9.3); seed credentials and fixtures (10.4); shared frame as design reference (10.5.7); frontend check commands (11); T24–T26 (12.1.2); Hanken Grotesk font (1.1). `docs/main-repair-baseline.md` is a branch report and is not copied into this master. Jira request: none (frontend branch documentation; branch commits reference SPM-32, SPM-35 and SPM-37). Compatibility: frontend structure, process and environment documentation; the only API change is the new organiser-only `GET /api/events/request-options` and the opt-in gate on Lead workflow routes; no business rule, PostgreSQL or MongoDB change. Open frontend branches that use the removed `CoordinatorShell`, coordinator global styles, `components/shared/status-chip.tsx` or `lib/api/events.ts` (SPM-174, SPM-177, SPM-33) must move to the shared shell. Verified implementation/database version: frontend `fix/main-completed-ticket-baseline` @ `502cc14` (not yet on main `229e56d`); backend `fix/main-completed-ticket-baseline` @ `f41a445` (not yet on main `a3f51c6`); verified with backend unit tests 342/342, auth/signup integration 64/64 (event and reassignment suites need `TEST_DATABASE_URL`), frontend lint, 8 unit tests, 29/29 browser journeys and the live seed-account run; PostgreSQL migration head `20261015121555` unchanged (the backend branch's own migration history ends at `20261008090000`; SPM-33 adds the rest); no MongoDB scripts |
 | 1.0 | 2026-10-14 | Release 1 baseline | Applied the customer's Session 3 answers and the team's remaining decisions; see "Changes from 0.8" at the top of this document. Lifecycle reordered to safety review → confirmed → preparation, with explicit "Start preparation" (5.2, 5.3); assignment moves events to `UNDER_REVIEW` and organisers can withdraw unassigned events (5.2); supervising Lead per event, Lead/Coordinator role exclusion, transfer requests, Lead handover and the deactivation rule (3.1, 5.8); per-booking time windows and a coordinator-chosen primary venue (5.4.2); setup/turnaround changes refused while future bookings exist (5.4.1); operating hours checked on the whole occupied range as a warning (5.4); hold limits (5.4.3); venue unavailability handled by restoration, replacement as a change request, or cancellation (5.4.4); per-venue safety rejection, organiser-visible comments and no automatic resets (5.9); simplified change workflow (5.7); registration open in `CONFIRMED` and `PREPARATION` and capped by the primary venue (5.6); organiser status labels (3.5). Also updated sections 3, 4.2, 6, 7.1, 8, 9.2, 11 and 12; removed the provisional decision gate (former 10.6). Jira request: none recorded (Customer Clarification Session 3; team decisions of 14 October 2026). Compatibility: changes 0.8 schema plans — event state order and check constraint; `events` gains supervising Lead, transfer request and previously-confirmed flag; new `event_supervision` table; `venue_bookings` gains a booking window and primary flag and drops stored setup/turnaround minutes and the main-space flag; `safety_reviews` gains organiser comments, internal notes and rejected booking IDs; `event_change_requests` simplified; `BUFFER_CONFLICT` incident type removed; role-exclusion trigger. No migrations or schema scripts written yet. Verified implementation/database version: none (documentation only) |

@@ -80,6 +80,20 @@ describe("GET /api/venues", () => {
   test.each([
     ["post", "/api/venues"],
     ["put", "/api/venues/1"],
+    ["put", "/api/venues/1/status"],
+    ["get", "/api/venues/manage"],
+    ["get", "/api/venues/1"],
+  ])(
+    "[SPM-72-AC1][SPM-73-AC2] should_refuse_venue_maintenance_to_a_coordinator_for_%s_%s",
+    async (method, path) => {
+      const response = await request(app)[method](path).set("Authorization", "Bearer token").send({ name: "No write" });
+
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe("FORBIDDEN");
+    }
+  );
+
+  test.each([
     ["patch", "/api/venues/1"],
     ["delete", "/api/venues/1"],
     ["post", "/api/venues/1/rooms"],

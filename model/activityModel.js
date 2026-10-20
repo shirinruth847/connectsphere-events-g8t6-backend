@@ -95,7 +95,23 @@ const findEventHistory = async (eventId, { limit, cursor = null, audiences = [] 
   };
 };
 
+// Appends an audit entry for a change committed outside PostgreSQL (a MongoDB
+// detail edit, Master 7.4 step 3). The runtime may only insert (append-only).
+const appendActivity = async ({ userId, entityName, entityId, action, details, changes = null, audience }) => {
+  const { error } = await supabase.from("activity_log").insert({
+    user_id: userId,
+    entity_name: entityName,
+    entity_id: entityId,
+    action,
+    details,
+    changes,
+    audience,
+  });
+  if (error) throw error;
+};
+
 module.exports = {
+  appendActivity,
   findEventHistory,
   toHistoryEntry,
   toChangeList,
