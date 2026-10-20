@@ -11,5 +11,7 @@ ALTER TABLE public.event
     coordinator_id WITH =,
     tstzrange(start_datetime, end_datetime) WITH &&
   )
-  WHERE coordinator_id IS NOT NULL
-    AND status NOT IN ('DRAFT', 'COMPLETED', 'REJECTED', 'CANCELLED');
+  WHERE (
+    coordinator_id IS NOT NULL
+    AND status NOT IN ('DRAFT', 'COMPLETED', 'REJECTED', 'CANCELLED')
+  );
