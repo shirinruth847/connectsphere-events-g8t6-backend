@@ -18,9 +18,6 @@ const queryReturning = (result) => {
   query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   query.limit = jest.fn().mockResolvedValue(result);
   query.maybeSingle = jest.fn().mockResolvedValue(result);
-  if (result && typeof result.then === "function") {
-    query.then = jest.fn((resolve) => result.then(resolve));
-  }
   return query;
 };
 
