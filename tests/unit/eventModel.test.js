@@ -602,20 +602,11 @@ describe("Lead assignment reads", () => {
     expect(query.order).toHaveBeenNthCalledWith(3, "event_id", { ascending: true });
   });
 
-  test("should_return_active_assignments_with_current_coordinator_names", async () => {
-    const eventQuery = queryReturning({ data: [{
-      event_id: 42, coordinator_id: 20, status: "PLANNING", title: "Conference",
-      start_datetime: "2026-11-01T09:00:00.000Z", end_datetime: "2026-11-01T10:00:00.000Z",
-      expected_attendance: 100, organisation: { organisation_id: 3, name: "Org" },
-    }], error: null });
-    const userQuery = queryReturning({ data: [{ user_id: 20, name: "Coordinator Two" }], error: null });
-    supabase.from.mockImplementation((table) => table === "event" ? eventQuery : userQuery);
-
-    await expect(eventModel.findLeadAssignments()).resolves.toEqual([expect.objectContaining({
-      eventId: 42, coordinatorId: 20, coordinatorName: "Coordinator Two", status: "PLANNING",
-    })]);
-    expect(eventQuery.not).toHaveBeenCalledWith("coordinator_id", "is", null);
-    expect(eventQuery.not).toHaveBeenCalledWith("status", "in", '("COMPLETED","REJECTED","CANCELLED")');
+  test("should_scope_active_assignments_to_the_verified_lead_in_the_database", async () => {
+    const assignments = [{ eventId: 42, coordinatorId: 20, coordinatorName: "Coordinator Two", hasScheduleConflict: true }];
+    supabase.rpc.mockResolvedValue({ data: assignments, error: null });
+    await expect(eventModel.findLeadAssignments(10)).resolves.toEqual(assignments);
+    expect(supabase.rpc).toHaveBeenCalledWith("list_lead_event_assignments", { p_lead_id: 10 });
   });
 
   test("should_return_only_active_coordinators_and_their_active_event_schedules", async () => {
@@ -686,5 +677,26 @@ describe("SPM-36 submission metadata", () => {
   });
   test("[BE-03] legacy events never invent a submission time", () => {
     expect(eventModel.toApi({ event_id: 42, status: "SUBMITTED", created_at: POSTGREST_TIMESTAMP, updated_at: POSTGREST_TIMESTAMP }).submittedAt).toBeNull();
+  });
+});
+
+
+describe("[SPM-177 AC2] coordinator point of contact", () => {
+  test("fresh scoped reads fetch only the coordinator's display name", async () => {
+    const row = { event_id: 42, organiser_id: 11, coordinator_id: 20, status: "UNDER_REVIEW", coordinator: { name: "Alex Coordinator" } };
+    const query = queryReturning({ data: row, error: null });
+    supabase.from.mockReturnValue(query);
+    const result = await eventModel.findVisibleEvent(42, { user_id: 11, role: "ORGANISER", organisation_ids: [] });
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("coordinator:user!event_coordinator_id_fkey(name)"));
+    expect(eventModel.toApi(result, 11).coordinatorName).toBe("Alex Coordinator");
+    expect(eventModel.toApi(result, 11)).not.toHaveProperty("coordinator.email");
+  });
+  test("unassigned or unavailable coordinator names are null", () => {
+    expect(eventModel.toApi({ event_id: 42, status: "SUBMITTED", coordinator_id: null }).coordinatorName).toBeNull();
+    expect(eventModel.toApi({ event_id: 42, status: "UNDER_REVIEW", coordinator_id: 20 }).coordinatorName).toBeNull();
+  });
+  test("a revoked Lead permission is returned as a domain denial", async () => {
+    supabase.rpc.mockResolvedValue({ data: null, error: { message: "FORBIDDEN" } });
+    await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 20, leadId: 11 })).rejects.toMatchObject({ code: "FORBIDDEN", name: "EventRequestError" });
   });
 });

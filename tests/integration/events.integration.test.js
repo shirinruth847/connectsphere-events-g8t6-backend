@@ -8,7 +8,12 @@ const request = require("supertest");
 const app = require("../../server");
 const supabase = require("../../config/supabase");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
-const { newRunId, createAuthFixtures, cleanupAuthFixtures, recordFixtureIds } = require("../fixtures/authFixtures");
+const {
+  newRunId,
+  createAuthFixtures,
+  cleanupAuthFixtures,
+  recordFixtureIds,
+} = require("../fixtures/authFixtures");
 
 jest.setTimeout(120000);
 
@@ -20,12 +25,19 @@ const createdEventIds = new Set();
 const signIn = async (key) => {
   if (!sessions.has(key)) {
     const account = fixtures.accounts[key];
-    sessions.set(key, signInWithPassword(account.email, account.password).then(({ session, error }) => {
-      if (error || !session) {
-        throw new Error(`Sign-in for ${key} failed: ${error ? `${error.status} ${error.code}` : "no session"}`);
-      }
-      return session;
-    }));
+    sessions.set(
+      key,
+      signInWithPassword(account.email, account.password).then(
+        ({ session, error }) => {
+          if (error || !session) {
+            throw new Error(
+              `Sign-in for ${key} failed: ${error ? `${error.status} ${error.code}` : "no session"}`,
+            );
+          }
+          return session;
+        },
+      ),
+    );
   }
   return sessions.get(key);
 };
@@ -40,13 +52,16 @@ const track = (res) => {
 };
 
 const call = async (method, path, key, body, idempotencyKey) => {
-  let req = request(app)[method](path).set("Authorization", `Bearer ${(await signIn(key)).access_token}`);
+  let req = request(app)
+    [method](path)
+    .set("Authorization", `Bearer ${(await signIn(key)).access_token}`);
   if (idempotencyKey) req = req.set("Idempotency-Key", idempotencyKey);
   return track(await (body === undefined ? req : req.send(body)));
 };
 
 const newKey = () => crypto.randomUUID();
-const inDays = (days) => new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+const inDays = (days) =>
+  new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 const titled = (label) => `spm32-${runId} ${label}`;
 
 const validRequest = (label) => ({
@@ -69,32 +84,59 @@ const rows = async (query, step) => {
 };
 
 const eventRow = (eventId) =>
-  rows(supabase.from("event").select("status,coordinator_id").eq("event_id", eventId).single(), "event lookup");
+  rows(
+    supabase
+      .from("event")
+      .select("status,coordinator_id")
+      .eq("event_id", eventId)
+      .single(),
+    "event lookup",
+  );
 
 const activityActions = async (eventId) =>
-  (await rows(
-    supabase.from("activity_log").select("action").eq("entity_name", "event").eq("entity_id", eventId).order("log_id"),
-    "activity lookup"
-  )).map(({ action }) => action);
+  (
+    await rows(
+      supabase
+        .from("activity_log")
+        .select("action")
+        .eq("entity_name", "event")
+        .eq("entity_id", eventId)
+        .order("log_id"),
+      "activity lookup",
+    )
+  ).map(({ action }) => action);
 
 const notificationsFor = (eventId) =>
   rows(
-    supabase.from("notification").select("title,notification_recipient(recipient_id)").eq("event_id", eventId),
-    "notification lookup"
+    supabase
+      .from("notification")
+      .select("title,notification_recipient(recipient_id)")
+      .eq("event_id", eventId),
+    "notification lookup",
   );
 
 const eventsTitled = async (title) =>
-  (await rows(supabase.from("event").select("event_id").eq("title", title), "title lookup")).length;
+  (
+    await rows(
+      supabase.from("event").select("event_id").eq("title", title),
+      "title lookup",
+    )
+  ).length;
 
 const activeLeadIds = async () => (await rows(
   supabase.from("user").select("user_id").eq("role", "COORDINATOR_LEAD").eq("is_active", true), "Lead lookup"
 )).map(row => row.user_id);
 
 const organiserEventCount = async (key) =>
-  (await rows(
-    supabase.from("event").select("event_id").eq("organiser_id", fixtures.accounts[key].userId),
-    "organiser event lookup"
-  )).length;
+  (
+    await rows(
+      supabase
+        .from("event")
+        .select("event_id")
+        .eq("organiser_id", fixtures.accounts[key].userId),
+      "organiser event lookup",
+    )
+  ).length;
 
 beforeAll(async () => {
   await require("../fixtures/adminCleanup").assertAuditCleanupAvailable();
@@ -107,7 +149,13 @@ afterAll(async () => {
 
 describe("POST /api/events (SPM-35)", () => {
   test("[SPM-35-TC-001/SPM-174/SPM-180] should_submit_unassigned_then_allow_a_lead_to_assign_a_coordinator", async () => {
-    const res = await call("post", "/api/events", "organiserA", validRequest("TC-001"), newKey());
+    const res = await call(
+      "post",
+      "/api/events",
+      "organiserA",
+      validRequest("TC-001"),
+      newKey(),
+    );
 
     expect(res.status).toBe(201);
     const { eventId, requestId, statusLabel, statusNote } = res.body.event;
@@ -121,13 +169,23 @@ describe("POST /api/events (SPM-35)", () => {
     expect(await activityActions(eventId)).toEqual(["EVENT_SUBMITTED"]);
 
     const submitNotifications = await notificationsFor(eventId);
-    expect(submitNotifications.map(({ title }) => title)).toEqual(["Event request received"]);
-    expect(submitNotifications[0].notification_recipient.map(({ recipient_id }) => recipient_id).sort())
-      .toEqual([fixtures.accounts.organiserA.userId, ...await activeLeadIds()].sort());
+    expect(submitNotifications.map(({ title }) => title)).toEqual([
+      "Event request received",
+    ]);
+    expect(
+      submitNotifications[0].notification_recipient.map(
+        ({ recipient_id }) => recipient_id,
+      ).sort(),
+    ).toEqual([fixtures.accounts.organiserA.userId, ...await activeLeadIds()].sort());
 
-    const assignment = await call("post", `/api/events/${eventId}/coordinator`, "coordinatorLead", {
-      coordinatorId: fixtures.accounts.coordinatorThree.userId,
-    });
+    const assignment = await call(
+      "post",
+      `/api/events/${eventId}/coordinator`,
+      "coordinatorLead",
+      {
+        coordinatorId: fixtures.accounts.coordinatorThree.userId,
+      },
+    );
     expect(assignment.status).toBe(200);
     expect(assignment.body.event.eventId).toBe(eventId);
 
@@ -139,18 +197,22 @@ describe("POST /api/events (SPM-35)", () => {
     expect(assignedRow.status).toBe("UNDER_REVIEW");
     expect(await activityActions(eventId)).toEqual(["EVENT_SUBMITTED", "COORDINATOR_ASSIGNED"]);
     const notifications = await notificationsFor(eventId);
-    const recipients = notifications.flatMap((item) => item.notification_recipient.map(({ recipient_id }) => recipient_id));
+    const recipients = notifications.flatMap((item) =>
+      item.notification_recipient.map(({ recipient_id }) => recipient_id),
+    );
     expect(notifications.map(({ title }) => title).sort()).toEqual([
       "Event coordinator assigned",
       "Event request received",
       "New event coordination assignment",
     ]);
-    expect(recipients.sort()).toEqual([
-      fixtures.accounts.organiserA.userId,
-      fixtures.accounts.organiserA.userId,
-      fixtures.accounts.coordinatorThree.userId,
-      ...await activeLeadIds(),
-    ].sort());
+    expect(recipients.sort()).toEqual(
+      [
+        fixtures.accounts.organiserA.userId,
+        fixtures.accounts.organiserA.userId,
+        fixtures.accounts.coordinatorThree.userId,
+        ...await activeLeadIds(),
+      ].sort(),
+    );
 
     // assign_event_coordinator moves the request to UNDER_REVIEW (SPM-33 migration 20261015121555).
     const list = await call("get", "/api/events/mine?status=UNDER_REVIEW", "organiserA");
@@ -171,12 +233,18 @@ describe("POST /api/events (SPM-35)", () => {
   });
 
   test("[SPM-35-TC-003] should_create_nothing_when_start_is_24_hours_ahead", async () => {
-    const body = { ...validRequest("TC-003"), startDatetime: inDays(1), endDatetime: inDays(1.1) };
+    const body = {
+      ...validRequest("TC-003"),
+      startDatetime: inDays(1),
+      endDatetime: inDays(1.1),
+    };
 
     const res = await call("post", "/api/events", "organiserA", body, newKey());
 
     expect(res.status).toBe(400);
-    expect(res.body.fields.startDatetime).toBe("Event date must be at least 48 hours in advance.");
+    expect(res.body.fields.startDatetime).toBe(
+      "Event date must be at least 48 hours in advance.",
+    );
     expect(await eventsTitled(titled("TC-003"))).toBe(0);
   });
 
@@ -197,9 +265,21 @@ describe("POST /api/events (SPM-35)", () => {
 
   test("[EVT-IDEM-004] should_return_409_when_an_idempotency_key_is_reused_for_a_different_request", async () => {
     const key = newKey();
-    await call("post", "/api/events", "organiserA", validRequest("key-reuse-1"), key);
+    await call(
+      "post",
+      "/api/events",
+      "organiserA",
+      validRequest("key-reuse-1"),
+      key,
+    );
 
-    const res = await call("post", "/api/events", "organiserA", validRequest("key-reuse-2"), key);
+    const res = await call(
+      "post",
+      "/api/events",
+      "organiserA",
+      validRequest("key-reuse-2"),
+      key,
+    );
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("IDEMPOTENCY_KEY_REUSED");
@@ -211,10 +291,14 @@ describe("POST /api/events (SPM-35)", () => {
     const body = validRequest("parallel-same-key");
     await signIn("organiserA");
 
-    const responses = await Promise.all([1, 2, 3].map(() => call("post", "/api/events", "organiserA", body, key)));
+    const responses = await Promise.all(
+      [1, 2, 3].map(() => call("post", "/api/events", "organiserA", body, key)),
+    );
 
     expect(responses.map(({ status }) => status)).toEqual([201, 201, 201]);
-    expect(new Set(responses.map(({ body: { event } }) => event.eventId)).size).toBe(1);
+    expect(
+      new Set(responses.map(({ body: { event } }) => event.eventId)).size,
+    ).toBe(1);
     expect(await eventsTitled(body.title)).toBe(1);
   });
 
@@ -222,29 +306,59 @@ describe("POST /api/events (SPM-35)", () => {
     await signIn("organiserA");
 
     const responses = await Promise.all(
-      [1, 2, 3, 4].map((n) => call("post", "/api/events", "organiserA", validRequest(`parallel-${n}`), newKey()))
+      [1, 2, 3, 4].map((n) =>
+        call(
+          "post",
+          "/api/events",
+          "organiserA",
+          validRequest(`parallel-${n}`),
+          newKey(),
+        ),
+      ),
     );
 
     expect(responses.map(({ status }) => status)).toEqual([201, 201, 201, 201]);
-    const submitted = await Promise.all(responses.map(({ body: { event } }) => eventRow(event.eventId)));
-    expect(submitted).toEqual(Array(4).fill({ status: "SUBMITTED", coordinator_id: null }));
+    const submitted = await Promise.all(
+      responses.map(({ body: { event } }) => eventRow(event.eventId)),
+    );
+    expect(submitted).toEqual(
+      Array(4).fill({ status: "SUBMITTED", coordinator_id: null }),
+    );
   });
 });
 
 describe("drafts (SPM-37)", () => {
   test("[SPM-37-S1] should_save_a_title_only_draft_privately_without_a_coordinator_or_notifications", async () => {
-    const res = await call("post", "/api/events/drafts", "organiserA", { title: titled("S1") }, newKey());
+    const res = await call(
+      "post",
+      "/api/events/drafts",
+      "organiserA",
+      { title: titled("S1") },
+      newKey(),
+    );
 
     expect(res.status).toBe(201);
     expect(res.body.message).toBe("Draft saved successfully.");
     const { eventId } = res.body.event;
-    expect(await eventRow(eventId)).toEqual({ status: "DRAFT", coordinator_id: null });
+    expect(await eventRow(eventId)).toEqual({
+      status: "DRAFT",
+      coordinator_id: null,
+    });
     expect(await activityActions(eventId)).toEqual(["DRAFT_CREATED"]);
     expect(await notificationsFor(eventId)).toEqual([]);
 
-    const otherOrganiser = await call("get", `/api/events/${eventId}`, "organiserB");
+    const otherOrganiser = await call(
+      "get",
+      `/api/events/${eventId}`,
+      "organiserB",
+    );
     expect(otherOrganiser.status).toBe(404);
-    const otherEdit = await call("put", `/api/events/${eventId}/draft`, "organiserB", { title: "Taken over" });
+    const otherEdit = await call(
+      "put",
+      `/api/events/${eventId}/draft`,
+      "organiserB",
+      { title: "Taken over" },
+    );
     expect(otherEdit.status).toBe(404);
   });
 
@@ -254,7 +368,7 @@ describe("drafts (SPM-37)", () => {
       "/api/events/drafts",
       "organiserA",
       { title: titled("registration-toggle"), isRegistrationEnabled: true },
-      newKey()
+      newKey(),
     );
 
     expect(res.status).toBe(201);
@@ -269,57 +383,112 @@ describe("drafts (SPM-37)", () => {
       {
         title: titled("requirements"),
         venuePreferences: [String(fixtures.venue.venueId)],
-        equipmentRequirements: [{ equipmentId: String(fixtures.equipmentId), quantity: "2" }],
+        equipmentRequirements: [
+          { equipmentId: String(fixtures.equipmentId), quantity: "2" },
+        ],
       },
-      newKey()
+      newKey(),
     );
 
     expect(res.status).toBe(201);
     expect(res.body.event.venuePreferences).toEqual([fixtures.venue.venueId]);
-    expect(res.body.event.equipmentRequirements).toEqual([{ equipmentId: fixtures.equipmentId, quantity: 2 }]);
+    expect(res.body.event.equipmentRequirements).toEqual([
+      { equipmentId: fixtures.equipmentId, quantity: 2 },
+    ]);
   });
 
   test("[SPM-37-S3] should_skip_the_activity_log_for_auto_saves_but_log_manual_saves", async () => {
-    const created = await call("post", "/api/events/drafts", "organiserA", { title: titled("S3") }, newKey());
+    const created = await call(
+      "post",
+      "/api/events/drafts",
+      "organiserA",
+      { title: titled("S3") },
+      newKey(),
+    );
     const { eventId } = created.body.event;
 
-    const autoSave = await call("put", `/api/events/${eventId}/draft`, "organiserA", { expectedAttendance: 200, isAutoSave: true });
+    const autoSave = await call(
+      "put",
+      `/api/events/${eventId}/draft`,
+      "organiserA",
+      { expectedAttendance: 200, isAutoSave: true },
+    );
     expect(autoSave.status).toBe(200);
     expect(autoSave.body.message).toBe("Draft auto-saved.");
     expect(autoSave.body.savedAt).toEqual(expect.any(String));
     expect(await activityActions(eventId)).toEqual(["DRAFT_CREATED"]);
 
-    const manualSave = await call("put", `/api/events/${eventId}/draft`, "organiserA", { purpose: "Reunion" });
+    const manualSave = await call(
+      "put",
+      `/api/events/${eventId}/draft`,
+      "organiserA",
+      { purpose: "Reunion" },
+    );
     expect(manualSave.status).toBe(200);
-    expect(await activityActions(eventId)).toEqual(["DRAFT_CREATED", "DRAFT_UPDATED"]);
+    expect(await activityActions(eventId)).toEqual([
+      "DRAFT_CREATED",
+      "DRAFT_UPDATED",
+    ]);
   });
 
   test("[SPM-37-TC-NEG-INCOMPLETE] should_keep_the_draft_unchanged_when_submitted_without_attendance", async () => {
-    const created = await call("post", "/api/events/drafts", "organiserA", { title: titled("incomplete") }, newKey());
+    const created = await call(
+      "post",
+      "/api/events/drafts",
+      "organiserA",
+      { title: titled("incomplete") },
+      newKey(),
+    );
     const { eventId } = created.body.event;
     const body = validRequest("incomplete");
     delete body.expectedAttendance;
 
-    const res = await call("put", `/api/events/${eventId}/submit`, "organiserA", body);
+    const res = await call(
+      "put",
+      `/api/events/${eventId}/submit`,
+      "organiserA",
+      body,
+    );
 
     expect(res.status).toBe(400);
-    expect(res.body.fields.expectedAttendance).toBe("Expected Attendance is required for submission");
-    expect(await eventRow(eventId)).toEqual({ status: "DRAFT", coordinator_id: null });
+    expect(res.body.fields.expectedAttendance).toBe(
+      "Expected Attendance is required for submission",
+    );
+    expect(await eventRow(eventId)).toEqual({
+      status: "DRAFT",
+      coordinator_id: null,
+    });
     expect(await notificationsFor(eventId)).toEqual([]);
   });
 
   test("[SPM-37-S4] should_submit_a_resumed_draft_and_reject_later_draft_edits", async () => {
-    const created = await call("post", "/api/events/drafts", "organiserA", { title: titled("S4") }, newKey());
+    const created = await call(
+      "post",
+      "/api/events/drafts",
+      "organiserA",
+      { title: titled("S4") },
+      newKey(),
+    );
     const { eventId } = created.body.event;
     const loaded = await call("get", `/api/events/${eventId}`, "organiserA");
-    expect(loaded.body.event).toEqual(expect.objectContaining({ title: titled("S4"), isOwner: true }));
+    expect(loaded.body.event).toEqual(
+      expect.objectContaining({ title: titled("S4"), isOwner: true }),
+    );
 
-    const submitted = await call("put", `/api/events/${eventId}/submit`, "organiserA", validRequest("S4"));
+    const submitted = await call(
+      "put",
+      `/api/events/${eventId}/submit`,
+      "organiserA",
+      validRequest("S4"),
+    );
 
     expect(submitted.status).toBe(200);
     expect(submitted.body.event.statusLabel).toBe("Submitted");
     expect(await notificationsFor(eventId)).toHaveLength(1);
-    expect(await activityActions(eventId)).toEqual(["DRAFT_CREATED", "EVENT_SUBMITTED"]);
+    expect(await activityActions(eventId)).toEqual([
+      "DRAFT_CREATED",
+      "EVENT_SUBMITTED",
+    ]);
 
     // SPM-33 AC3: a submitted request is read-only; the owner is pointed to a change request.
     const lateEdit = await call("put", `/api/events/${eventId}/draft`, "organiserA", { title: "Too late" });
@@ -330,12 +499,20 @@ describe("drafts (SPM-37)", () => {
 
 describe("GET /api/events/mine paging against real PostgREST timestamps", () => {
   test("[TC-AUTH-021] should_visit_every_draft_once_when_following_next_cursor", async () => {
-    const all = await call("get", "/api/events/mine?status=DRAFT", "organiserA");
+    const all = await call(
+      "get",
+      "/api/events/mine?status=DRAFT",
+      "organiserA",
+    );
     const allIds = all.body.events.map(({ eventId }) => eventId);
     const pagedIds = [];
     let cursor = null;
     do {
-      const page = await call("get", `/api/events/mine?status=DRAFT&limit=2${cursor ? `&cursor=${cursor}` : ""}`, "organiserA");
+      const page = await call(
+        "get",
+        `/api/events/mine?status=DRAFT&limit=2${cursor ? `&cursor=${cursor}` : ""}`,
+        "organiserA",
+      );
       expect(page.status).toBe(200);
       pagedIds.push(...page.body.events.map(({ eventId }) => eventId));
       cursor = page.body.nextCursor;

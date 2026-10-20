@@ -73,6 +73,15 @@ beforeEach(() => {
 });
 
 describe("GET /api/events/:id (AC1)", () => {
+  test("[SPM-177 AC2] a subsequent owner read names the assigned Coordinator", async () => {
+    asOwner();
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ coordinator: { name: "Alex Coordinator" } }));
+    const res = await send("get", "/api/events/42");
+    expect(res.status).toBe(200);
+    expect(res.body.event.coordinatorName).toBe("Alex Coordinator");
+    expect(res.body.event).not.toHaveProperty("coordinatorId");
+  });
+
   test("[SPM-33-TC-01] should_return_the_full_draft_with_edit_permissions_when_the_owner_opens_it", async () => {
     asOwner();
     eventModel.findVisibleEvent.mockResolvedValue(draftRow());

@@ -42,4 +42,4 @@ async function deleteFixtureAudit(manifest) {
   });
 }
 
-module.exports = { assertAuditCleanupAvailable, deleteFixtureAudit };
+module.exports = { assertAuditCleanupAvailable, deleteFixtureAudit, withCleanupConnection };
