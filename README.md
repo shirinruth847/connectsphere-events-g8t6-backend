@@ -64,6 +64,11 @@ the event summary fields used for assignment.
 }
 ```
 
+<<<<<<< HEAD
+HTTP 200 confirms both stores: the Supabase key is accepted and MongoDB answers a `ping`. Without `MONGODB_URI`, or when Atlas is unreachable, it returns `500 INTERNAL_ERROR` and the backend log names the cause.
+
+### Event Requests (SPM-35, SPM-37)
+=======
 ### Event Requests (SPM-35, SPM-36, SPM-37)
 
 These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it, because SPM-33's coordinator view needs assigned events.
