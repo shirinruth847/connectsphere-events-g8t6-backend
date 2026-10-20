@@ -161,4 +161,18 @@ describe("eventModel.findVisibleEvent (AC1)", () => {
 
     expect(query.or).toHaveBeenCalledWith("organiser_id.eq.12,and(organisation_id.in.(5),status.neq.DRAFT)");
   });
+
+  test("should_preserve_relationship_ids_for_downstream_authorization", async () => {
+    const row = {
+      event_id: 42,
+      organiser_id: 12,
+      coordinator_id: 21,
+      organisation_id: 5,
+      status: "SUBMITTED",
+    };
+    const query = queryReturning({ data: row, error: null });
+    supabase.from.mockReturnValue(query);
+
+    await expect(eventModel.findVisibleEvent(42, organiser(12, [5]))).resolves.toEqual(row);
+  });
 });

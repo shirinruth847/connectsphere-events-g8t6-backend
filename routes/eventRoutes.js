@@ -14,11 +14,11 @@ const {
   getEventRequest,
   getEventHistory,
   listAssignedEvents,
-  assignCoordinator,
+  patchCoordinator,
+  assignCoordinatorAsLead,
   listLeadAssignments,
   listUnassignedEvents,
   getCoordinatorAvailability,
-  reassignCoordinator,
   getEventReadiness,
   submitForSafetyReview,
   confirmEvent,
@@ -55,8 +55,8 @@ if (process.env.ENABLE_COORDINATOR_WORKFLOWS === "true") {
   router.get("/unassigned", leadOnly, listUnassignedEvents); // must stay above "/:id"
   router.get("/coordinator-availability", leadOnly, getCoordinatorAvailability); // Lead-only cross-coordinator schedule
   router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/:id"
-  router.post("/:id/coordinator", leadOnly, assignCoordinator);
-  router.patch("/:id/coordinator", leadOnly, reassignCoordinator);
+  router.post("/:id/coordinator", leadOnly, assignCoordinatorAsLead);
+  router.patch("/:id/coordinator", leadOnly, patchCoordinator);
 } else {
   router.all(["/unassigned", "/coordinator-availability", "/assignments", "/:id/coordinator"], (req, res) => res.status(404).json({ error: "Not found.", code: "NOT_FOUND" }));
 }

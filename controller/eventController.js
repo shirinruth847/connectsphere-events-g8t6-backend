@@ -11,6 +11,7 @@ const {
   toWholeNumber,
   MAX_INTEGER,
 } = require("../validators/eventValidator");
+const { USER_ROLES } = require("../config/roles");
 const {
   EVENT_STATUS,
   EVENT_RELATIONSHIP,
@@ -19,6 +20,7 @@ const {
   LIFECYCLE_ACTIONS,
   READINESS_MESSAGES,
 } = require("../config/eventConstants");
+
 
 const EVENT_STATUSES = Object.values(EVENT_STATUS);
 const KNOWN_EVENT_FIELDS = new Set(Object.values(EVENT_FIELD_GROUPS).flat());
@@ -29,8 +31,10 @@ const IDEMPOTENCY_KEY_MESSAGE =
 const VERSION_MESSAGE = "Send the version of the event you loaded.";
 
 const DOMAIN_ERRORS = Object.freeze({
+  FORBIDDEN: [403, "You do not have permission to access this resource."],
   EVENT_NOT_FOUND: [404, EVENT_NOT_FOUND.error],
   EVENT_NOT_DRAFT: [409, "Only draft requests can be changed or submitted."],
+
   NO_ELIGIBLE_COORDINATOR: [409, "No coordinator is currently available. Your request was not submitted."],
   IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
   IDEMPOTENCY_IN_PROGRESS: [409, "This request is still being processed. Try again shortly."],
@@ -40,11 +44,11 @@ const DOMAIN_ERRORS = Object.freeze({
   EVENT_NOT_EDITABLE_IN_STATUS: [403, "This event cannot be edited in its current status."],
   FIELD_NOT_EDITABLE: [403, "You cannot change some of these fields. Nothing was saved."],
   INVALID_COORDINATOR: [409, "The selected user is not an active event coordinator."],
-  COORDINATOR_CONFLICT: [409, "The selected coordinator is already assigned to an overlapping event."],
+  COORDINATOR_CONFLICT: [409, "The selected coordinator is unavailable during this event."],
   COORDINATOR_UNCHANGED: [409, "The selected coordinator is already assigned to this event."],
   ASSIGNMENT_CHANGED: [409, "This event was reassigned by someone else. Refresh and try again."],
+
   EVENT_NOT_REASSIGNABLE: [404, "Event request not found."],
-  FORBIDDEN: [403, "You do not have permission to access this resource."],
   TRANSITION_NOT_ALLOWED: [403, "This action is not allowed for this event in its current status."],
   READINESS_BLOCKED: [409, "The event is not ready yet. Resolve the listed items, then try again."],
   SAFETY_APPROVAL_REQUIRED: [409, "The event needs a safety approval for its current arrangements before it can be confirmed."],
@@ -65,21 +69,27 @@ const validationFailed = (res, fields) =>
     res,
     400,
     "VALIDATION_FAILED",
-    hasErrors(fields) ? "Please correct the highlighted fields." : "Some values could not be saved. Check the form and try again.",
-    fields
+    hasErrors(fields)
+      ? "Please correct the highlighted fields."
+      : "Some values could not be saved. Check the form and try again.",
+    fields,
   );
 
-const eventNotFound = (res) => sendDomainError(res, "EVENT_NOT_FOUND");
+
+const eventNotFound = (res) =>
+  sendError(res, 404, "EVENT_NOT_FOUND", DOMAIN_ERRORS.EVENT_NOT_FOUND[1]);
 
 const handleError = (error, res, next) => {
   if (error.name === "EventRequestError") {
     if (error.code === "VALIDATION_FAILED") return validationFailed(res, error.fields || {});
     if (error.code === "INVALID_CURSOR") return validationFailed(res, { cursor: "Invalid page cursor." });
     if (error.code === "IDEMPOTENCY_KEY_REQUIRED") return validationFailed(res, { idempotencyKey: IDEMPOTENCY_KEY_MESSAGE });
-    if (DOMAIN_ERRORS[error.code]) return sendDomainError(res, error.code);
+    if (DOMAIN_ERRORS[error.code]) return sendDomainError(res, error.code, error.fields);
+
   }
   return next(error);
 };
+
 
 const readIdempotencyKey = (req) => {
   const key = req.get("Idempotency-Key");
@@ -255,7 +265,11 @@ const createAndSubmit = async (req, res, next) => {
     const errors = await validateWith(validateSubmission, input);
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const result = await eventModel.submitEvent({ organiserId: req.user.user_id, input, idempotencyKey });
+    const result = await eventModel.submitEvent({
+      organiserId: req.user.user_id,
+      input,
+      idempotencyKey,
+    });
     markReplay(res, result);
     return res.status(201).json({
       message: "Your event request has been submitted successfully.",
@@ -279,7 +293,11 @@ const createDraft = async (req, res, next) => {
     const errors = await validateWith(validateDraft, input);
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const result = await eventModel.saveDraft({ organiserId: req.user.user_id, input, idempotencyKey });
+    const result = await eventModel.saveDraft({
+      organiserId: req.user.user_id,
+      input,
+      idempotencyKey,
+    });
     markReplay(res, result);
     return res.status(201).json({
       message: "Draft saved successfully.",
@@ -302,6 +320,7 @@ const updateDraft = async (req, res, next) =>
 const updateEventDetails = async (req, res, next) =>
   saveEventEdit(req, res, next, { allowAutoSave: false, requireVersion: true, requireIdempotencyKey: true });
 
+
 // PUT /api/events/:id/submit — SPM-37 Scenario 4 (submit a saved draft)
 const submitDraft = async (req, res, next) => {
   try {
@@ -314,15 +333,31 @@ const submitDraft = async (req, res, next) => {
     const existing = await eventModel.findOwnEvent(eventId, req.user.user_id);
     if (!existing) return eventNotFound(res);
     if (existing.status !== EVENT_STATUS.DRAFT) {
+
+      return sendError(
+        res,
+        409,
+        "EVENT_NOT_DRAFT",
+        DOMAIN_ERRORS.EVENT_NOT_DRAFT[1],
+      );
+
       return sendDomainError(res, "EVENT_NOT_DRAFT");
+
     }
 
     const input = eventModel.pickEventInput(body);
-    const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input));
+    const errors = await validateWith(
+      validateSubmission,
+      mergeWithExisting(existing, input),
+    );
     // Nothing is written on failure, so the status stays DRAFT (SPM-37 negative TC).
     if (hasErrors(errors)) return validationFailed(res, errors);
 
-    const result = await eventModel.submitEvent({ organiserId: req.user.user_id, eventId, input });
+    const result = await eventModel.submitEvent({
+      organiserId: req.user.user_id,
+      eventId,
+      input,
+    });
     return res.status(200).json({
       message: "Your event request has been submitted successfully.",
       event: eventModel.toApi(result.event),
@@ -357,6 +392,16 @@ const listMyEventRequests = async (req, res, next) => {
     return handleError(error, res, next);
   }
 };
+
+// GET /api/events/unassigned — coordinator lead assignment queue.
+async function getUnassignedEvents(req, res, next) {
+  try {
+    const events = await eventModel.findUnassignedSubmittedEvents();
+    return res.status(200).json({ events: events.map(eventModel.toUnassignedQueueItem) });
+  } catch (err) {
+    return next(err);
+  }
+}
 
 const listAttendeeDiscovery = async (req, res, next) => {
   try {
@@ -403,6 +448,7 @@ const getEventHistory = async (req, res, next) => {
       audiences: access.historyAudiences,
     });
     return res.status(200).json({ history, nextCursor });
+
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -417,29 +463,9 @@ const listAssignedEvents = async (req, res, next) => {
   }
 };
 
-const assignCoordinator = async (req, res, next) => {
-  try {
-    const eventId = parseEventId(req.params.id);
-    if (!eventId) return eventNotFound(res);
-    const body = req.body;
-    if (
-      !body || typeof body !== "object" || Array.isArray(body) ||
-      Object.keys(body).length !== 1 ||
-      !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
-      !Number.isSafeInteger(body.coordinatorId) || body.coordinatorId < 1
-    ) {
-      return validationFailed(res, { coordinatorId: "Send a positive integer coordinatorId." });
-    }
-    const assignedEvent = await eventModel.assignCoordinator({ eventId, coordinatorId: body.coordinatorId, leadId: req.user.user_id });
-    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
-  } catch (error) {
-    return handleError(error, res, next);
-  }
-};
-
 const listLeadAssignments = async (req, res, next) => {
   try {
-    const assignments = await eventModel.findLeadAssignments();
+    const assignments = await eventModel.findLeadAssignments(req.user.user_id);
     return res.status(200).json({ assignments });
   } catch (error) {
     return handleError(error, res, next);
@@ -449,7 +475,9 @@ const listLeadAssignments = async (req, res, next) => {
 const listUnassignedEvents = async (req, res, next) => {
   try {
     const events = await eventModel.findUnassignedSubmittedEvents();
-    return res.status(200).json({ events: events.map((event) => eventModel.toApi(event)) });
+    return res
+      .status(200)
+      .json({ events: events.map(eventModel.toUnassignedQueueItem) });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -464,7 +492,83 @@ const getCoordinatorAvailability = async (req, res, next) => {
   }
 };
 
-const reassignCoordinator = async (req, res, next) => {
+// PATCH /api/events/:id/coordinator — SPM-174 (assign) or SPM-180 (reassign).
+// The route middleware requires a Lead. The expectedCoordinatorId field
+// distinguishes reassignment from the first assignment.
+const patchCoordinator = async (req, res, next) => {
+  try {
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return eventNotFound(res);
+    const body = req.body;
+    const isLead = req.user.role === USER_ROLES.COORDINATOR_LEAD;
+    const isReassign =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? Object.prototype.hasOwnProperty.call(body, "expectedCoordinatorId")
+        : false;
+
+    if (isReassign) {
+      if (!isLead) {
+        return sendError(res, 403, "FORBIDDEN", "Only a coordinator lead may reassign.");
+      }
+      if (
+        Object.keys(body).length !== 2 ||
+        !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
+        !Number.isSafeInteger(body.coordinatorId) ||
+        body.coordinatorId < 1 ||
+        !Number.isSafeInteger(body.expectedCoordinatorId) ||
+        body.expectedCoordinatorId < 1
+      ) {
+        return validationFailed(res, {
+          coordinatorId: "Send a positive integer coordinatorId.",
+          expectedCoordinatorId:
+            "Send the coordinatorId currently shown as assigned.",
+        });
+      }
+      const result = await eventModel.reassignCoordinator({
+        eventId,
+        coordinatorId: body.coordinatorId,
+        expectedCoordinatorId: body.expectedCoordinatorId,
+        leadId: req.user.user_id,
+      });
+      return res.status(200).json({
+        message: "Event coordinator reassigned successfully.",
+        event: result.event,
+        coordinator: result.coordinator,
+      });
+    }
+
+    // SPM-174 assignment: the Lead sends only coordinatorId.
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      Object.keys(body).length !== 1 ||
+      !Object.prototype.hasOwnProperty.call(body, "coordinatorId")
+    ) {
+      return validationFailed(res, {
+        coordinatorId: "Send a positive integer coordinatorId.",
+      });
+    }
+    if (!Number.isSafeInteger(body.coordinatorId) || body.coordinatorId < 1) {
+      return sendError(
+        res,
+        400,
+        "INVALID_COORDINATOR",
+        "Select an active Event Coordinator.",
+      );
+    }
+    const assignedEvent = await eventModel.assignCoordinator({
+      eventId,
+      coordinatorId: body.coordinatorId,
+      leadId: req.user.user_id,
+    });
+    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+const assignCoordinatorAsLead = async (req, res, next) => {
   try {
     const eventId = parseEventId(req.params.id);
     if (!eventId) return eventNotFound(res);
@@ -473,31 +577,21 @@ const reassignCoordinator = async (req, res, next) => {
       !body ||
       typeof body !== "object" ||
       Array.isArray(body) ||
-      Object.keys(body).length !== 2 ||
+      Object.keys(body).length !== 1 ||
       !Object.prototype.hasOwnProperty.call(body, "coordinatorId") ||
       !Number.isSafeInteger(body.coordinatorId) ||
-      body.coordinatorId < 1 ||
-      !Object.prototype.hasOwnProperty.call(body, "expectedCoordinatorId") ||
-      !Number.isSafeInteger(body.expectedCoordinatorId) ||
-      body.expectedCoordinatorId < 1
+      body.coordinatorId < 1
     ) {
       return validationFailed(res, {
         coordinatorId: "Send a positive integer coordinatorId.",
-        expectedCoordinatorId: "Send the coordinatorId currently shown as assigned.",
       });
     }
-
-    const result = await eventModel.reassignCoordinator({
+    const assignedEvent = await eventModel.assignCoordinator({
       eventId,
       coordinatorId: body.coordinatorId,
-      expectedCoordinatorId: body.expectedCoordinatorId,
       leadId: req.user.user_id,
     });
-    return res.status(200).json({
-      message: "Event coordinator reassigned successfully.",
-      event: result.event,
-      coordinator: result.coordinator,
-    });
+    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -603,16 +697,17 @@ module.exports = {
   updateEventDetails,
   submitDraft,
   listMyEventRequests,
+  getUnassignedEvents,
+  getCoordinatorAvailability,
+  patchCoordinator,
   listAttendeeDiscovery,
   getAttendeeEventDetail,
   getEventRequest,
   getEventHistory,
   listAssignedEvents,
-  assignCoordinator,
   listLeadAssignments,
   listUnassignedEvents,
-  getCoordinatorAvailability,
-  reassignCoordinator,
+  assignCoordinatorAsLead,
   getEventReadiness,
   submitForSafetyReview,
   confirmEvent,

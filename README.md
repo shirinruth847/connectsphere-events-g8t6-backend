@@ -40,6 +40,29 @@ Returns:
 }
 ```
 
+### Unassigned Event Queue
+
+`GET /api/events/unassigned`
+
+Returns submitted event requests that do not yet have a coordinator assigned.
+This endpoint requires an authenticated `COORDINATOR_LEAD` profile and returns
+the event summary fields used for assignment.
+
+```json
+{
+  "events": [
+    {
+      "eventId": 42,
+      "requestId": "REQ-000042",
+      "status": "SUBMITTED",
+      "title": "Example event",
+      "startDatetime": "2026-10-20T09:00:00.000Z",
+      "endDatetime": "2026-10-20T12:00:00.000Z"
+    }
+  ]
+}
+```
+
 ### Event Requests (SPM-35, SPM-36, SPM-37)
 
 These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it, because SPM-33's coordinator view needs assigned events.
@@ -179,12 +202,12 @@ The browser signs in **directly with Supabase Auth** (`supabase.auth.signInWithP
 
 Errors use one shape: `{ "error": "<safe message>", "code": "<MACHINE_CODE>" }`, plus `fields` for validation errors. Authenticated requests send `Authorization: Bearer <access_token>`, and their responses carry `Cache-Control: no-store`. Only `FRONTEND_ORIGIN` may call the API from a browser.
 
-| Method & path | Access | Input | Success | Errors |
-| --- | --- | --- | --- | --- |
-| `GET /api/auth/me` | Any signed-in user | — | `200 { user: { user_id, email, name, role, roles, home_path } }` | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
-| `POST /api/auth/logout` | Bearer token, if any | — | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })` | — (idempotent) |
-| `GET /api/events/mine` | `ORGANISER` | See Event Requests above | Own requests plus submitted requests from the organiser's organisations; colleagues' drafts are never listed | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN` |
-| `GET /api/registrations/mine` | `ATTENDEE` | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN` |
+| Method & path                 | Access               | Input                                            | Success                                                                                                                                                                                                     | Errors                                                                                      |
+| ----------------------------- | -------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `GET /api/auth/me`            | Any signed-in user   | —                                                | `200 { user: { user_id, email, name, role, roles, home_path } }`                                                                                                                                            | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
+| `POST /api/auth/logout`       | Bearer token, if any | —                                                | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })`                                                                   | — (idempotent)                                                                              |
+| `GET /api/events/mine`        | `ORGANISER`          | See Event Requests above                         | Own requests plus submitted requests from the organiser's organisations; colleagues' drafts are never listed                                                                                                | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN`                                             |
+| `GET /api/registrations/mine` | `ATTENDEE`           | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN`                                                               |
 
 - `home_path` is `/dashboard` for organisers and staff and `/my-registrations` for attendees.
 - `roles` is a list so the contract survives multi-role users; the schema currently stores one role per user.
@@ -351,6 +374,25 @@ Format: `<type>/<ticket-id>-<short-description>` or `<type>/<short-description>`
    git checkout main
    git pull origin main
    ```
+### SPM-174 development fixture
+
+The Lead queue and assignment/reassignment integration, staged overlap guard,
+deployment order and isolated/hosted test commands are documented in
+[the SPM-174 integration plan](docs/test-plans/spm-174.md).
+
+After applying the Supabase migrations and provisioning the namespaced accounts, create a
+synthetic submitted request with no coordinator:
+
+```bash
+npm run seed:unassigned
+```
+
+The fixture is recorded in `supabase/seed/manifests/` (ignored by git) and can be removed
+without affecting other data:
+
+```bash
+npm run seed:unassigned:cleanup
+```
 
 
 ## Completed-ticket repair baseline

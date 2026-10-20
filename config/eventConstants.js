@@ -14,6 +14,16 @@ const EVENT_STATUS = Object.freeze({
   CANCELLED: "CANCELLED",
 });
 
+const USER_ROLES = Object.freeze({
+  ORGANISER: "ORGANISER",
+  COORDINATOR: "COORDINATOR",
+  COORDINATOR_LEAD: "COORDINATOR_LEAD",
+});
+
+const NOTIFICATION_TYPES = Object.freeze({
+  STATUS_CHANGE: "STATUS_CHANGE",
+});
+
 // Organiser-facing label for each stored status (Master section 3.5). An
 // unknown status falls back to its stored code.
 const STATUS_LABELS = Object.freeze({
@@ -143,6 +153,7 @@ const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
 
 module.exports = {
   EVENT_STATUS,
+  USER_ROLES,
   STATUS_LABELS,
   LABEL_STATUSES,
   STATUS_NOTES,

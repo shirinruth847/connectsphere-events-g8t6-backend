@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "jest tests/unit",
+    "test": "jest tests/unit tests/unassignedEvents.test.js",
     "test:integration": "jest tests/integration --runInBand",
     "test:cleanup": "node tests/fixtures/cleanupManifests.js",
+    "seed:unassigned": "node supabase/seed/seedUnassignedEvent.js",
+    "seed:unassigned:cleanup": "node supabase/seed/seedUnassignedEvent.js cleanup",
     "seed:accounts": "node supabase/seed/provisionAccounts.js",
     "seed:accounts:cleanup": "node supabase/seed/provisionAccounts.js cleanup",
     "dev": "nodemon server.js"
