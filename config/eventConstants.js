@@ -91,6 +91,7 @@ const EVENT_RELATIONSHIP = Object.freeze({
   OWNER: "OWNER",
   ORGANISATION_MEMBER: "ORGANISATION_MEMBER",
   ASSIGNED_COORDINATOR: "ASSIGNED_COORDINATOR",
+  SAFETY_OFFICER: "SAFETY_OFFICER", // the event has a round in their queue, held or decided by them (SPM-243 AC2)
 });
 
 // Who may read a change-history entry. Values match activity_log.audience.
@@ -152,6 +153,28 @@ const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "PREPARATION",
 ]);
 
+// safety_reviews.status values (Master 6.2).
+const SAFETY_ROUND_STATUS = Object.freeze({
+  OPEN: "OPEN",
+  APPROVED: "APPROVED",
+  CHANGES_REQUESTED: "CHANGES_REQUESTED",
+  REJECTED: "REJECTED",
+  SUPERSEDED: "SUPERSEDED",
+});
+
+// The change history a Safety Officer reads: changes to attendance, timing,
+// venues and layout, access and equipment (Master 5.9), plus every safety
+// review entry. Field names match activity_log.changes keys.
+const SAFETY_REVIEW_HISTORY_FIELDS = Object.freeze([
+  "expectedAttendance",
+  "startDatetime",
+  "endDatetime",
+  "venuePreferences",
+  "preferredLayoutType",
+  "accessibilityNeeds",
+  "equipmentRequirements",
+]);
+
 module.exports = {
   EVENT_STATUS,
   USER_ROLES,
@@ -168,4 +191,6 @@ module.exports = {
   EVENT_FIELD_GROUPS,
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,
+  SAFETY_ROUND_STATUS,
+  SAFETY_REVIEW_HISTORY_FIELDS,
 };
