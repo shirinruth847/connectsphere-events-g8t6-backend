@@ -39,6 +39,7 @@ async function setup() {
     );
   `);
   await db.exec(migration("20261020112025_spm173_interim_readiness.sql"));
+  await db.exec(migration("20261020142915_spm173_readiness_without_venue_buffer.sql"));
   await db.exec(`
     INSERT INTO public."user" (user_id, email, name, role, is_active) VALUES (1, 'spm173-owner@example.test', 'Owner', 'ORGANISER', true);
     INSERT INTO public.venue (venue_id, name, address, max_capacity, setup_turnaround_min) VALUES
@@ -106,20 +107,20 @@ test("bookings: none, pending, rejected or cancelled ones, and capacity", async 
   assert.deepEqual(await readiness(db, (await event(db, { attendance: 250, bookings: [{ attendance: 150 }] })).eventId), []);
 });
 
-test("another active booking at the same venue over the occupied range is a conflict", async () => {
+test("another active booking at the same venue over an overlapping window is a conflict", async () => {
   const db = await setup();
   const first = await event(db, { bookings: [{}] });
-  // Another room of the same venue, 20 minutes after the first ends: inside the 30-minute turnaround.
-  const close = await event(db, { bookings: [{ room: 2, start: `${first.day}T11:20:00Z`, end: `${first.day}T12:00:00Z` }] });
-  assert.deepEqual(await readiness(db, close.eventId), ["BOOKING_CONFLICT"]);
+  // Another room of the same venue, overlapping the first booking's last half hour.
+  const overlapping = await event(db, { bookings: [{ room: 2, status: "PENDING", start: `${first.day}T10:30:00Z`, end: `${first.day}T12:00:00Z` }] });
   assert.deepEqual(await readiness(db, first.eventId), ["BOOKING_CONFLICT"]);
   // A pending booking occupies the venue too; a rejected one does not.
-  await db.query("UPDATE public.venue_booking SET status = 'REJECTED' WHERE event_id = $1", [close.eventId]);
+  await db.query("UPDATE public.venue_booking SET status = 'REJECTED' WHERE event_id = $1", [overlapping.eventId]);
   assert.deepEqual(await readiness(db, first.eventId), []);
-  // Back to back at a venue with no turnaround is not a conflict.
-  const annexFirst = await event(db, { bookings: [{ room: 3 }] });
-  const annexNext = await event(db, { bookings: [{ room: 3, start: `${annexFirst.day}T11:00:00Z`, end: `${annexFirst.day}T12:00:00Z` }] });
-  assert.deepEqual(await readiness(db, annexNext.eventId), []);
+  // Back to back is not a conflict, and the deprecated setup_turnaround_min
+  // (30 minutes on this venue) is no longer read (Master 1.2 section 6.2).
+  const next = await event(db, { bookings: [{ room: 2, start: `${first.day}T11:00:00Z`, end: `${first.day}T12:00:00Z` }] });
+  assert.deepEqual(await readiness(db, next.eventId), []);
+  assert.deepEqual(await readiness(db, first.eventId), []);
 });
 
 test("the primary venue is the only active booking until the primary flag exists", async () => {
