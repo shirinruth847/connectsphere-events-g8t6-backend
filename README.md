@@ -192,9 +192,37 @@ Coordinator routes (assigned coordinator only; anyone else gets `404`, other rol
 
 All four also answer `403 TRANSITION_NOT_ALLOWED` with `currentStatus` when the action is not allowed in the current state, and `409 EVENT_VERSION_CONFLICT` with the current `event` for a stale `version` (for example, the second of two simultaneous actions).
 
-- **Readiness** (Master 5.3) is checked by `_event_readiness`. Until the Master resource tables are applied (drafts `20261019100300` and `20261019100400` in `supabase/drafts/`, kept out of `supabase/migrations/` until SPM-179/SPM-186 agree), it reports `READINESS_DATA_PENDING`, so no event can be submitted for safety review or confirmed yet.
+- **Readiness** (Master 5.3) is checked by `_event_readiness` on today's tables (`20261020112025`, `20261020142915`): active bookings are `PENDING`/`APPROVED` `venue_booking` rows, capacity is the venue's `max_capacity`, overlapping active bookings at the same venue report `BOOKING_CONFLICT`, the primary venue is the event's only active booking (several active bookings report `NO_PRIMARY_VENUE` until bookings have a primary flag), every equipment requirement needs an approved `equipment_request`, and a `PENDING` change request blocks. Blocking incidents are not checked yet. The Master resource draft in `supabase/drafts/` (kept out of `supabase/migrations/` until SPM-179/SPM-181/SPM-186 agree) replaces these functions with the full check.
 - **Completion job:** `jobs/eventCompletionJob.js` starts with the server and calls `complete_due_events` every `EVENT_COMPLETION_INTERVAL_MS` (default one minute, `0` turns it off). It completes ended `CONFIRMED` and `PREPARATION` events in batches of 50, using database time and `SKIP LOCKED`, and records them as `System` in the history (`activity_log.user_id` is null, `actor_role` is `SYSTEM`). Registration closes with the state, because it is open only in `CONFIRMED` and `PREPARATION`.
 - **Not yet through the shared function:** `assign_event_coordinator` (redefined on the SPM-177/SPM-180 branches) still writes its own status. Accept, reject, clarify, cancel and change acceptance should call `_check_event_transition`/`_apply_event_transition` with their action names (`accept_feasibility`, `reject`, `request_clarification`, `resubmit`, `cancel`, `withdraw`, `accept_change`, `venue_replacement`, `safety_*`) instead of updating `event.status`. A trigger refusing direct status writes is added once they do.
+
+### Safety Reviews (SPM-243)
+
+A coordinator's submission for safety review (above) opens a round in `safety_reviews` for the event's current `arrangement_version`. Open rounds form one shared queue; a Safety Officer claims a round, works through a six-factor checklist and decides it (Master 5.9). Every change runs in a database function that locks the round, and the event when the event changes.
+
+Safety Officer routes (`403` for every other role). A Safety Officer sees an event (`GET /api/events/:id`, `/history`) only while it has an open unclaimed round, a round they hold or a round they decided; they see `registeredCount`, never participants, history narrowed to attendance, timing, venue, layout, access, equipment and safety entries, and get `403 FORBIDDEN` on any edit or lifecycle action.
+
+| Route | Does | Refusals |
+| --- | --- | --- |
+| `GET /api/safety-reviews/queue` | Open, unclaimed rounds, oldest submission first: `{ reviews: [{ reviewId, eventId, requestId, title, startDatetime, endDatetime, expectedAttendance, venues, roundNumber, submittedAt }] }` | — |
+| `GET /api/safety-reviews/mine` | Open rounds the caller holds, same shape | — |
+| `POST /api/safety-reviews/:reviewId/claim` | Claims the round; first come, first served | `409 ROUND_NOT_CLAIMABLE`, `404 REVIEW_NOT_FOUND` |
+| `POST /api/safety-reviews/:reviewId/hand-back` | `{ note? }` (≤500): returns the round to the queue and clears saved progress; staff-only history entry | `403 NOT_CLAIMANT`, `409 ROUND_NOT_OPEN` |
+| `PUT /api/safety-reviews/:reviewId/progress` | Any of `{ checklist, organiserComment, internalNotes, requestedChanges }`; the checklist may be partial | `400 VALIDATION_FAILED` naming `checklist.<factor>`, `403 NOT_CLAIMANT`, `409 ROUND_NOT_OPEN` |
+| `GET /api/safety-reviews/:reviewId/panel` | The event, active bookings, requested equipment (`placement` = technical notes), relevant history, every round, and each venue's `emergencyAccess` and `knownRestrictions` from MongoDB `venue_details` with `venueDetailsAvailable` | `404` outside the caller's scope |
+| `POST /api/safety-reviews/:reviewId/decision` | `Idempotency-Key` required. `{ outcome: APPROVED \| CHANGES_REQUESTED \| REJECTED, checklist (all six), arrangementVersion, organiserComment?, internalNotes?, requestedChanges? (≥1 for changes), rejectedBookings? [{ bookingId, reason }] (≥1 for reject) }`. Approval keeps `SAFETY_REVIEW`; the other two return the event to `PLANNING` (never `REJECTED`, nothing released). Notifies the coordinator, the Venue Staff of the affected bookings and the Technical Support on the event | `400`, `403 NOT_CLAIMANT`, `409 SAFETY_FACTOR_NOT_SATISFACTORY` with `factors`, `409 ARRANGEMENTS_CHANGED` (the round was superseded instead; the event is in `PLANNING`), `409 ROUND_NOT_OPEN`, `503 VENUE_DETAILS_UNAVAILABLE` |
+
+Checklist factors: `attendanceCapacity`, `layout`, `emergencyAccess`, `accessibility`, `equipmentPlacement`, `venueRestrictions`, each `{ result: SATISFACTORY | NOT_SATISFACTORY | NOT_APPLICABLE, comment }`; a comment is required unless the result is `SATISFACTORY`.
+
+`GET /api/events/:id/safety-reviews` (SPM-251) returns every round in order, shaped for the caller: the coordinator and Safety Officers see everything; the organiser sees `{ roundNumber, status, decidedAt, organiserComment }`; a Lead and Technical Support who approved the event's equipment see the outcome; Venue Staff who reviewed one of its bookings also see their own rejected bookings. Anyone else gets `404`.
+
+**Arrangement changes (SPM-250).** A change to an event's venue bookings, booking decisions, blocking incidents, technical arrangements or expected attendance invalidates its safety review (Master 5.2, 5.9). Inside the database function that makes the change, call:
+
+```sql
+PERFORM public._supersede_safety_review(p_event_id, p_actor_id, 'Venue blocked for maintenance.');
+```
+
+It raises `event.arrangement_version` and, when the event is in `SAFETY_REVIEW`, closes an open round as `SUPERSEDED` (an approved round stops counting), returns the event to `PLANNING` and notifies the claimant and the coordinator. Backend code outside a database function uses `safetyModel.recordArrangementChange({ eventId, actorId, reason })`. A decision on a round whose version is out of date supersedes it itself and answers `409 ARRANGEMENTS_CHANGED`.
 
 ### Authentication (SPM-32)
 
@@ -240,6 +268,8 @@ Create a `.env` file in the root directory:
 PORT=8000
 SUPABASE_URL=https://rvwiflsedoujspmzfrbq.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<server-only-key>
+MONGODB_URI=mongodb+srv://<atlas-username>:<url-encoded-password>@spm.ldi4ulx.mongodb.net/?appName=SPM   # venue_details for safety reviews (SPM-248)
+MONGODB_DB_NAME=connectsphere_dev
 # Optional
 FRONTEND_ORIGIN=http://localhost:3000   # the only browser origin allowed by CORS (default shown)
 SUPABASE_ANON_KEY=<anon/publishable key>  # tests sign in with it like the browser; falls back to the service role key
@@ -311,12 +341,14 @@ connectsphere-events-g8t6-backend/
 ├── app.js                 # Express app and middleware composition
 ├── config/               # External service configurations (Supabase) and shared constants
 │   ├── eventConstants.js # Event statuses and the SPM-33 field edit matrix
+│   ├── mongodb.js        # MongoDB client (venue_details)
 │   ├── roles.js
 │   └── supabase.js
 ├── controller/           # Route handler logic and controllers
 │   ├── authController.js
 │   ├── eventController.js
-│   └── registrationController.js
+│   ├── registrationController.js
+│   └── safetyController.js # Safety Officer reviews and safety outcomes (SPM-243)
 ├── jobs/                 # Background work started by server.js
 │   └── eventCompletionJob.js  # Completes ended events (SPM-173)
 ├── middleware/           # Request/response middleware functions
@@ -330,22 +362,27 @@ connectsphere-events-g8t6-backend/
 │   ├── eventModel.js
 │   ├── healthModel.js
 │   ├── registrationModel.js
-│   └── userModel.js
+│   ├── safetyModel.js    # Safety review rounds (SPM-243)
+│   ├── userModel.js
+│   └── venueDetailModel.js # The only reader of MongoDB venue_details
 ├── routes/               # API route definitions
 │   ├── authRoutes.js
 │   ├── eventRoutes.js
 │   ├── registrationRoutes.js
-│   └── routers.js
+│   ├── routers.js
+│   └── safetyRoutes.js
 ├── supabase/
 │   ├── migrations/       # Versioned schema changes
 │   └── seed/             # Development account provisioning
 ├── tests/
+│   ├── database/         # In-memory PostgreSQL (PGlite) tests of database functions
 │   ├── fixtures/         # Synthetic data setup and cleanup
 │   ├── integration/      # Live tests against the development project
 │   └── unit/             # Mocked Supabase; run by npm test
 ├── validators/           # Pure request validation rules
 │   ├── authValidator.js
-│   └── eventValidator.js
+│   ├── eventValidator.js
+│   └── safetyValidator.js
 ├── COMMIT_MESSAGES.md    # Commit message SOP standards
 ├── README.md             # Backend documentation
 └── server.js             # Main server entry point
