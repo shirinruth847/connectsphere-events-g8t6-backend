@@ -262,7 +262,7 @@ npm run seed:accounts           # idempotent; re-running resets passwords to SEE
 npm run seed:accounts:cleanup   # removes exactly what supabase/seed/manifests/ lists
 ```
 
-Accounts are `<SEED_NAMESPACE>-<organiser-a|organiser-b|coordinator|venue-staff|tech-support|attendee>@connectsphere.test`. The `.test` domain is undeliverable, so no email is ever sent.
+Accounts are `<SEED_NAMESPACE>-<organiser-a|organiser-b|coordinator-lead|coordinator|venue-staff|tech-support|safety-officer|attendee>@connectsphere.test`. The `.test` domain is undeliverable, so no email is ever sent.
 
 The five pre-existing `user` rows are not linked to Auth accounts. To link one, its owner creates the Auth user in the Supabase dashboard (**Authentication → Users → Add user**, with **Auto Confirm** on) using the profile's email, then sets that row's `auth_user_id` to the new user's ID. Never edit `auth.*` tables with SQL.
 
