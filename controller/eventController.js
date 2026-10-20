@@ -331,6 +331,29 @@ const listMyEventRequests = async (req, res, next) => {
   }
 };
 
+const listAttendeeDiscovery = async (req, res, next) => {
+  try {
+    const { events, nextCursor } = await eventModel.findPublishedAttendeeEvents({ ...req.pagination });
+    return res.status(200).json({ events, nextCursor });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+const getAttendeeEventDetail = async (req, res, next) => {
+  try {
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return eventNotFound(res);
+
+    const event = await eventModel.findPublishedAttendeeEvent(eventId);
+    if (!event) return eventNotFound(res);
+
+    return res.status(200).json({ event });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
 // GET /api/events/:id — SPM-33 AC1: the event as this user may see it. Read-only:
 // opening an event never changes its status.
 const getEventRequest = async (req, res, next) => {
@@ -466,6 +489,8 @@ module.exports = {
   updateEventDetails,
   submitDraft,
   listMyEventRequests,
+  listAttendeeDiscovery,
+  getAttendeeEventDetail,
   getEventRequest,
   getEventHistory,
   listAssignedEvents,

@@ -1007,7 +1007,7 @@ Retain events, bookings, requests, registrations, assignments, safety reviews an
 | `profiles` | Auth-linked user ID, name, phone, active state and timestamps; no password |
 | `user_roles` | Unique user/role pairs for the seven application roles; `COORDINATOR_LEAD` and `COORDINATOR` never on the same user; staff assignment is trusted only |
 | `organisations`, `organisation_memberships` | Verified memberships; never infer membership from editable email/domain text |
-| `events` | Owner, optional organization, nullable coordinator, nullable supervising Lead, open transfer request (requester, reason, time), lifecycle, requirements, timing, attendance, registration policy, publication, versions including `arrangement_version`, previously-confirmed flag and confirmation snapshot |
+| `events` | Owner, optional organization, first submission timestamp (preserved on later edits and assignment), nullable coordinator, nullable supervising Lead, open transfer request (requester, reason, time), lifecycle, requirements, timing, attendance, registration policy, publication, versions including `arrangement_version`, previously-confirmed flag and confirmation snapshot |
 | `event_assignments` | Coordinator assignment history: event, coordinator, assigning Lead, assigned and ended times, optional reason |
 | `event_supervision` | Supervising-Lead history: event, Lead, started and ended times, reason (assignment, handover or takeover) |
 | `clarifications` | Preserved question/response rounds with state and timestamps |

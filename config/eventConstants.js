@@ -81,6 +81,8 @@ const EVENT_FIELD_GROUPS = Object.freeze({
     "coordinatorId",
     "organisationId",
     "isPublished",
+    "submittedAt",
+    "supervisingLeadId",
   ]),
 });
 
