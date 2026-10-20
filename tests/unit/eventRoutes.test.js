@@ -1,6 +1,11 @@
 // Route-level unit tests for SPM-35/SPM-37: real Express app, routes, middleware,
 // controller and validator. Only the model functions that reach Supabase are mocked.
-jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
+process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
+jest.mock("../../config/supabase", () => ({
+  from: jest.fn(),
+  rpc: jest.fn(),
+  auth: {},
+}));
 jest.mock("../../model/userModel");
 jest.mock("../../model/eventModel", () => {
   const actual = jest.requireActual("../../model/eventModel");
@@ -12,7 +17,12 @@ jest.mock("../../model/eventModel", () => {
     findVisibleEvent: jest.fn(),
     findOwnEvent: jest.fn(),
     findOrganiserEventRequests: jest.fn(),
+    findPublishedAttendeeEvents: jest.fn(),
+    findPublishedAttendeeEvent: jest.fn(),
     findValidationContext: jest.fn(),
+    findUnassignedSubmittedEvents: jest.fn(),
+    findCoordinatorAvailability: jest.fn(),
+    assignCoordinator: jest.fn(),
   };
 });
 
@@ -24,7 +34,8 @@ const { MESSAGES } = require("../../validators/eventValidator");
 
 const ORGANISER_ID = 11;
 const KEY = "0b6f3c1e-5d0e-4bb4-9d7c-3f1a8e2b6c90";
-const inDays = (days) => new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+const inDays = (days) =>
+  new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
 const validRequest = () => ({
   title: "Tech Conference 2026",
@@ -48,16 +59,22 @@ const eventRow = (overrides = {}) => ({
   ...overrides,
 });
 
-const domainError = (code, fields) => Object.assign(new Error(code), { name: "EventRequestError", code, fields });
+const domainError = (code, fields) =>
+  Object.assign(new Error(code), { name: "EventRequestError", code, fields });
 
 const signedInAs = (role) => {
   userModel.verifyAccessToken.mockResolvedValue("auth-uuid");
-  userModel.findUserByAuthId.mockResolvedValue({ user_id: ORGANISER_ID, role, organisation_ids: [] });
+  userModel.findUserByAuthId.mockResolvedValue({
+    user_id: ORGANISER_ID,
+    role,
+    organisation_ids: [],
+  });
 };
 
 const send = (method, path, body, headers = {}) => {
   let req = request(app)[method](path).set("Authorization", "Bearer token");
-  for (const [name, value] of Object.entries(headers)) req = req.set(name, value);
+  for (const [name, value] of Object.entries(headers))
+    req = req.set(name, value);
   return body === undefined ? req : req.send(body);
 };
 
@@ -76,6 +93,8 @@ const ROUTES = [
   ["post", "/api/events"],
   ["post", "/api/events/drafts"],
   ["get", "/api/events/mine"],
+  ["get", "/api/events/discovery"],
+  ["get", "/api/events/discovery/42"],
   ["get", "/api/events/42"],
   ["get", "/api/events/42/history"],
   ["put", "/api/events/42"],
@@ -84,11 +103,120 @@ const ROUTES = [
 ];
 
 describe("authentication and role checks", () => {
-  test.each(ROUTES)("[SPM-35-TC-004] should_return_401_when_%s_%s_has_no_session", async (method, path) => {
-    const res = await request(app)[method](path);
+  test.each(ROUTES)(
+    "[SPM-35-TC-004] should_return_401_when_%s_%s_has_no_session",
+    async (method, path) => {
+      const res = await request(app)[method](path);
 
-    expect(res.status).toBe(401);
-    expect(res.body.code).toBe("UNAUTHENTICATED");
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("UNAUTHENTICATED");
+    },
+  );
+
+  describe("[SPM-174] coordinator lead assignment routes", () => {
+    test.each(["get", "patch"])(
+      "should_return_403_when_a_regular_coordinator_calls_the_%s_route",
+      async (method) => {
+        signedInAs("COORDINATOR");
+        const path =
+          method === "get"
+            ? "/api/events/unassigned"
+            : "/api/events/42/coordinator";
+        const res = await send(
+          method,
+          path,
+          method === "patch" ? { coordinatorId: 7 } : undefined,
+        );
+
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual({
+          error: "You do not have permission to access this resource.",
+          code: "FORBIDDEN",
+        });
+        expect(eventModel.findUnassignedSubmittedEvents).not.toHaveBeenCalled();
+        expect(eventModel.assignCoordinator).not.toHaveBeenCalled();
+      },
+    );
+
+    test("should_list_unassigned_requests_for_a_coordinator_lead", async () => {
+      signedInAs("COORDINATOR_LEAD");
+      eventModel.findUnassignedSubmittedEvents.mockResolvedValue([
+        eventRow({
+          event_id: 42,
+          status: "SUBMITTED",
+          coordinator_id: null,
+          start_datetime: "2026-11-01T09:00:00.000Z",
+          end_datetime: "2026-11-01T10:00:00.000Z",
+        }),
+      ]);
+
+      const res = await send("get", "/api/events/unassigned");
+
+      expect(res.status).toBe(200);
+      expect(res.body.events).toEqual([
+        expect.objectContaining({
+          eventId: 42,
+          requestId: "REQ-000042",
+          status: "SUBMITTED",
+        }),
+      ]);
+    });
+
+    test("should_assign_a_request_for_a_coordinator_lead", async () => {
+      signedInAs("COORDINATOR_LEAD");
+      eventModel.assignCoordinator.mockResolvedValue(
+        eventRow({ event_id: 42, status: "SUBMITTED", coordinator_id: 7 }),
+      );
+
+      const res = await send("patch", "/api/events/42/coordinator", {
+        coordinatorId: 7,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.event).toEqual(
+        expect.objectContaining({ eventId: 42, status: "SUBMITTED" }),
+      );
+      expect(eventModel.assignCoordinator).toHaveBeenCalledWith({
+        eventId: 42,
+        coordinatorId: 7,
+        leadId: 11,
+      });
+    });
+
+    test("should_reject_an_invalid_coordinator_id_before_assignment", async () => {
+      signedInAs("COORDINATOR_LEAD");
+
+      const res = await send("patch", "/api/events/42/coordinator", {
+        coordinatorId: "7",
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: "Select an active Event Coordinator.",
+        code: "INVALID_COORDINATOR",
+      });
+      expect(eventModel.assignCoordinator).not.toHaveBeenCalled();
+    });
+
+    test("should_return_a_conflict_when_assignment_finds_an_overlap", async () => {
+      signedInAs("COORDINATOR_LEAD");
+      eventModel.assignCoordinator.mockRejectedValue(
+        domainError("COORDINATOR_CONFLICT", {
+          coordinatorName: "Alice Coordinator",
+        }),
+      );
+
+      const res = await send("patch", "/api/events/42/coordinator", {
+        coordinatorId: 7,
+      });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        error: "The selected coordinator is unavailable during this event.",
+        code: "COORDINATOR_CONFLICT",
+        fields: { coordinatorName: "Alice Coordinator" },
+      });
+    });
   });
 
   test.each(["COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT", "ATTENDEE"])(
@@ -96,23 +224,35 @@ describe("authentication and role checks", () => {
     async (role) => {
       signedInAs(role);
 
-      const res = await send("post", "/api/events", validRequest(), { "Idempotency-Key": KEY });
+      const res = await send("post", "/api/events", validRequest(), {
+        "Idempotency-Key": KEY,
+      });
 
       expect(res.status).toBe(403);
       expect(res.body.code).toBe("FORBIDDEN");
       expect(eventModel.submitEvent).not.toHaveBeenCalled();
-    }
+    },
   );
 });
 
 describe("POST /api/events (SPM-35)", () => {
-  test("[SPM-35-TC-001] should_return_201_with_request_id_and_submitted_label_when_request_is_valid", async () => {
+
+    test("[SPM-35-TC-001] should_return_201_with_request_id_and_submitted_status_when_request_is_valid", async () => {
+    eventModel.submitEvent.mockResolvedValue({
+      event: eventRow({ status: "SUBMITTED", title: "Tech Conference 2026" }),
+      replayed: false,
+    });
     eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED", title: "Tech Conference 2026" }), replayed: false });
 
-    const res = await send("post", "/api/events", validRequest(), { "Idempotency-Key": KEY });
+
+    const res = await send("post", "/api/events", validRequest(), {
+      "Idempotency-Key": KEY,
+    });
 
     expect(res.status).toBe(201);
-    expect(res.body.message).toBe("Your event request has been submitted successfully.");
+    expect(res.body.message).toBe(
+      "Your event request has been submitted successfully.",
+    );
     expect(res.body.event).toEqual(
       expect.objectContaining({
         eventId: 42,
@@ -120,16 +260,24 @@ describe("POST /api/events (SPM-35)", () => {
         status: "SUBMITTED",
         statusLabel: "Submitted",
         statusNote: "Waiting for a coordinator",
-      })
+      }),
     );
     expect(res.headers["idempotent-replayed"]).toBeUndefined();
     expect(eventModel.submitEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ organiserId: ORGANISER_ID, idempotencyKey: KEY })
+      expect.objectContaining({
+        organiserId: ORGANISER_ID,
+        idempotencyKey: KEY,
+      }),
     );
   });
 
   test("[SPM-35-TC-002] should_return_the_title_error_without_writing_when_title_is_blank", async () => {
-    const res = await send("post", "/api/events", { ...validRequest(), title: "" }, { "Idempotency-Key": KEY });
+    const res = await send(
+      "post",
+      "/api/events",
+      { ...validRequest(), title: "" },
+      { "Idempotency-Key": KEY },
+    );
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({
@@ -145,11 +293,13 @@ describe("POST /api/events (SPM-35)", () => {
       "post",
       "/api/events",
       { ...validRequest(), startDatetime: inDays(1), endDatetime: inDays(1.1) },
-      { "Idempotency-Key": KEY }
+      { "Idempotency-Key": KEY },
     );
 
     expect(res.status).toBe(400);
-    expect(res.body.fields.startDatetime).toBe("Event date must be at least 48 hours in advance.");
+    expect(res.body.fields.startDatetime).toBe(
+      "Event date must be at least 48 hours in advance.",
+    );
   });
 
   test.each([["status"], ["organiserId"], ["requestId"], ["__proto__"]])(
@@ -157,30 +307,44 @@ describe("POST /api/events (SPM-35)", () => {
     async (field) => {
       const body = JSON.parse(`{"title":"Gala","${field}":"x"}`);
 
-      const res = await send("post", "/api/events", body, { "Idempotency-Key": KEY });
+      const res = await send("post", "/api/events", body, {
+        "Idempotency-Key": KEY,
+      });
 
       expect(res.status).toBe(400);
-      expect(Object.prototype.hasOwnProperty.call(res.body.fields, field)).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(res.body.fields, field)).toBe(
+        true,
+      );
       expect(eventModel.findValidationContext).not.toHaveBeenCalled();
       expect(eventModel.submitEvent).not.toHaveBeenCalled();
-    }
+    },
   );
 
   test.each([[undefined], ["short"], ["has space in key"]])(
     "[EVT-IDEM-003] should_return_400_without_writing_when_idempotency_key_is_%p",
     async (key) => {
-      const res = await send("post", "/api/events", validRequest(), key ? { "Idempotency-Key": key } : {});
+      const res = await send(
+        "post",
+        "/api/events",
+        validRequest(),
+        key ? { "Idempotency-Key": key } : {},
+      );
 
       expect(res.status).toBe(400);
       expect(res.body.fields).toHaveProperty("idempotencyKey");
       expect(eventModel.submitEvent).not.toHaveBeenCalled();
-    }
+    },
   );
 
   test("[EVT-IDEM-002] should_mark_the_response_when_the_request_is_a_replay", async () => {
-    eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED" }), replayed: true });
+    eventModel.submitEvent.mockResolvedValue({
+      event: eventRow({ status: "SUBMITTED" }),
+      replayed: true,
+    });
 
-    const res = await send("post", "/api/events", validRequest(), { "Idempotency-Key": KEY });
+    const res = await send("post", "/api/events", validRequest(), {
+      "Idempotency-Key": KEY,
+    });
 
     expect(res.status).toBe(201);
     expect(res.headers["idempotent-replayed"]).toBe("true");
@@ -189,19 +353,28 @@ describe("POST /api/events (SPM-35)", () => {
   test.each([
     ["NO_ELIGIBLE_COORDINATOR", 409],
     ["IDEMPOTENCY_KEY_REUSED", 409],
-  ])("[EVT-ERR-004] should_return_%s_in_the_shared_error_shape", async (code, status) => {
-    eventModel.submitEvent.mockRejectedValue(domainError(code));
+  ])(
+    "[EVT-ERR-004] should_return_%s_in_the_shared_error_shape",
+    async (code, status) => {
+      eventModel.submitEvent.mockRejectedValue(domainError(code));
 
-    const res = await send("post", "/api/events", validRequest(), { "Idempotency-Key": KEY });
+      const res = await send("post", "/api/events", validRequest(), {
+        "Idempotency-Key": KEY,
+      });
 
-    expect(res.status).toBe(status);
-    expect(res.body).toEqual({ error: expect.any(String), code });
-  });
+      expect(res.status).toBe(status);
+      expect(res.body).toEqual({ error: expect.any(String), code });
+    },
+  );
 
   test("[SPM-35-AC2] should_return_field_errors_when_the_database_rejects_the_submission", async () => {
-    eventModel.submitEvent.mockRejectedValue(domainError("VALIDATION_FAILED", { startDatetime: MESSAGES.leadTime }));
+    eventModel.submitEvent.mockRejectedValue(
+      domainError("VALIDATION_FAILED", { startDatetime: MESSAGES.leadTime }),
+    );
 
-    const res = await send("post", "/api/events", validRequest(), { "Idempotency-Key": KEY });
+    const res = await send("post", "/api/events", validRequest(), {
+      "Idempotency-Key": KEY,
+    });
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({
@@ -212,41 +385,73 @@ describe("POST /api/events (SPM-35)", () => {
   });
 
   test("[TC-AUTH-018] should_return_a_generic_500_when_an_unexpected_database_error_occurs", async () => {
-    eventModel.submitEvent.mockRejectedValue({ code: "57014", message: "statement timeout" });
+    eventModel.submitEvent.mockRejectedValue({
+      code: "57014",
+      message: "statement timeout",
+    });
 
-    const res = await send("post", "/api/events", validRequest(), { "Idempotency-Key": KEY });
+    const res = await send("post", "/api/events", validRequest(), {
+      "Idempotency-Key": KEY,
+    });
 
     expect(res.status).toBe(500);
-    expect(res.body).toEqual({ error: "Internal Server Error", code: "INTERNAL_ERROR" });
+    expect(res.body).toEqual({
+      error: "Internal Server Error",
+      code: "INTERNAL_ERROR",
+    });
   });
 });
 
 describe("POST /api/events/drafts (SPM-37)", () => {
   test("[SPM-37-S1] should_save_a_title_only_draft_and_return_saved_at", async () => {
-    eventModel.saveDraft.mockResolvedValue({ event: eventRow(), replayed: false });
+    eventModel.saveDraft.mockResolvedValue({
+      event: eventRow(),
+      replayed: false,
+    });
 
-    const res = await send("post", "/api/events/drafts", { title: "SMU Alumni Gala 2026" }, { "Idempotency-Key": KEY });
+    const res = await send(
+      "post",
+      "/api/events/drafts",
+      { title: "SMU Alumni Gala 2026" },
+      { "Idempotency-Key": KEY },
+    );
 
     expect(res.status).toBe(201);
     expect(res.body).toEqual(
       expect.objectContaining({
         message: "Draft saved successfully.",
         savedAt: "2026-10-07T07:14:14.406209+00:00",
-        event: expect.objectContaining({ status: "DRAFT", statusLabel: "Draft" }),
-      })
+        event: expect.objectContaining({
+          status: "DRAFT",
+          statusLabel: "Draft",
+        }),
+      }),
     );
   });
 
   test("[SPM-37-S3] should_save_a_draft_when_registration_is_enabled_before_capacity_is_entered", async () => {
-    eventModel.saveDraft.mockResolvedValue({ event: eventRow({ is_registration_enabled: true }), replayed: false });
+    eventModel.saveDraft.mockResolvedValue({
+      event: eventRow({ is_registration_enabled: true }),
+      replayed: false,
+    });
 
-    const res = await send("post", "/api/events/drafts", { title: "Gala", isRegistrationEnabled: true }, { "Idempotency-Key": KEY });
+    const res = await send(
+      "post",
+      "/api/events/drafts",
+      { title: "Gala", isRegistrationEnabled: true },
+      { "Idempotency-Key": KEY },
+    );
 
     expect(res.status).toBe(201);
   });
 
   test("[SPM-37-S1] should_return_400_without_writing_when_the_draft_has_no_title", async () => {
-    const res = await send("post", "/api/events/drafts", { purpose: "Notes" }, { "Idempotency-Key": KEY });
+    const res = await send(
+      "post",
+      "/api/events/drafts",
+      { purpose: "Notes" },
+      { "Idempotency-Key": KEY },
+    );
 
     expect(res.status).toBe(400);
     expect(res.body.fields).toEqual({ title: MESSAGES.titleRequired });
@@ -256,28 +461,46 @@ describe("POST /api/events/drafts (SPM-37)", () => {
 
 describe("PUT /api/events/:id/draft (SPM-37)", () => {
   test("[SPM-37-S3] should_auto_save_with_the_auto_save_flag_and_message", async () => {
+
+    eventModel.findOwnEvent.mockResolvedValue(eventRow());
+    eventModel.saveDraft.mockResolvedValue({
+      event: eventRow({ expected_attendance: 200 }),
+      replayed: false,
+    });
+
     eventModel.findVisibleEvent.mockResolvedValue(eventRow());
     eventModel.saveDraft.mockResolvedValue({ event: eventRow({ expected_attendance: 200 }), replayed: false });
 
-    const res = await send("put", "/api/events/42/draft", { expectedAttendance: 200, isAutoSave: true });
+
+    const res = await send("put", "/api/events/42/draft", {
+      expectedAttendance: 200,
+      isAutoSave: true,
+    });
 
     expect(res.status).toBe(200);
     expect(res.body.message).toBe("Draft auto-saved.");
     expect(eventModel.findVisibleEvent).toHaveBeenCalledWith(42, expect.objectContaining({ user_id: ORGANISER_ID }));
     expect(eventModel.saveDraft).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: 42, isAutoSave: true, input: { expectedAttendance: 200 } })
+      expect.objectContaining({
+        eventId: 42,
+        isAutoSave: true,
+        input: { expectedAttendance: 200 },
+      }),
     );
   });
 
   test.each([["abc"], ["0"], ["1e3"], ["99999999999"]])(
     "[TC-AUTH-013] should_return_404_without_querying_when_event_id_is_%s",
     async (id) => {
-      const res = await send("put", `/api/events/${id}/draft`, { title: "Gala" });
+      const res = await send("put", `/api/events/${id}/draft`, {
+        title: "Gala",
+      });
 
       expect(res.status).toBe(404);
       expect(res.body.code).toBe("EVENT_NOT_FOUND");
+
       expect(eventModel.findVisibleEvent).not.toHaveBeenCalled();
-    }
+    },
   );
 
   test("[TC-AUTH-013] should_return_404_when_the_draft_belongs_to_another_organiser", async () => {
@@ -288,6 +511,7 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
     expect(res.status).toBe(404);
     expect(eventModel.saveDraft).not.toHaveBeenCalled();
   });
+
 
   // SPM-33 AC3 replaces the earlier 409 EVENT_NOT_DRAFT on this route.
   test("[SPM-37-S2] should_return_403_pointing_to_a_change_request_when_the_request_is_no_longer_a_draft", async () => {
@@ -308,16 +532,22 @@ describe("PUT /api/events/:id/draft (SPM-37)", () => {
 
     const res = await send("put", "/api/events/42/draft", { title: "Gala", isAutoSave: "yes" });
 
+
     expect(res.status).toBe(400);
     expect(res.body.fields.isAutoSave).toBeDefined();
   });
 
   test("[SPM-37-S1] should_validate_the_merged_draft_when_a_change_conflicts_with_saved_values", async () => {
     eventModel.findVisibleEvent.mockResolvedValue(
-      eventRow({ start_datetime: "2026-11-01T09:00:00+00:00", end_datetime: "2026-11-01T17:00:00+00:00" })
+      eventRow({
+        start_datetime: "2026-11-01T09:00:00+00:00",
+        end_datetime: "2026-11-01T17:00:00+00:00",
+      }),
     );
 
-    const res = await send("put", "/api/events/42/draft", { startDatetime: "2026-11-01T18:00:00+00:00" });
+    const res = await send("put", "/api/events/42/draft", {
+      startDatetime: "2026-11-01T18:00:00+00:00",
+    });
 
     expect(res.status).toBe(400);
     expect(res.body.fields).toEqual({ endDatetime: MESSAGES.endBeforeStart });
@@ -333,30 +563,50 @@ describe("PUT /api/events/:id/submit (SPM-37)", () => {
     const res = await send("put", "/api/events/42/submit", body);
 
     expect(res.status).toBe(400);
-    expect(res.body.fields.expectedAttendance).toBe("Expected Attendance is required for submission");
+    expect(res.body.fields.expectedAttendance).toBe(
+      "Expected Attendance is required for submission",
+    );
     expect(eventModel.submitEvent).not.toHaveBeenCalled();
   });
 
   test("[SPM-37-S4] should_submit_a_completed_draft", async () => {
     eventModel.findOwnEvent.mockResolvedValue(eventRow());
-    eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED" }), replayed: false });
+    eventModel.submitEvent.mockResolvedValue({
+      event: eventRow({ status: "SUBMITTED" }),
+      replayed: false,
+    });
 
     const res = await send("put", "/api/events/42/submit", validRequest());
 
     expect(res.status).toBe(200);
+
+    expect(res.body.event.statusLabel).toBe("Submitted");
+    expect(eventModel.submitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: 42, organiserId: ORGANISER_ID }),
+    );
+
     expect(res.body.event.statusLabel).toBe("Submitted");
     expect(eventModel.submitEvent).toHaveBeenCalledWith(expect.objectContaining({ eventId: 42, organiserId: ORGANISER_ID }));
+
   });
 });
 
 describe("GET /api/events/:id and /mine", () => {
   test("[SPM-37-S4] should_return_the_draft_with_ownership_when_prefilling_edit_draft", async () => {
-    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ organisation: null }));
+    eventModel.findVisibleEvent.mockResolvedValue(
+      eventRow({ organisation: null }),
+    );
 
     const res = await send("get", "/api/events/42");
 
     expect(res.status).toBe(200);
-    expect(res.body.event).toEqual(expect.objectContaining({ eventId: 42, isOwner: true, organisation: null }));
+    expect(res.body.event).toEqual(
+      expect.objectContaining({
+        eventId: 42,
+        isOwner: true,
+        organisation: null,
+      }),
+    );
   });
 
   test("[TC-AUTH-013] should_return_404_when_the_request_is_not_visible", async () => {
@@ -365,31 +615,45 @@ describe("GET /api/events/:id and /mine", () => {
     const res = await send("get", "/api/events/42");
 
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: "Event request not found.", code: "EVENT_NOT_FOUND" });
+    expect(res.body).toEqual({
+      error: "Event request not found.",
+      code: "EVENT_NOT_FOUND",
+    });
   });
 
   test("[SPM-35-AC5] should_return_events_and_next_cursor_when_listing_drafts", async () => {
-    eventModel.findOrganiserEventRequests.mockResolvedValue({ events: [{ eventId: 42 }], nextCursor: "abc" });
+    eventModel.findOrganiserEventRequests.mockResolvedValue({
+      events: [{ eventId: 42 }],
+      nextCursor: "abc",
+    });
 
-    const res = await send("get", "/api/events/mine?status=DRAFT&limit=10&cursor=eyJh");
+    const res = await send(
+      "get",
+      "/api/events/mine?status=DRAFT&limit=10&cursor=eyJh",
+    );
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ events: [{ eventId: 42 }], nextCursor: "abc" });
     expect(eventModel.findOrganiserEventRequests).toHaveBeenCalledWith(
       expect.objectContaining({ user_id: ORGANISER_ID }),
-      { limit: 10, cursor: "eyJh", status: "DRAFT" }
+      { limit: 10, cursor: "eyJh", status: "DRAFT" },
     );
   });
 
-  test.each([["APPROVED"], ["drafts"]])("[SPM-35-AC5] should_return_400_when_status_filter_is_%s", async (status) => {
-    const res = await send("get", `/api/events/mine?status=${status}`);
+  test.each([["APPROVED"], ["drafts"]])(
+    "[SPM-35-AC5] should_return_400_when_status_filter_is_%s",
+    async (status) => {
+      const res = await send("get", `/api/events/mine?status=${status}`);
 
-    expect(res.status).toBe(400);
-    expect(res.body.fields).toEqual({ status: "Unknown status filter." });
-  });
+      expect(res.status).toBe(400);
+      expect(res.body.fields).toEqual({ status: "Unknown status filter." });
+    },
+  );
 
   test("[TC-AUTH-021] should_return_400_when_the_cursor_cannot_be_decoded", async () => {
-    eventModel.findOrganiserEventRequests.mockRejectedValue(domainError("INVALID_CURSOR"));
+    eventModel.findOrganiserEventRequests.mockRejectedValue(
+      domainError("INVALID_CURSOR"),
+    );
 
     const res = await send("get", "/api/events/mine?cursor=abc");
 
@@ -411,5 +675,72 @@ describe("SPM-35 request catalogue", () => {
     signedInAs(role);
     expect((await send("get", "/api/events/request-options")).status).toBe(403);
     expect(eventModel.findRequestOptions).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("SPM-36 owned draft submission", () => {
+  beforeEach(() => eventModel.findOwnEvent.mockResolvedValue(eventRow()));
+
+  test("[BE-01/BE-02/BE-03] submits final edits against the existing ID without assigning a Coordinator", async () => {
+    const submittedAt = "2026-10-19T12:00:00.000Z";
+    eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED", coordinator_id: null, submitted_at: submittedAt }), replayed: false });
+    const input = validRequest();
+    const res = await send("put", "/api/events/42/submit", input);
+    expect(res.status).toBe(200);
+    expect(res.body.event).toMatchObject({ eventId: 42, requestId: "REQ-000042", status: "SUBMITTED", statusLabel: "Submitted", submittedAt, isAssignedToCoordinator: false });
+    expect(eventModel.submitEvent).toHaveBeenCalledWith({ organiserId: ORGANISER_ID, eventId: 42, input });
+  });
+
+  test("[BE-02] merges saved mandatory fields when only final title is supplied", async () => {
+    eventModel.findOwnEvent.mockResolvedValue(eventRow(eventModel.toRow(validRequest())));
+    eventModel.submitEvent.mockResolvedValue({ event: eventRow({ status: "SUBMITTED", title: "Final title" }) });
+    const res = await send("put", "/api/events/42/submit", { title: "Final title" });
+    expect(res.status).toBe(200);
+    expect(eventModel.submitEvent).toHaveBeenCalledWith({ organiserId: ORGANISER_ID, eventId: 42, input: { title: "Final title" } });
+  });
+
+  test.each(["title", "purpose", "description", "startDatetime", "endDatetime", "expectedAttendance", "preferredLayoutType"])("[BE-06] rejects blank mandatory field %s without writing", async field => {
+    const res = await send("put", "/api/events/42/submit", { ...validRequest(), [field]: "   " });
+    expect(res.status).toBe(400);
+    expect(res.body.fields[field]).toEqual(expect.any(String));
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test.each(["coordinatorId", "organiserId", "supervisingLeadId", "submittedAt", "status", "requestId"])("[BE-13] rejects client-controlled system field %s as a whole", async field => {
+    const res = await send("put", "/api/events/42/submit", { ...validRequest(), [field]: "tampered" });
+    expect(res.status).toBe(400);
+    expect(res.body.fields[field]).toEqual(expect.any(String));
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test.each(["COORDINATOR_LEAD", "COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER", "ATTENDEE"])("[BE-12] denies draft submission by %s", async role => {
+    signedInAs(role);
+    const res = await send("put", "/api/events/42/submit", validRequest());
+    expect(res.status).toBe(403);
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test("[BE-12] a different organiser cannot submit a private draft", async () => {
+    eventModel.findOwnEvent.mockResolvedValue(null);
+    const res = await send("put", "/api/events/42/submit", validRequest());
+    expect(res.status).toBe(404);
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test.each(["SUBMITTED", "UNDER_REVIEW", "PLANNING", "CANCELLED"])("[BE-14/BE-17] retry after %s never calls the submission writer", async status => {
+    eventModel.findOwnEvent.mockResolvedValue(eventRow({ status, coordinator_id: status === "SUBMITTED" ? null : 20 }));
+    const res = await send("put", "/api/events/42/submit", validRequest());
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("EVENT_NOT_DRAFT");
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test("[BE-19] persistence failure returns an error without a success event", async () => {
+    eventModel.submitEvent.mockRejectedValue(new Error("transaction failed"));
+    const res = await send("put", "/api/events/42/submit", validRequest());
+    expect(res.status).toBe(500);
+    expect(res.body.event).toBeUndefined();
+    expect(res.body.code).toBe("INTERNAL_ERROR");
   });
 });
