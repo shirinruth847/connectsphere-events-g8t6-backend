@@ -898,5 +898,6 @@ module.exports = {
   decodeCursor,
   encodeDiscoveryCursor,
   decodeDiscoveryCursor,
+  isValidCursorTimestamp,
   findValidationContext,
 };
