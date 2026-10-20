@@ -670,7 +670,7 @@ const assignCoordinator = async ({ eventId, coordinatorId, leadId }) => {
   });
   if (error) {
     const code = error.message;
-    if (["EVENT_NOT_FOUND", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT"].includes(code)) {
+    if (["FORBIDDEN", "EVENT_NOT_FOUND", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT"].includes(code)) {
       throw eventRequestError(code);
     }
     throw toEventRequestError(error);

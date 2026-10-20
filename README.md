@@ -434,3 +434,9 @@ Do not delete applied migration files or reset the shared database to remove
 pending UI features. Current live assignment transitions to UNDER_REVIEW.
 The full integration run passed 81 tests against the configured development
 database; reconstruction from local migration history remains a separate check.
+
+SPM-177 Lead-only assignment correction and isolated regression checks are documented
+in [the SPM-177 test plan](docs/test-plans/spm-177.md). The corrective migration
+retires the obsolete two-argument assignment function and preserves atomic
+assignment, history, activity and notifications. Shared deployment requires
+review of target migration history; no hosted migration was applied here.
