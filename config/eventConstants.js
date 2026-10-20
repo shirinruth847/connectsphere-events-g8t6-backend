@@ -70,11 +70,12 @@ const LIFECYCLE_ACTIONS = Object.freeze({
 // Why an event is not ready for safety review or confirmation (Master section
 // 5.3), by the code the database reports.
 const READINESS_MESSAGES = Object.freeze({
-  READINESS_DATA_PENDING: "Venue booking and technical arrangements cannot be checked yet.",
   NO_ACTIVE_BOOKING: "Add at least one venue booking.",
   BOOKING_NOT_APPROVED: "Every venue booking must be approved; holds and pending requests do not count.",
   BOOKING_OVER_CAPACITY: "A booking's expected attendance is larger than its venue's capacity.",
-  NO_PRIMARY_VENUE: "Choose one approved venue booking as the primary venue.",
+  BOOKING_CONFLICT: "A venue booking overlaps another active booking at the same venue.",
+  // Interim wording until bookings carry a primary flag (SPM-173 interim readiness).
+  NO_PRIMARY_VENUE: "Keep exactly one active venue booking: it becomes the primary venue. Events at several venues cannot be submitted until a primary venue can be chosen.",
   TECHNICAL_NOT_APPROVED: "The technical request must be approved, or marked as not required.",
   REGISTRATION_INVALID: "Registration is enabled without a valid capacity.",
   REGISTRATION_EXCEEDS_PRIMARY_CAPACITY: "Registration capacity is larger than the primary venue's capacity.",

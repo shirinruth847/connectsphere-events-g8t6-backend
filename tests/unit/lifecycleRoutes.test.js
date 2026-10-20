@@ -148,13 +148,13 @@ describe("SPM-173 coordinator lifecycle actions", () => {
 
   test("[SPM-173-AC9][SPM-173-TC-14] should_name_each_failing_readiness_condition", async () => {
     eventModel.runLifecycleAction.mockRejectedValue(
-      domainError("READINESS_BLOCKED", { failures: ["NO_PRIMARY_VENUE", "OPEN_CHANGE_REQUEST"] })
+      domainError("READINESS_BLOCKED", { failures: ["BOOKING_CONFLICT", "OPEN_CHANGE_REQUEST"] })
     );
     const res = await send("post", "/api/events/42/submit-for-safety-review", { version: 7 });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("READINESS_BLOCKED");
     expect(res.body.failures).toEqual([
-      { code: "NO_PRIMARY_VENUE", message: "Choose one approved venue booking as the primary venue." },
+      { code: "BOOKING_CONFLICT", message: "A venue booking overlaps another active booking at the same venue." },
       { code: "OPEN_CHANGE_REQUEST", message: "A change request is still open." },
     ]);
   });
