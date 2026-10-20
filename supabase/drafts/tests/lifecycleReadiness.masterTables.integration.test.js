@@ -1,7 +1,10 @@
 process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 // SPM-173 readiness, submit for safety review and confirmation (AC8-AC10) on
-// the Master resource tables: holds, primary flags, venue blocks and technical
-// requests. Kept beside the draft migrations it needs and NOT run: when
+// the Master resource tables: primary flags, stored occupied ranges, incidents
+// and technical requests. Holds and blocks are MongoDB venue_calendar documents
+// under Master 1.2 and never count toward readiness; a block reaches readiness
+// only through its resource incident. Kept beside the draft migrations it needs
+// and NOT run: when
 // supabase/drafts/20261019100300 and 20261019100400 are agreed and applied, move
 // this file to tests/integration (its require paths assume that location) in
 // place of the live-schema readiness suite.
@@ -17,7 +20,6 @@ jest.setTimeout(180000);
 
 const runId = newRunId();
 const createdEventIds = [];
-const blockIds = [];
 let fixtures;
 let annexVenueId;
 const sessions = new Map();
@@ -77,7 +79,6 @@ const addBooking = async (event, { status = "APPROVED", isPrimary = true, venueI
         is_primary: isPrimary,
         expected_attendance: attendance,
         occupied_range: `[${event.start_datetime},${event.end_datetime})`,
-        hold_expires_at: status === "HELD" ? "2027-06-01T00:00:00Z" : null,
       })
       .select("booking_id")
       .single(),
@@ -121,12 +122,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (fixtures) {
-    await cleanupLifecycleRows(runId, [...Object.values(fixtures.events), ...createdEventIds]);
-    if (blockIds.length) {
-      await withPrivilegedDb((client) => client.query("DELETE FROM public.venue_blocks WHERE block_id = ANY($1::integer[])", [blockIds]));
-    }
-  }
+  if (fixtures) await cleanupLifecycleRows(runId, [...Object.values(fixtures.events), ...createdEventIds]);
   await cleanupAuthFixtures(runId);
 });
 
@@ -167,11 +163,6 @@ describe("SPM-173 readiness and submit for safety review", () => {
       await addBooking(event, { status: "PENDING" });
       return event;
     }],
-    ["a hold only", "BOOKING_NOT_APPROVED", async () => {
-      const event = await lifecycleEvent();
-      await addBooking(event, { status: "HELD" });
-      return event;
-    }],
     ["no primary venue", "NO_PRIMARY_VENUE", async () => {
       const event = await lifecycleEvent();
       await addBooking(event, { isPrimary: false });
@@ -188,22 +179,15 @@ describe("SPM-173 readiness and submit for safety review", () => {
     ["an open venue block", "OPEN_BLOCKING_INCIDENT", async () => {
       const event = await readyEvent();
       const { data: booking } = await supabase.from("venue_booking").select("booking_id").eq("event_id", event.event_id).single();
-      const block = check(
-        await supabase
-          .from("venue_blocks")
-          .insert({
-            venue_id: fixtures.venue.venueId,
-            reason: "MAINTENANCE",
-            block_range: `[${event.start_datetime},${event.end_datetime})`,
-            created_by: userId("venueStaff"),
-          })
-          .select("block_id")
-          .single(),
-        "block"
-      );
-      blockIds.push(block.block_id);
+      // The block itself is a MongoDB venue_calendar document (Master 1.2); readiness
+      // reads only the incident, so a reference ID stands in for it here.
       check(
-        await supabase.from("resource_incidents").insert({ event_id: event.event_id, type: "VENUE_BLOCK", booking_id: booking.booking_id, block_id: block.block_id }),
+        await supabase.from("resource_incidents").insert({
+          event_id: event.event_id,
+          type: "VENUE_BLOCK",
+          booking_id: booking.booking_id,
+          calendar_block_id: `spm32-${runId}-block`,
+        }),
         "incident"
       );
       return event;
