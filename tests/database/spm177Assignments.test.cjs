@@ -13,6 +13,7 @@ async function setup() {
   await db.exec(fs.readFileSync(path.join(root, 'tests/fixtures/spm177DatabaseSchema.sql'), 'utf8'));
   await db.exec(migration('20261007150000_assign_event_coordinator.sql'));
   await db.exec(migration('20261019100000_spm177_coordinator_assignment.sql'));
+  await db.exec(migration('20261020075714_spm174_lead_assignment_conflict_guard.sql'));
   await db.exec(migration('20261020090000_spm177_lead_only_assignment.sql'));
   await db.exec(`
     CREATE UNIQUE INDEX one_active_assignment ON public.event_assignments(event_id) WHERE ended_at IS NULL;
@@ -52,6 +53,10 @@ test('[SPM-177 AC1/AC5] Lead assignment commits state, supervision, activity and
     assert.equal(state.activity[0].audience, 'STAFF_ONLY');
     assert.deepEqual(state.recipients.map(row => row.recipient_id).sort(), [1, 3]);
     assert.equal(state.notifications.length, 2);
+    const assignments = (await db.query('SELECT public.list_lead_event_assignments(2) AS result')).rows[0].result;
+    assert.equal(assignments[0].supervisingLeadId, 2);
+    assert.equal(assignments[0].coordinatorName, 'Coordinator');
+    await assert.rejects(db.query("UPDATE public.event SET coordinator_id=3,status='UNDER_REVIEW' WHERE event_id=3"), error => error.message === 'COORDINATOR_CONFLICT');
   } finally { await db.close(); }
 });
 

@@ -40,31 +40,91 @@ Returns:
 }
 ```
 
-### Event Requests (SPM-35, SPM-37)
+### Unassigned Event Queue
 
-These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, initial assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it because SPM-33's coordinator view needs assigned events.
+`GET /api/events/unassigned`
 
-When `ENABLE_COORDINATOR_WORKFLOWS=true`, only active Coordinator Leads can read `/api/events/unassigned`, read `/api/events/coordinator-availability`, or initially assign with `PATCH /api/events/:id/coordinator` and `{ "coordinatorId": number }`. `POST` remains the Lead-only initial-assignment compatibility endpoint. Reassignment uses `PATCH` with `coordinatorId` and `expectedCoordinatorId`.
+Returns submitted event requests that do not yet have a coordinator assigned.
+This endpoint requires an authenticated `COORDINATOR_LEAD` profile and returns
+the event summary fields used for assignment.
+
+```json
+{
+  "events": [
+    {
+      "eventId": 42,
+      "requestId": "REQ-000042",
+      "status": "SUBMITTED",
+      "title": "Example event",
+      "startDatetime": "2026-10-20T09:00:00.000Z",
+      "endDatetime": "2026-10-20T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+### Event Requests (SPM-35, SPM-36, SPM-37)
+
+These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it, because SPM-33's coordinator view needs assigned events.
+
+The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/discovery/:id` (SPM-34), require an `ATTENDEE` bearer token instead.
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
-| `POST /api/events` | Event fields; `Idempotency-Key` header | `201 { message, event }`, status `SUBMITTED` | `400 VALIDATION_FAILED`, `409 NO_ELIGIBLE_COORDINATOR`, `409 IDEMPOTENCY_KEY_REUSED` |
+| `POST /api/events` | Event fields; `Idempotency-Key` header | `201 { message, event }`, status `SUBMITTED` | `400 VALIDATION_FAILED`, `409 IDEMPOTENCY_KEY_REUSED` |
 | `POST /api/events/drafts` | Any event fields, `title` required; `Idempotency-Key` header | `201 { message, event, savedAt }`, status `DRAFT` | `400`, `409 IDEMPOTENCY_KEY_REUSED` |
 | `PUT /api/events/:id/draft` | Changed fields, plus `"isAutoSave": true` from the idle timer. Optional `version` and `Idempotency-Key` (see SPM-33) | `200 { message, event, savedAt }`; auto-saves skip the activity log | `400`, `403` (see SPM-33), `404 EVENT_NOT_FOUND`, `409 EVENT_VERSION_CONFLICT` |
-| `PUT /api/events/:id/submit` | Final edits or `{}` | `200 { message, event }`, status `SUBMITTED` | `400` (draft unchanged), `404`, `409 EVENT_NOT_DRAFT`, `409 NO_ELIGIBLE_COORDINATOR` |
+| `PUT /api/events/:id/submit` | Final edits or `{}` | `200 { message, event }`, status `SUBMITTED` | `400` (draft unchanged), `404`, `409 EVENT_NOT_DRAFT` |
 | `GET /api/events/:id` | — | `200 { event }` with `isOwner`, `version`, `viewerRelationship` and `permissions` | `404 EVENT_NOT_FOUND` (missing, or outside the user's viewing scope) |
 | `GET /api/events/mine` | `?status=<event status>`, `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { events: [{ eventId, requestId, status, statusLabel, statusNote, title, startDatetime, endDatetime, expectedAttendance, organisation, isOwner, createdAt, updatedAt }], nextCursor }`, newest edit first | `400 VALIDATION_FAILED` (including `offset`, which this list does not accept) |
+| `GET /api/events/discovery` | `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { events: [{ eventId, title, description, startDatetime, endDatetime, organisationName, location, registrationAvailability }], nextCursor }`, soonest start first (ties by event ID) | `400 VALIDATION_FAILED`, `401 UNAUTHENTICATED`, `403 FORBIDDEN` |
+| `GET /api/events/discovery/:id` | — | `200 { event: { eventId, title, description, startDatetime, endDatetime, organisationName, registrationOpenAt, registrationCloseAt, location, registrationAvailability } }` | `404 EVENT_NOT_FOUND`, `401 UNAUTHENTICATED`, `403 FORBIDDEN` |
 
 - **Event fields:** `title` (≤ 200 chars), `purpose` (≤ 2000), `description` (≤ 5000), `startDatetime` and `endDatetime` (ISO 8601 **with** a timezone offset, e.g. `2026-10-08T09:00:00+08:00`), `expectedAttendance` (positive whole number), `preferredLayoutType` (an existing room layout or `NO_PREFERENCE`), `accessibilityNeeds` (up to 20 short strings), `isRegistrationEnabled`, `registrationCapacity`, `venuePreferences` (ordered venue IDs) and `equipmentRequirements` (`[{ "equipmentId": number, "quantity": number }]`). Numeric strings are accepted for numbers.
+- **Attendee discovery** exposes only public, published events whose status is `CONFIRMED` or `PREPARATION` and whose end time is still in the future, so events already in progress are listed too. Apply the versioned SPM-34 preparation migration before deploying to databases without that enum value. The `registrationAvailability` value is one of `OPEN`, `FULL_WAITLIST`, `CLOSED`, or `NOT_ENABLED`.
+- **Registration window and capacity:** registration enabled requires a capacity (DB constraint). Registration is open from `registration_open_at` up to, but not including, `registration_close_at`; `registration_open_at = null` means registration opens immediately and `registration_close_at = null` means there is no deadline. `is_registration_enabled = false` returns `NOT_ENABLED`.
+- **Attendee location:** list and detail return the name and address of the unique approved venue through the existing `venue_booking → room → venue` relationship. Pending, rejected and cancelled bookings are excluded. Multiple bookings at one venue count as one location. The current schema has no primary-venue marker: if approved bookings reference multiple venues, location remains `null` until the primary-venue model is available; discovery never chooses an arbitrary venue. No booking, room or venue IDs are returned.
 - **Server-controlled fields** (`status`, `organiserId`, `requestId`, …) are never silently ignored: the two `POST` routes reject them with `400`, and the update routes (`PUT /api/events/:id`, `PUT /api/events/:id/draft`) with `403 FIELD_NOT_EDITABLE` (see SPM-33).
 - **Status label and note:** organiser-facing responses carry `statusLabel` (`DRAFT` → "Draft", `SUBMITTED` → "Submitted", `UNDER_REVIEW` → "Under Review"; other states still return the stored code) (labels per Master section 3.5) and `statusNote`: "Waiting for a coordinator" while a submitted request has no coordinator, otherwise `null` (added by SPM-33; not yet listed in the Master).
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
-- **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the organiser's receipt notification in one database transaction (`submit_event_request`). The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
-- **Assignment** (`PATCH` or `POST /api/events/:id/coordinator`, Lead only) sets the coordinator and supervising Lead, enters `UNDER_REVIEW`, records staff-only assignment history/activity and notifies the organiser and coordinator in one transaction. Apply `20261020090000_spm177_lead_only_assignment.sql` after its reviewed prerequisites; it restores Lead-only RPC authorization and drops the obsolete two-argument overload without changing business rows. Normal authorized event details return `coordinatorName` (name or null) as the point of contact.
+- **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the receipt notification for the organiser and active Coordinator Leads in one database transaction (`submit_event_request`). The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
+- **Assignment** (`POST /api/events/:id/coordinator`, Coordinator Lead only, requires `ENABLE_COORDINATOR_WORKFLOWS=true`) takes a request from the queue: in one transaction (`assign_event_coordinator`) it sets the coordinator, moves the request from `SUBMITTED` to `UNDER_REVIEW` (Master section 5.2), records the staff-only history entry `COORDINATOR_ASSIGNED` and notifies the organiser and the coordinator.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
+
+### Submission guarantees (SPM-36)
+
+The agreed deployment has one Coordinator Lead. Submission saves against the
+existing draft ID, enters `SUBMITTED` with no Coordinator, and notifies the owner
+and that Lead. It succeeds even when no Coordinator is available. Assignment is
+still the separate Lead action and enters `UNDER_REVIEW`.
+
+Apply the reviewed migration
+`supabase/migrations/20261019120000_spm36_submission_time_and_lead_receipt.sql`
+before deploying this backend. It adds `event.submitted_at`, preserves the first
+submission time on later updates, backfills only from recorded submission history,
+and adds active Leads to the existing durable receipt's recipients in the same
+transaction. Legacy events without submission evidence retain a null timestamp.
+It has not been applied to shared development by this work item.
+
+Event responses add `submittedAt` (ISO timestamp or null). The event detail read
+also adds `coordinatorName` (name or null), without exposing the Coordinator's
+other profile fields. The queue sorts by submission time, creation time and ID;
+legacy entries without a known submission time follow dated entries. The existing
+`event_assignments.assigned_by` records the assigning Lead; dedicated supervision
+and handover modeling remains with the assignment stories.
+
+Repeated draft submissions return `409 EVENT_NOT_DRAFT` without writing again;
+the frontend retrieves the current event after a lost response or stale-tab retry.
+The row lock, field/requirement changes, timestamp, history and notification
+recipients commit or roll back together. Inbox UI (SPM-191), Organiser update
+presentation (SPM-192), Coordinator assignment updates (SPM-193), and provider
+email/SMS delivery remain separate notification dependencies.
+
+See [the backend test plan](docs/test-plans/spm-36.md) for execution results,
+commands and the isolated SQL test setup.
 
 ### Role-Scoped Event View, Direct Edits and History (SPM-33)
 
@@ -121,12 +181,12 @@ The browser signs in **directly with Supabase Auth** (`supabase.auth.signInWithP
 
 Errors use one shape: `{ "error": "<safe message>", "code": "<MACHINE_CODE>" }`, plus `fields` for validation errors. Authenticated requests send `Authorization: Bearer <access_token>`, and their responses carry `Cache-Control: no-store`. Only `FRONTEND_ORIGIN` may call the API from a browser.
 
-| Method & path | Access | Input | Success | Errors |
-| --- | --- | --- | --- | --- |
-| `GET /api/auth/me` | Any signed-in user | — | `200 { user: { user_id, email, name, role, roles, home_path } }` | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
-| `POST /api/auth/logout` | Bearer token, if any | — | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })` | — (idempotent) |
-| `GET /api/events/mine` | `ORGANISER` | See Event Requests above | Own requests plus submitted requests from the organiser's organisations; colleagues' drafts are never listed | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN` |
-| `GET /api/registrations/mine` | `ATTENDEE` | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN` |
+| Method & path                 | Access               | Input                                            | Success                                                                                                                                                                                                     | Errors                                                                                      |
+| ----------------------------- | -------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `GET /api/auth/me`            | Any signed-in user   | —                                                | `200 { user: { user_id, email, name, role, roles, home_path } }`                                                                                                                                            | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
+| `POST /api/auth/logout`       | Bearer token, if any | —                                                | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })`                                                                   | — (idempotent)                                                                              |
+| `GET /api/events/mine`        | `ORGANISER`          | See Event Requests above                         | Own requests plus submitted requests from the organiser's organisations; colleagues' drafts are never listed                                                                                                | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN`                                             |
+| `GET /api/registrations/mine` | `ATTENDEE`           | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN`                                                               |
 
 - `home_path` is `/dashboard` for organisers and staff and `/my-registrations` for attendees.
 - `roles` is a list so the contract survives multi-role users; the schema currently stores one role per user.
@@ -288,6 +348,25 @@ Format: `<type>/<ticket-id>-<short-description>` or `<type>/<short-description>`
    git checkout main
    git pull origin main
    ```
+### SPM-174 development fixture
+
+The Lead queue and assignment/reassignment integration, staged overlap guard,
+deployment order and isolated/hosted test commands are documented in
+[the SPM-174 integration plan](docs/test-plans/spm-174.md).
+
+After applying the Supabase migrations and provisioning the namespaced accounts, create a
+synthetic submitted request with no coordinator:
+
+```bash
+npm run seed:unassigned
+```
+
+The fixture is recorded in `supabase/seed/manifests/` (ignored by git) and can be removed
+without affecting other data:
+
+```bash
+npm run seed:unassigned:cleanup
+```
 
 
 ## Completed-ticket repair baseline
@@ -297,12 +376,11 @@ Existing event write/validation contracts are preserved. Request creation gains
 an organiser-only, read-only `GET /api/events/request-options` response containing
 `venues: [{ venueId, name }]` and `layouts: [layoutType]`; it creates no holds.
 
-Lead-only queue reads, availability, initial assignment
-and reassignment endpoints, exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`;
-unset or any other value returns 404. Shared development sets it to `true` (see
-`.env.example`) because SPM-33's coordinator view and edits need assigned events.
-The coordinator's own assigned-event read remains part of SPM-32 and is always
-available.
+Lead queue/assignment/reassignment endpoints exist only when
+`ENABLE_COORDINATOR_WORKFLOWS=true`; unset or any other value returns 404. Shared
+development sets it to `true` (see `.env.example`) because SPM-33's coordinator
+view and edits need assigned events. The coordinator's own assigned-event read
+remains part of SPM-32 and is always available.
 
 `npm test` runs all unit suites. Real auth/signup can be checked separately:
 
@@ -331,6 +409,8 @@ pending UI features. Current live assignment transitions to UNDER_REVIEW.
 The full integration run passed 81 tests against the configured development
 database; reconstruction from local migration history remains a separate check.
 
-For an SPM-174/177 queue fixture, apply the migrations and provision the namespaced
-accounts, then run `npm run seed:unassigned`. Remove only that fixture with
-`npm run seed:unassigned:cleanup`.
+SPM-177 Lead-only assignment correction and isolated regression checks are documented
+in [the SPM-177 test plan](docs/test-plans/spm-177.md). The corrective migration
+retires the obsolete two-argument assignment function and preserves atomic
+assignment, history, activity and notifications. Shared deployment requires
+review of target migration history; no hosted migration was applied here.
