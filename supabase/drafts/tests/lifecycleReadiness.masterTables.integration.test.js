@@ -1,8 +1,10 @@
 process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
-// SPM-173 readiness, submit for safety review and confirmation (AC8-AC10).
-// Needs every SPM-173 migration INCLUDING the Master resource tables
-// (supabase/drafts/20261019100300 and 20261019100400), which are applied only after the
-// SPM-179/SPM-186 owners agree, plus TEST_DATABASE_URL.
+// SPM-173 readiness, submit for safety review and confirmation (AC8-AC10) on
+// the Master resource tables: holds, primary flags, venue blocks and technical
+// requests. Kept beside the draft migrations it needs and NOT run: when
+// supabase/drafts/20261019100300 and 20261019100400 are agreed and applied, move
+// this file to tests/integration (its require paths assume that location) in
+// place of the live-schema readiness suite.
 const crypto = require("crypto");
 const request = require("supertest");
 const app = require("../../server");

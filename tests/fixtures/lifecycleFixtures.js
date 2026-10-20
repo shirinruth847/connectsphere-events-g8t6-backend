@@ -115,6 +115,7 @@ const cleanupLifecycleRows = async (runId, eventIds) => {
         if (exists[0].name) await client.query(`DELETE FROM public.${table} WHERE event_id = ANY($1::integer[])`, [eventIds]);
       }
       await client.query("DELETE FROM public.event_change_request WHERE event_id = ANY($1::integer[])", [eventIds]);
+      await client.query("DELETE FROM public.equipment_request WHERE event_id = ANY($1::integer[])", [eventIds]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
