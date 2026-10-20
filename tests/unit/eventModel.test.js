@@ -602,20 +602,11 @@ describe("Lead assignment reads", () => {
     expect(query.order).toHaveBeenNthCalledWith(3, "event_id", { ascending: true });
   });
 
-  test("should_return_active_assignments_with_current_coordinator_names", async () => {
-    const eventQuery = queryReturning({ data: [{
-      event_id: 42, coordinator_id: 20, status: "PLANNING", title: "Conference",
-      start_datetime: "2026-11-01T09:00:00.000Z", end_datetime: "2026-11-01T10:00:00.000Z",
-      expected_attendance: 100, organisation: { organisation_id: 3, name: "Org" },
-    }], error: null });
-    const userQuery = queryReturning({ data: [{ user_id: 20, name: "Coordinator Two" }], error: null });
-    supabase.from.mockImplementation((table) => table === "event" ? eventQuery : userQuery);
-
-    await expect(eventModel.findLeadAssignments()).resolves.toEqual([expect.objectContaining({
-      eventId: 42, coordinatorId: 20, coordinatorName: "Coordinator Two", status: "PLANNING",
-    })]);
-    expect(eventQuery.not).toHaveBeenCalledWith("coordinator_id", "is", null);
-    expect(eventQuery.not).toHaveBeenCalledWith("status", "in", '("COMPLETED","REJECTED","CANCELLED")');
+  test("should_scope_active_assignments_to_the_verified_lead_in_the_database", async () => {
+    const assignments = [{ eventId: 42, coordinatorId: 20, coordinatorName: "Coordinator Two", hasScheduleConflict: true }];
+    supabase.rpc.mockResolvedValue({ data: assignments, error: null });
+    await expect(eventModel.findLeadAssignments(10)).resolves.toEqual(assignments);
+    expect(supabase.rpc).toHaveBeenCalledWith("list_lead_event_assignments", { p_lead_id: 10 });
   });
 
   test("should_return_only_active_coordinators_and_their_active_event_schedules", async () => {

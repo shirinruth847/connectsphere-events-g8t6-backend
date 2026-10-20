@@ -151,7 +151,7 @@ describe("Lead assignment workspace reads", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.assignments).toHaveLength(1);
-    expect(eventModel.findLeadAssignments).toHaveBeenCalledTimes(1);
+    expect(eventModel.findLeadAssignments).toHaveBeenCalledWith(leadId);
   });
 
   test("[SPM-180] should_reject_coordinator_access_to_the_lead_assignment_workspace", async () => {

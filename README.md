@@ -350,6 +350,10 @@ Format: `<type>/<ticket-id>-<short-description>` or `<type>/<short-description>`
    ```
 ### SPM-174 development fixture
 
+The Lead queue and assignment/reassignment integration, staged overlap guard,
+deployment order and isolated/hosted test commands are documented in
+[the SPM-174 integration plan](docs/test-plans/spm-174.md).
+
 After applying the Supabase migrations and provisioning the namespaced accounts, create a
 synthetic submitted request with no coordinator:
 

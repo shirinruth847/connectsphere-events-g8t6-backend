@@ -25,6 +25,7 @@ const IDEMPOTENCY_KEY_MESSAGE =
 const VERSION_MESSAGE = "Send the version of the event you loaded.";
 
 const DOMAIN_ERRORS = Object.freeze({
+  FORBIDDEN: [403, "You do not have permission to access this resource."],
   EVENT_NOT_FOUND: [404, EVENT_NOT_FOUND.error],
   EVENT_NOT_DRAFT: [409, "Only draft requests can be changed or submitted."],
 
@@ -446,7 +447,7 @@ const listAssignedEvents = async (req, res, next) => {
 
 const listLeadAssignments = async (req, res, next) => {
   try {
-    const assignments = await eventModel.findLeadAssignments();
+    const assignments = await eventModel.findLeadAssignments(req.user.user_id);
     return res.status(200).json({ assignments });
   } catch (error) {
     return handleError(error, res, next);
@@ -474,8 +475,8 @@ const getCoordinatorAvailability = async (req, res, next) => {
 };
 
 // PATCH /api/events/:id/coordinator — SPM-174 (assign) or SPM-180 (reassign).
-// The route middleware allows both coordinatorOperations and leadOnly, so the
-// handler decides based on the request body and the actor's role.
+// The route middleware requires a Lead. The expectedCoordinatorId field
+// distinguishes reassignment from the first assignment.
 const patchCoordinator = async (req, res, next) => {
   try {
     const eventId = parseEventId(req.params.id);
@@ -518,7 +519,7 @@ const patchCoordinator = async (req, res, next) => {
       });
     }
 
-    // SPM-174 assignment: coordinator or lead sends only coordinatorId.
+    // SPM-174 assignment: the Lead sends only coordinatorId.
     if (
       !body ||
       typeof body !== "object" ||
