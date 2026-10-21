@@ -61,7 +61,7 @@ describe("GET /api/venues/availability (SPM-74)", () => {
     ["", "from"],
     ["from=2026-11-04&to=2026-11-05", "from"],
     ["from=2026-11-05T00:00:00%2B08:00&to=2026-11-04T00:00:00%2B08:00", "to"],
-    ["from=2026-11-01T00:00:00%2B08:00&to=2026-12-15T00:00:00%2B08:00", "to"],
+    ["from=2026-01-01T00:00:00%2B08:00&to=2027-01-03T00:00:00%2B08:00", "to"],
     [`${RANGE}&venueId=abc`, "venueId"],
     [`${RANGE}&checkStart=2026-11-04T12:45:00%2B08:00`, "check"],
     [`${RANGE}&status=AVAILABLE`, "status"],

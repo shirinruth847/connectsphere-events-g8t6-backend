@@ -133,7 +133,6 @@ describe("getVenueAvailability (SPM-74)", () => {
   const range = { from: at("00:00"), to: at("00:00", "2026-11-05") };
   const bookingRow = (coordinatorId) => ({
     booking_id: 110,
-    booking_reference: "VB-000110",
     status: "APPROVED",
     start_datetime: at("10:00").toISOString(),
     end_datetime: at("12:00").toISOString(),
@@ -158,7 +157,7 @@ describe("getVenueAvailability (SPM-74)", () => {
     const [venue] = result.venues;
     expect(venue).toMatchObject({ venueId: 45, setupMinutes: 30, turnaroundMinutes: 45, buffersRecorded: true, summary: "UNAVAILABLE_BOOKING" });
     expect(venue.entries[0]).toMatchObject({
-      bookingReference: "VB-000110",
+      bookingId: 110,
       occupiedStart: at("09:30").toISOString(),
       occupiedEnd: at("12:45").toISOString(),
       eventTitle: "Private planning forum",
