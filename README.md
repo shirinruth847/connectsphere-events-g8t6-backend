@@ -64,11 +64,8 @@ the event summary fields used for assignment.
 }
 ```
 
-<<<<<<< HEAD
 HTTP 200 confirms both stores: the Supabase key is accepted and MongoDB answers a `ping`. Without `MONGODB_URI`, or when Atlas is unreachable, it returns `500 INTERNAL_ERROR` and the backend log names the cause.
 
-### Event Requests (SPM-35, SPM-37)
-=======
 ### Event Requests (SPM-35, SPM-36, SPM-37)
 
 These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it, because SPM-33's coordinator view needs assigned events.
@@ -122,7 +119,7 @@ Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-che
 | `POST /api/venues` | `{ name, address, maxCapacity, contactPerson, contactEmail, contactNumber, status?, statusReason? }` | `201 { message, venue }`, status `ACTIVE` unless sent | `400 VALIDATION_FAILED` with `fields`, `409 VENUE_NAME_TAKEN` |
 | `PUT /api/venues/:venueId` | Changed details plus the `version` loaded | `200 { message, venue, changed }` | `400`, `404`, `409 VENUE_NAME_TAKEN`, `409 VENUE_VERSION_CONFLICT` |
 | `PUT /api/venues/:venueId/status` | `{ status, reason?, version, confirmUpcomingBookings? }` | `200 { message, venue, changed, upcomingBookings }` | `400`, `404`, `409 VENUE_VERSION_CONFLICT`, `409 VENUE_HAS_UPCOMING_BOOKINGS` with `upcomingBookings` and `firstStart` |
-| `PUT /api/venues/:venueId/details` | Changed MongoDB fields (`description`, `facilities`, `accessibilityFeatures`, `supportedLayouts`, `emergencyAccess`, `knownRestrictions`, `setupMinutes`, `turnaroundMinutes`) plus the details `version` loaded (`0` for a venue without details) | `200 { message, details, changed }` | `400 VALIDATION_FAILED`, `404`, `409 VENUE_DETAILS_VERSION_CONFLICT`, `409 VENUE_HAS_FUTURE_COMMITMENTS` with `commitments: [{ type, bookingReference?, requestId, status, start, end }]`, `503 VENUE_DETAILS_UNAVAILABLE` |
+| `PUT /api/venues/:venueId/details` | Changed MongoDB fields (`description`, `facilities`, `accessibilityFeatures`, `supportedLayouts`, `emergencyAccess`, `knownRestrictions`, `setupMinutes`, `turnaroundMinutes`) plus the details `version` loaded (`0` for a venue without details) | `200 { message, details, changed }` | `400 VALIDATION_FAILED`, `404`, `409 VENUE_DETAILS_VERSION_CONFLICT`, `409 VENUE_BUFFERS_LOCKED` with field messages, `503 VENUE_DETAILS_UNAVAILABLE` |
 
 `venue` is `{ venueId, name, address, maxCapacity, status, statusReason, contactPerson, contactEmail, contactNumber, version, createdAt, updatedAt, createdBy, updatedBy }`, where `createdBy` and `updatedBy` are `{ userId, name }` or `null` for venues older than SPM-73.
 
@@ -131,7 +128,7 @@ Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-che
 - **Upcoming bookings:** taking a venue out of service while it has upcoming `PENDING` or `APPROVED` bookings returns `409 VENUE_HAS_UPCOMING_BOOKINGS` until the request repeats with `"confirmUpcomingBookings": true`. Bookings are never changed or removed.
 - **Stale saves:** every change raises `version`. Send the one you loaded; an older one gets `409 VENUE_VERSION_CONFLICT`. A save that changes nothing keeps the version and writes no history.
 - **Audit:** create, detail updates and status changes write the venue and one `activity_log` entry (`VENUE_CREATED`, `VENUE_UPDATED` with before/after values, `VENUE_STATUS_CHANGED` with the reason) in one transaction (`create_venue`, `update_venue`, `set_venue_status`). Entries are `STAFF_ONLY` and never appear in event history.
-- **MongoDB details (Master 1.2, T27):** `PUT …/details` writes `venue_details` directly through `venueDetailModel.js`, only while its `version` still matches, then appends a `VENUE_DETAILS_UPDATED` `activity_log` entry (`STAFF_ONLY`, before/after values). Lists are trimmed and de-duplicated (facilities, accessibility and restrictions up to 50 entries, layouts up to 20); minutes are whole numbers from 0 to 1440. Setup or turnaround changes are refused while a `PENDING`/`APPROVED` booking or an unexpired active hold still occupies the venue in the future, and the response lists them (Master 5.4.1). A new venue is created `ACTIVE`; until its details have setup/turnaround minutes it cannot receive holds or bookings. Venue deletion is SPM-210.
+- **MongoDB details (Master 1.2, T27):** `PUT …/details` writes `venue_details` directly through `venueDetailModel.js`, only while its `version` still matches, then appends a `VENUE_DETAILS_UPDATED` `activity_log` entry (`STAFF_ONLY`, before/after values). Lists are trimmed and de-duplicated (facilities, accessibility and restrictions up to 50 entries, layouts up to 20); minutes are whole numbers from 0 to 1440. Setup and turnaround times are each set once (zero counts as set) and can never be changed afterwards; a change answers `409 VENUE_BUFFERS_LOCKED` (Master 5.4.1, T16). The MongoDB write re-checks that the field is still empty, so two simultaneous first saves cannot both succeed. A new venue is created `ACTIVE`; until its details have setup/turnaround minutes it cannot receive holds or bookings. Venue deletion is SPM-210.
 
 ### Venue Availability Calendar (SPM-74)
 

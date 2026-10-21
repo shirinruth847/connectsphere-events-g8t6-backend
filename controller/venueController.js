@@ -27,6 +27,11 @@ const DOMAIN_ERRORS = Object.freeze({
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],
 });
 
+const BUFFER_LOCKED_MESSAGES = Object.freeze({
+  setupMinutes: "Setup time has already been set and cannot be changed.",
+  turnaroundMinutes: "Turnaround time has already been set and cannot be changed.",
+});
+
 const sendError = (res, status, code, error, extra) => res.status(status).json({ error, code, ...extra });
 
 const validationFailed = (res, fields) =>
@@ -48,15 +53,9 @@ const handleError = (error, res, next) => {
       firstStart: error.firstStart,
     });
   }
-  if (error.code === "VENUE_HAS_FUTURE_COMMITMENTS") {
-    const count = error.commitments.length;
-    return sendError(
-      res,
-      409,
-      error.code,
-      `Setup and turnaround times cannot change while ${count} future booking${count === 1 ? "" : "s"} or hold${count === 1 ? "" : "s"} use this venue.`,
-      { commitments: error.commitments }
-    );
+  if (error.code === "VENUE_BUFFERS_LOCKED") {
+    const fields = Object.fromEntries(error.fields.map((field) => [field, BUFFER_LOCKED_MESSAGES[field]]));
+    return sendError(res, 409, error.code, "Setup and turnaround times can be set only once and cannot be changed.", { fields });
   }
   const [status, message] = DOMAIN_ERRORS[error.code] || [];
   return status ? sendError(res, status, error.code, message) : next(error);

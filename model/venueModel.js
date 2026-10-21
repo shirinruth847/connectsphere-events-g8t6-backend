@@ -264,29 +264,17 @@ const getManagedVenueDetails = async (venueId) => {
 };
 
 const ACTIVE_BOOKING_STATUSES = ["PENDING", "APPROVED"];
-
-// Bookings (PostgreSQL) that still occupy the venue after now.
-const findFutureActiveBookings = async (venueId) => {
-  const { data, error } = await supabase
-    .from("venue_booking")
-    .select("booking_id,booking_reference,event_id,status,start_datetime,end_datetime,room:room!inner(venue_id)")
-    .eq("room.venue_id", venueId)
-    .in("status", ACTIVE_BOOKING_STATUSES)
-    .gt("end_datetime", new Date().toISOString())
-    .order("start_datetime", { ascending: true });
-  if (error) throw error;
-  return data || [];
-};
+const BUFFER_FIELDS = ["setupMinutes", "turnaroundMinutes"];
 
 const mongoUnavailable = (error) => {
   console.warn("[venue-details] MongoDB unavailable", { code: error.code, name: error.name });
   return venueError("VENUE_DETAILS_UNAVAILABLE");
 };
 
-// Saves the MongoDB details Venue Staff edit. Setup/turnaround changes are
-// refused while a booking or hold still occupies the venue in the future, and
-// the response lists them (Master 5.4.1, T16). The audit entry is appended to
-// PostgreSQL after the MongoDB write (Master 7.4 step 3).
+// Saves the MongoDB details Venue Staff edit. Setup and turnaround minutes are
+// set once each: a value already recorded can never change (Master 5.4.1,
+// T16). The audit entry is appended to PostgreSQL after the MongoDB write
+// (Master 7.4 step 3).
 const updateVenueDetails = async (actorId, venueId, version, values) => {
   const row = await findManagedVenueRow(venueId);
   if (!row) throw venueError("VENUE_NOT_FOUND");
@@ -306,37 +294,8 @@ const updateVenueDetails = async (actorId, venueId, version, values) => {
   }
   if (!Object.keys(changes).length) return { details: toVenueDetails(current), changed: false };
 
-  if (changes.setupMinutes || changes.turnaroundMinutes) {
-    const now = new Date();
-    let holds;
-    try {
-      holds = await venueCalendarModel.findFutureActiveHolds(venueId, now);
-    } catch (error) {
-      throw mongoUnavailable(error);
-    }
-    const bookings = await findFutureActiveBookings(venueId);
-    if (bookings.length || holds.length) {
-      throw venueError("VENUE_HAS_FUTURE_COMMITMENTS", {
-        commitments: [
-          ...bookings.map((booking) => ({
-            type: "BOOKING",
-            bookingReference: booking.booking_reference,
-            requestId: formatRequestId(booking.event_id),
-            status: booking.status,
-            start: booking.start_datetime,
-            end: booking.end_datetime,
-          })),
-          ...holds.map((hold) => ({
-            type: "HOLD",
-            requestId: hold.eventId ? formatRequestId(hold.eventId) : null,
-            status: "ACTIVE",
-            start: new Date(hold.start).toISOString(),
-            end: new Date(hold.end).toISOString(),
-          })),
-        ],
-      });
-    }
-  }
+  const locked = BUFFER_FIELDS.filter((field) => changes[field] && current?.[field] != null);
+  if (locked.length) throw venueError("VENUE_BUFFERS_LOCKED", { fields: locked });
 
   const changedValues = Object.fromEntries(Object.keys(changes).map((field) => [field, values[field]]));
   let saved;
@@ -349,6 +308,8 @@ const updateVenueDetails = async (actorId, venueId, version, values) => {
       location: row.address,
       pgVersion: row.version,
       actorId,
+      // The write re-checks that these are still unset (a concurrent first set loses).
+      unsetFields: BUFFER_FIELDS.filter((field) => changes[field]),
     });
   } catch (error) {
     if (error.name === "VenueError") throw error;
