@@ -25,8 +25,8 @@ const EVENT = {
   registration: [{ count: 3 }],
 };
 const BOOKINGS = [
-  { booking_id: 5, booking_reference: "VB-5", label: "Main hall", status: "APPROVED", start_datetime: EVENT.start_datetime, end_datetime: EVENT.end_datetime, expected_attendance: 150, layout_type: null, room: { room_id: 1, layout_type: "THEATRE", capacity: 200, venue: { venue_id: 1, name: "Hall", address: "1 Road", max_capacity: 200 } } },
-  { booking_id: 6, booking_reference: "VB-6", label: "Breakout", status: "PENDING", start_datetime: EVENT.start_datetime, end_datetime: EVENT.end_datetime, expected_attendance: 30, layout_type: "CLASSROOM", room: { room_id: 2, layout_type: "BANQUET", capacity: 60, venue: { venue_id: 2, name: "Annex", address: "2 Road", max_capacity: 60 } } },
+  { booking_id: 5, label: "Main hall", status: "APPROVED", start_datetime: EVENT.start_datetime, end_datetime: EVENT.end_datetime, expected_attendance: 150, layout_type: null, room: { room_id: 1, layout_type: "THEATRE", capacity: 200, venue: { venue_id: 1, name: "Hall", address: "1 Road", max_capacity: 200 } } },
+  { booking_id: 6, label: "Breakout", status: "PENDING", start_datetime: EVENT.start_datetime, end_datetime: EVENT.end_datetime, expected_attendance: 30, layout_type: "CLASSROOM", room: { room_id: 2, layout_type: "BANQUET", capacity: 60, venue: { venue_id: 2, name: "Annex", address: "2 Road", max_capacity: 60 } } },
 ];
 const EQUIPMENT = [
   { equip_request_id: 9, quantity_requested: 2, start_datetime: EVENT.start_datetime, end_datetime: EVENT.end_datetime, status: "APPROVED", technical_notes: "Stage left, clear of exits", equipment: { equipment_id: 1, name: "Speaker", category: "AV" } },

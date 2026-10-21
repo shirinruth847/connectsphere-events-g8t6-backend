@@ -178,7 +178,7 @@ const findEventRounds = async (eventId) => {
 const findActiveBookings = async (eventId) => {
   const { data, error } = await supabase
     .from("venue_booking")
-    .select("booking_id,booking_reference,label,status,start_datetime,end_datetime,expected_attendance,layout_type,room(room_id,layout_type,capacity,venue(venue_id,name,address,max_capacity))")
+    .select("booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,room(room_id,layout_type,capacity,venue(venue_id,name,address,max_capacity))")
     .eq("event_id", eventId)
     .in("status", ACTIVE_BOOKING_STATUSES)
     .order("booking_id", { ascending: true });
@@ -209,7 +209,6 @@ const findRoundEventId = async (reviewId) => {
 
 const toPanelBooking = (booking) => ({
   bookingId: booking.booking_id,
-  bookingReference: booking.booking_reference ?? null,
   label: booking.label ?? null,
   status: booking.status,
   startDatetime: booking.start_datetime,
