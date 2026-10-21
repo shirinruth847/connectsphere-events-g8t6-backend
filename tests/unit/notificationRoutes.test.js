@@ -1,5 +1,6 @@
 // Route-level unit tests for SPM-156: real Express app, routes, middleware and
-// controller. Only the model functions that reach Supabase are mocked.
+// controller. Only the model functions that reach Supabase are mocked. The
+// routes are attendee-only until SPM-192/193.
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/userModel");
 jest.mock("../../model/notificationModel", () => {
@@ -53,6 +54,26 @@ describe("authentication (SPM-155 TC-12)", () => {
   });
 });
 
+describe("role restriction (attendees only until SPM-192/193)", () => {
+  test.each(
+    ["ORGANISER", "COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"].flatMap((role) => [
+      [role, "get", "/api/notifications"],
+      [role, "get", "/api/notifications/unread-count"],
+      [role, "post", "/api/notifications/read-all"],
+      [role, "post", "/api/notifications/7/read"],
+    ])
+  )("[SPM-155] %s: %s %s is 403 and reads nothing", async (role, method, path) => {
+    signedInAs(role);
+    const res = await send(method, path);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("FORBIDDEN");
+    expect(notificationModel.findNotifications).not.toHaveBeenCalled();
+    expect(notificationModel.countUnreadNotifications).not.toHaveBeenCalled();
+    expect(notificationModel.markNotificationRead).not.toHaveBeenCalled();
+    expect(notificationModel.markAllNotificationsRead).not.toHaveBeenCalled();
+  });
+});
+
 describe("GET /api/notifications", () => {
   test("[SPM-155-AC8] returns the page, next cursor and unread count for the signed-in user only", async () => {
     const notifications = [{ notification_id: 9, title: "Registration confirmed" }];
@@ -66,17 +87,6 @@ describe("GET /api/notifications", () => {
     );
     expect(notificationModel.countUnreadNotifications).toHaveBeenCalledWith(USER_ID);
   });
-
-  test.each(["ORGANISER", "COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"])(
-    "[SPM-156] %s has an inbox too",
-    async (role) => {
-      signedInAs(role);
-      notificationModel.findNotifications.mockResolvedValue({ notifications: [], nextCursor: null });
-      const res = await send("get", "/api/notifications");
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ notifications: [], nextCursor: null, unreadCount: 3 });
-    }
-  );
 
   test.each([
     ["limit=0", "limit"],
