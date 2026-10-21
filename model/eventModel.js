@@ -808,6 +808,83 @@ const findPublishedAttendeeEvent = async (eventId) => {
   return data ? toAttendeeDetail(data) : null;
 };
 
+// ---------- attendee event details (SPM-155 AC4, AC5) ----------
+
+// The same rule as _notification_visible: a notification's event can be opened
+// while the attendee holds one of these.
+const ACTIVE_REGISTRATION_STATUSES = ["REGISTERED", "WAITLISTED"];
+
+// Statuses whose current values are the confirmed, attendee-facing ones.
+const CONFIRMED_DETAIL_STATUSES = ["CONFIRMED", "PREPARATION", "COMPLETED"];
+
+// Attendees see a display status, never the lifecycle state.
+const toAttendeeStatus = (status) => {
+  if (status === "CONFIRMED" || status === "PREPARATION") return "CONFIRMED";
+  if (status === "COMPLETED" || status === "CANCELLED") return status;
+  return "PENDING_CONFIRMATION";
+};
+
+const findActiveRegistration = async (eventId, attendeeId) => {
+  const { data, error } = await supabase
+    .from("registration")
+    .select("registration_status,registration_datetime")
+    .eq("event_id", eventId)
+    .eq("attendee_id", attendeeId)
+    .in("registration_status", ACTIVE_REGISTRATION_STATUSES)
+    .order("registration_datetime", { ascending: false })
+    .limit(1);
+  if (error) throw dbError(error);
+  return data[0] || null;
+};
+
+// An event the attendee is registered or waitlisted for, in any status.
+const toRegisteredAttendeeDetail = (row, registration) => {
+  const myRegistration = { status: registration.registration_status, registeredAt: registration.registration_datetime };
+  const attendeeStatus = toAttendeeStatus(row.status);
+  if (row.is_published && CONFIRMED_DETAIL_STATUSES.includes(row.status)) {
+    return { ...toAttendeeDetail(row), attendeeStatus, detailsWithheld: false, myRegistration };
+  }
+  // TODO(SPM-173): while a previously confirmed event is back in PLANNING or
+  // SAFETY_REVIEW, or once it is cancelled, Master 5.7 shows attendees the last
+  // confirmation snapshot. Until SPM-173 (event_confirmation_snapshots) is on
+  // main, the current values may be unconfirmed changes, so only the title and
+  // status are returned.
+  return {
+    eventId: row.event_id,
+    title: row.title,
+    description: null,
+    startDatetime: null,
+    endDatetime: null,
+    organisationName: null,
+    location: null,
+    registrationAvailability: toAttendeeDiscoveryItem(row).registrationAvailability,
+    registrationOpenAt: null,
+    registrationCloseAt: null,
+    attendeeStatus,
+    detailsWithheld: true,
+    myRegistration,
+  };
+};
+
+// GET /api/events/discovery/:id for one attendee: any event they are
+// registered or waitlisted for, otherwise a discoverable event. Null (404)
+// for everything else, without saying which.
+const findAttendeeEventDetail = async (eventId, attendeeId) => {
+  const registration = await findActiveRegistration(eventId, attendeeId);
+  if (registration) {
+    const { data, error } = await supabase
+      .from("event")
+      .select(`${LIST_ATTENDEE_DISCOVERY_SELECT},is_published`)
+      .eq(...REGISTERED_SEATS_FILTER)
+      .eq("event_id", eventId)
+      .maybeSingle();
+    if (error) throw dbError(error);
+    if (data) return toRegisteredAttendeeDetail(data, registration);
+  }
+  const event = await findPublishedAttendeeEvent(eventId);
+  return event ? { ...event, attendeeStatus: "CONFIRMED", detailsWithheld: false, myRegistration: null } : null;
+};
+
 const toLookupIds = (values) =>
   Array.isArray(values)
     ? [...new Set(values.map(toWholeNumber))]
@@ -893,6 +970,7 @@ module.exports = {
   findOrganiserEventRequests,
   findPublishedAttendeeEvents,
   findPublishedAttendeeEvent,
+  findAttendeeEventDetail,
   computeRegistrationAvailability,
   encodeCursor,
   decodeCursor,

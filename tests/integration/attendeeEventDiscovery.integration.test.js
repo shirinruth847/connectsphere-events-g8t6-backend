@@ -24,7 +24,15 @@ const listFields = [
   "startDatetime",
   "title",
 ];
-const detailFields = [...listFields, "registrationCloseAt", "registrationOpenAt"];
+// SPM-155 adds the attendee's own status and registration to the detail.
+const detailFields = [
+  ...listFields,
+  "attendeeStatus",
+  "detailsWithheld",
+  "myRegistration",
+  "registrationCloseAt",
+  "registrationOpenAt",
+];
 
 const signIn = async (accountKey) => {
   if (!sessions.has(accountKey)) {
@@ -383,5 +391,65 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     expect(detailResponse.status).toBe(200);
     expect(events.find((event) => event.eventId === data.event_id)?.registrationAvailability).toBe("OPEN");
     expect(detailResponse.body.event.registrationAvailability).toBe("OPEN");
+  });
+});
+
+describe("[SPM-155 AC4/AC5] event details for registered and waitlisted attendees", () => {
+  // No coordinator, so SPM-174's overlap guard cannot refuse these fixtures.
+  const insertUnassigned = (suffix, overrides) => insertEvent(suffix, { coordinator_id: null, ...overrides });
+
+  test("should_withhold_a_cancelled_event's_details_from_its_attendee_and_hide_it_from_others", async () => {
+    const eventId = await insertUnassigned("cancelled-waitlisted", { status: "CANCELLED" });
+    await insertRegistration(eventId, "attendee", "WAITLISTED");
+
+    const mine = await callAs("get", `/api/events/discovery/${eventId}`);
+    expect(mine.status).toBe(200);
+    expect(Object.keys(mine.body.event).sort()).toEqual([...detailFields].sort());
+    expect(mine.body.event).toMatchObject({
+      eventId,
+      attendeeStatus: "CANCELLED",
+      detailsWithheld: true,
+      description: null,
+      startDatetime: null,
+      endDatetime: null,
+      location: null,
+      organisationName: null,
+      myRegistration: { status: "WAITLISTED" },
+    });
+    expect(JSON.stringify(mine.body)).not.toContain("Internal planning purpose");
+
+    const other = await callAs("get", `/api/events/discovery/${eventId}`, "deactivatable");
+    expect(other.status).toBe(404);
+  });
+
+  test("should_withhold_details_while_an_event_is_back_in_planning", async () => {
+    const eventId = await insertUnassigned("planning-registered", { status: "PLANNING" });
+    await insertRegistration(eventId, "attendee", "REGISTERED");
+
+    const response = await callAs("get", `/api/events/discovery/${eventId}`);
+    expect(response.status).toBe(200);
+    expect(response.body.event).toMatchObject({ attendeeStatus: "PENDING_CONFIRMATION", detailsWithheld: true, startDatetime: null });
+  });
+
+  test("should_show_a_past_confirmed_event_to_its_registrant_only", async () => {
+    const past = Date.now() - 3 * 60 * 60 * 1000;
+    const eventId = await insertUnassigned("past-registered", {
+      start_datetime: new Date(past - 60 * 60 * 1000).toISOString(),
+      end_datetime: new Date(past).toISOString(),
+    });
+    await insertRegistration(eventId, "attendee", "REGISTERED");
+
+    const mine = await callAs("get", `/api/events/discovery/${eventId}`);
+    expect(mine.status).toBe(200);
+    expect(mine.body.event).toMatchObject({
+      attendeeStatus: "CONFIRMED",
+      detailsWithheld: false,
+      description: "Public description for past-registered",
+      myRegistration: { status: "REGISTERED" },
+    });
+    expect(mine.body.event.startDatetime).toEqual(expect.any(String));
+
+    const other = await callAs("get", `/api/events/discovery/${eventId}`, "deactivatable");
+    expect(other.status).toBe(404);
   });
 });

@@ -399,7 +399,7 @@ const getAttendeeEventDetail = async (req, res, next) => {
     const eventId = parseEventId(req.params.id);
     if (!eventId) return eventNotFound(res);
 
-    const event = await eventModel.findPublishedAttendeeEvent(eventId);
+    const event = await eventModel.findAttendeeEventDetail(eventId, req.user.user_id);
     if (!event) return eventNotFound(res);
 
     return res.status(200).json({ event });
