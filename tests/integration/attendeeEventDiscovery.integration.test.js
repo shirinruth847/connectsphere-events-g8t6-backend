@@ -74,7 +74,9 @@ const insertEvent = async (suffix, overrides = {}) => {
     purpose: `Internal planning purpose for ${suffix}`,
     accessibility_needs: `Internal accessibility notes for ${suffix}`,
     organiser_id: fixtures.accounts.organiserA.userId,
-    coordinator_id: fixtures.accounts.coordinator.userId,
+    // Unassigned: one coordinator on overlapping fixture events is refused by
+    // SPM-174's overlap guard (COORDINATOR_CONFLICT). Discovery ignores the coordinator.
+    coordinator_id: null,
     organisation_id: fixtures.organisations.A,
     status: "CONFIRMED",
     start_datetime: new Date(startsAt).toISOString(),
@@ -297,7 +299,7 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
       description: "Event used to verify the registration capacity constraint",
       purpose: "Synthetic test-only row",
       organiser_id: fixtures.accounts.organiserA.userId,
-      coordinator_id: fixtures.accounts.coordinator.userId,
+      coordinator_id: null,
       organisation_id: fixtures.organisations.A,
       status: "CONFIRMED",
       start_datetime: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
@@ -370,7 +372,7 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
       description: "Published preparation event",
       purpose: "Internal preparation notes",
       organiser_id: fixtures.accounts.organiserA.userId,
-      coordinator_id: fixtures.accounts.coordinator.userId,
+      coordinator_id: null,
       organisation_id: fixtures.organisations.A,
       status: "PREPARATION",
       start_datetime: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
@@ -395,11 +397,8 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
 });
 
 describe("[SPM-155 AC4/AC5] event details for registered and waitlisted attendees", () => {
-  // No coordinator, so SPM-174's overlap guard cannot refuse these fixtures.
-  const insertUnassigned = (suffix, overrides) => insertEvent(suffix, { coordinator_id: null, ...overrides });
-
   test("should_withhold_a_cancelled_event's_details_from_its_attendee_and_hide_it_from_others", async () => {
-    const eventId = await insertUnassigned("cancelled-waitlisted", { status: "CANCELLED" });
+    const eventId = await insertEvent("cancelled-waitlisted", { status: "CANCELLED" });
     await insertRegistration(eventId, "attendee", "WAITLISTED");
 
     const mine = await callAs("get", `/api/events/discovery/${eventId}`);
@@ -423,7 +422,7 @@ describe("[SPM-155 AC4/AC5] event details for registered and waitlisted attendee
   });
 
   test("should_withhold_details_while_an_event_is_back_in_planning", async () => {
-    const eventId = await insertUnassigned("planning-registered", { status: "PLANNING" });
+    const eventId = await insertEvent("planning-registered", { status: "PLANNING" });
     await insertRegistration(eventId, "attendee", "REGISTERED");
 
     const response = await callAs("get", `/api/events/discovery/${eventId}`);
@@ -433,7 +432,7 @@ describe("[SPM-155 AC4/AC5] event details for registered and waitlisted attendee
 
   test("should_show_a_past_confirmed_event_to_its_registrant_only", async () => {
     const past = Date.now() - 3 * 60 * 60 * 1000;
-    const eventId = await insertUnassigned("past-registered", {
+    const eventId = await insertEvent("past-registered", {
       start_datetime: new Date(past - 60 * 60 * 1000).toISOString(),
       end_datetime: new Date(past).toISOString(),
     });
