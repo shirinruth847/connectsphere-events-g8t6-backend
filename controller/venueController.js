@@ -12,6 +12,7 @@ const {
   MESSAGES,
 } = require("../validators/venueValidator");
 const { MAX_INTEGER } = require("../validators/eventValidator");
+const { validatePhotoUpload, validatePhotoEdit, parsePhotoId, PHOTO_TYPES } = require("../validators/venuePhotoValidator");
 
 const BOOKING_NOT_FOUND = { error: "Venue booking not found.", code: "BOOKING_NOT_FOUND" };
 const EVENT_NOT_FOUND = { error: "Event not found.", code: "EVENT_NOT_FOUND" };
@@ -23,6 +24,9 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_VERSION_CONFLICT: [409, "This venue was changed after you loaded it. Reload it, then try again."],
   VENUE_DETAILS_VERSION_CONFLICT: [409, "These venue details were changed after you loaded them. Reload them, then try again."],
   VENUE_DETAILS_UNAVAILABLE: [503, "Venue details cannot be read or saved right now. Try again shortly."],
+  VENUE_PHOTOS_UNAVAILABLE: [503, "Venue photos cannot be loaded or saved right now. Try again shortly."],
+  PHOTO_NOT_FOUND: [404, "Photo not found."],
+  PHOTO_LIMIT_REACHED: [409, "This venue already has 20 photos. Delete one before adding another."],
   // Never answer with partial availability (SPM-74 TC13, Master 7.4 step 5).
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],
 });
@@ -131,6 +135,14 @@ const getEventVenueBookings = async (req, res, next) => {
 
 // ---------- maintenance (SPM-73, Venue Staff) ----------
 
+const listVenueOptions = async (req, res, next) => {
+  try {
+    return res.status(200).json(await venueModel.listVenueOptions());
+  } catch (err) {
+    return next(err);
+  }
+};
+
 const listManagedVenues = async (req, res, next) => {
   const { filters, fields } = validateVenueListQuery(req.query);
   if (hasErrors(fields)) return validationFailed(res, fields);
@@ -213,9 +225,115 @@ const changeVenueStatus = async (req, res, next) => {
   }
 };
 
+// ---------- photo gallery (T28, SPM-181, Venue Staff) ----------
+
+const photoNotFound = (res) => sendError(res, 404, "PHOTO_NOT_FOUND", DOMAIN_ERRORS.PHOTO_NOT_FOUND[1]);
+
+// Upload and replace take the image as the raw body; anything else is refused
+// before the bytes are read.
+const readUpload = (req, res, query) => {
+  if (!req.is(PHOTO_TYPES)) {
+    sendError(res, 415, "UNSUPPORTED_MEDIA_TYPE", "Upload a JPEG, PNG or WebP image.");
+    return null;
+  }
+  const { upload, fields, tooLarge, unsupported } = validatePhotoUpload(req.body, query);
+  if (tooLarge) sendError(res, 413, "PAYLOAD_TOO_LARGE", fields.image, { fields });
+  else if (unsupported) sendError(res, 415, "UNSUPPORTED_MEDIA_TYPE", fields.image, { fields });
+  else if (fields) validationFailed(res, fields);
+  return upload || null;
+};
+
+const listVenuePhotos = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  try {
+    return res.status(200).json(await venueModel.listVenuePhotos(venueId));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const getVenuePhotoImage = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  const photoId = parsePhotoId(req.params.photoId);
+  if (!photoId) return photoNotFound(res);
+  try {
+    const { contentType, data } = await venueModel.getVenuePhotoImage(venueId, photoId);
+    res.set({ "Content-Type": contentType, "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-cache" });
+    return res.status(200).send(data);
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const addVenuePhoto = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  const upload = readUpload(req, res, req.query);
+  if (!upload) return undefined;
+  try {
+    const photo = await venueModel.addVenuePhoto(req.user.user_id, venueId, upload);
+    return res.status(201).json({ message: "Photo added.", photo });
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const updateVenuePhoto = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  const photoId = parsePhotoId(req.params.photoId);
+  if (!photoId) return photoNotFound(res);
+  const { changes, fields } = validatePhotoEdit(req.body);
+  if (fields) return validationFailed(res, fields);
+  try {
+    const photo = await venueModel.updateVenuePhoto(req.user.user_id, venueId, photoId, changes);
+    return res.status(200).json({ message: "Photo updated.", photo });
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const replaceVenuePhotoImage = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  const photoId = parsePhotoId(req.params.photoId);
+  if (!photoId) return photoNotFound(res);
+  // A replacement keeps the caption, so ?caption= is ignored here.
+  const upload = readUpload(req, res, {});
+  if (!upload) return undefined;
+  try {
+    const photo = await venueModel.replaceVenuePhotoImage(req.user.user_id, venueId, photoId, upload);
+    return res.status(200).json({ message: "Photo replaced.", photo });
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const deleteVenuePhoto = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  const photoId = parsePhotoId(req.params.photoId);
+  if (!photoId) return photoNotFound(res);
+  try {
+    await venueModel.deleteVenuePhoto(req.user.user_id, venueId, photoId);
+    return res.status(200).json({ message: "Photo deleted." });
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
 module.exports = {
+  listVenuePhotos,
+  getVenuePhotoImage,
+  addVenuePhoto,
+  updateVenuePhoto,
+  replaceVenuePhotoImage,
+  deleteVenuePhoto,
   getVenueCatalogue,
   listManagedVenues,
+  listVenueOptions,
   getManagedVenue,
   createVenue,
   updateVenue,

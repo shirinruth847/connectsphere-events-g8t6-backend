@@ -11,7 +11,13 @@ const BOOKING_LIST_LIMIT_MAX = 200;
 const MAX_DATE_RANGE_DAYS = 31;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const FILTER_PARAMS = new Set(["status", "venueId", "eventId", "from", "to", "limit"]);
+const FILTER_PARAMS = new Set(["status", "venueId", "eventId", "from", "to", "limit", "q", "sort", "order"]);
+
+// My Requests sorts (SPM-181). "default" puts pending requests first, then the
+// soonest booking; "lastOpened" is per viewer and sorted by the browser.
+const BOOKING_SORTS = Object.freeze(["default", "date", "attendance", "lastEdited", "alphabetical"]);
+const SORT_ORDERS = Object.freeze(["asc", "desc"]);
+const MAX_SEARCH_LENGTH = 100;
 
 const parseId = (value) =>
   typeof value === "string" && /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_INTEGER ? Number(value) : null;
@@ -21,7 +27,10 @@ const single = (value) => (Array.isArray(value) ? null : value);
 
 const parseBookingFilters = (query) => {
   const fields = {};
-  const filters = { status: null, venueId: null, eventId: null, from: null, to: null, limit: BOOKING_LIST_LIMIT_DEFAULT };
+  const filters = {
+    status: null, venueId: null, eventId: null, from: null, to: null, limit: BOOKING_LIST_LIMIT_DEFAULT,
+    q: null, sort: "default", order: "asc",
+  };
 
   for (const key of Object.keys(query)) {
     if (!FILTER_PARAMS.has(key)) fields[key] = "This filter is not supported.";
@@ -61,6 +70,25 @@ const parseBookingFilters = (query) => {
     else fields.limit = `Limit must be a whole number from 1 to ${BOOKING_LIST_LIMIT_MAX}.`;
   }
 
+  if (query.q !== undefined) {
+    const text = single(query.q);
+    if (typeof text !== "string" || text.trim().length > MAX_SEARCH_LENGTH) {
+      fields.q = `Search must be text of ${MAX_SEARCH_LENGTH} characters or fewer.`;
+    } else if (text.trim()) {
+      filters.q = text.trim();
+    }
+  }
+  if (query.sort !== undefined) {
+    const sort = single(query.sort);
+    if (BOOKING_SORTS.includes(sort)) filters.sort = sort;
+    else fields.sort = `Sort must be one of ${BOOKING_SORTS.join(", ")}.`;
+  }
+  if (query.order !== undefined) {
+    const order = single(query.order);
+    if (SORT_ORDERS.includes(order)) filters.order = order;
+    else fields.order = "Order must be asc or desc.";
+  }
+
   return Object.keys(fields).length ? { fields } : { filters };
 };
 
@@ -68,6 +96,9 @@ module.exports = {
   parseBookingFilters,
   parseId,
   VENUE_BOOKING_STATUSES,
+  BOOKING_SORTS,
+  SORT_ORDERS,
+  MAX_SEARCH_LENGTH,
   BOOKING_LIST_LIMIT_DEFAULT,
   BOOKING_LIST_LIMIT_MAX,
 };
