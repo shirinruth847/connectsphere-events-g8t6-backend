@@ -11,8 +11,7 @@ const USER_ROLES = Object.freeze({
 
 // Landing page after login (Master section 3.4). /dashboard renders the
 // role-specific workspace; attendees land on their own registrations. The
-// Safety Officer also works from /dashboard (SPM-243 AC1); the Master still
-// lists that home as not implemented.
+// Safety Officer also works from /dashboard (SPM-243 AC1, Master T12).
 const ROLE_HOME_PATHS = Object.freeze({
   ORGANISER: "/dashboard",
   COORDINATOR: "/dashboard",
