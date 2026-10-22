@@ -534,7 +534,8 @@ describe("SPM-36 database submission regressions", () => {
     const responses = await Promise.all([1, 2].map(() => call("put", `/api/events/${id}/submit`, "organiserA", fields)));
     expect(responses.map(res => res.status).sort()).toEqual([200, 409]);
     const winner = responses.find(res => res.status === 200).body.event;
-    expect(winner).toMatchObject({ eventId: id, requestId: draft.body.event.requestId, status: "SUBMITTED", isAssignedToCoordinator: false, title: fields.title });
+    expect(winner).toMatchObject({ eventId: id, requestId: draft.body.event.requestId, statusLabel: "Submitted", isAssignedToCoordinator: false, title: fields.title });
+    expect(winner).not.toHaveProperty("status");
     expect(Number.isFinite(Date.parse(winner.submittedAt))).toBe(true);
     const stored = await rows(supabase.from("event").select("submitted_at,title,status,coordinator_id").eq("event_id", id).single(), "submitted time lookup");
     expect(Date.parse(stored.submitted_at)).toBe(Date.parse(winner.submittedAt));

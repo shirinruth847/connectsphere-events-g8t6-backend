@@ -11,6 +11,7 @@ const {
   HISTORY_AUDIENCE,
   EVENT_FIELD_GROUPS,
   COORDINATOR_EDITABLE_STATUSES,
+  LIFECYCLE_ACTIONS,
 } = require("../config/eventConstants");
 const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
 
@@ -38,7 +39,7 @@ const EVENT_SELECT =
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
 const LIST_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,status,previously_confirmed,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 const UNASSIGNED_QUEUE_SELECT =
   "event_id,title,purpose,status,start_datetime,end_datetime,expected_attendance,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 
@@ -113,6 +114,10 @@ const formatRequestId = (eventId) => `REQ-${String(eventId).padStart(6, "0")}`;
 const toStatusNote = (row) => {
   if (row.status === EVENT_STATUS.SUBMITTED && row.coordinator_id == null) return STATUS_NOTES.WAITING_FOR_COORDINATOR;
   if (row.status === EVENT_STATUS.AWAITING_CLARIFICATION) return STATUS_NOTES.RETURNED_FOR_ACTION;
+  // A confirmed event sent back to planning (for example, an accepted change).
+  if ([EVENT_STATUS.PLANNING, EVENT_STATUS.SAFETY_REVIEW].includes(row.status) && row.previously_confirmed === true) {
+    return STATUS_NOTES.RECONFIRMATION_PENDING;
+  }
   return null;
 };
 
@@ -128,14 +133,14 @@ const parseAccessibility = (value) => {
 const toOrganisation = (organisation) =>
   organisation ? { organisationId: organisation.organisation_id, name: organisation.name } : null;
 
-const toApi = (row, viewerUserId) => {
+const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
   const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
   return {
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
-    status: row.status,
-    statusLabel: STATUS_LABELS[row.status] || row.status,
+    ...(includeStoredStatus ? { status: row.status } : {}),
+    statusLabel: STATUS_LABELS[row.status] || "Unknown status",
     statusNote: toStatusNote(row),
     title: row.title,
     purpose: row.purpose,
@@ -175,11 +180,14 @@ const toApi = (row, viewerUserId) => {
 // getEventAccess; permissions tell the interface which controls to offer and are
 // enforced again on every save.
 const toEventView = (row, user, access) => ({
-  ...toApi(row, user.user_id),
+  ...toApi(row, user.user_id, {
+    includeStoredStatus: access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR,
+  }),
   ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
     ? {
         coordinatorId: row.coordinator_id,
         organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
+        ...(row.arrangement_version === undefined ? {} : { arrangementVersion: row.arrangement_version }),
       }
     : {}),
   viewerRelationship: access.relationship,
@@ -191,11 +199,11 @@ const toEventView = (row, user, access) => ({
   },
 });
 
-const toListItem = (row, viewerUserId) => ({
+const toListItem = (row, viewerUserId, { includeStoredStatus = false } = {}) => ({
   eventId: row.event_id,
   requestId: formatRequestId(row.event_id),
-  status: row.status,
-  statusLabel: STATUS_LABELS[row.status] || row.status,
+  ...(includeStoredStatus ? { status: row.status } : {}),
+  statusLabel: STATUS_LABELS[row.status] || "Unknown status",
   statusNote: toStatusNote(row),
   title: row.title,
   startDatetime: row.start_datetime,
@@ -212,7 +220,7 @@ const toListItem = (row, viewerUserId) => ({
 // Leads need the stated purpose and resource needs to decide who should take
 // an unassigned request. Keep this richer representation scoped to that queue.
 const toUnassignedQueueItem = (row) => ({
-  ...toListItem(row),
+  ...toListItem(row, undefined, { includeStoredStatus: true }),
   purpose: row.purpose,
   venuePreferences: Array.isArray(row.event_venue_preference)
     ? row.event_venue_preference
@@ -330,7 +338,26 @@ const DOMAIN_CODES = new Set([
   "EVENT_VERSION_CONFLICT",
   "EVENT_NOT_EDITABLE_IN_STATUS",
   "FIELD_NOT_EDITABLE",
+  "FORBIDDEN",
+  "TRANSITION_NOT_ALLOWED",
+  "READINESS_BLOCKED",
+  "SAFETY_APPROVAL_REQUIRED",
+  "EVENT_NOT_ENDED",
+  "COORDINATOR_INVARIANT",
 ]);
+
+// The lifecycle functions report the event's current status (a refused or stale
+// action) or the failing readiness codes in the error detail (SPM-173 AC3, AC9).
+const withLifecycleDetail = (domainError, details) => {
+  const detail = String(details || "");
+  if (["TRANSITION_NOT_ALLOWED", "EVENT_VERSION_CONFLICT"].includes(domainError.code) && detail) {
+    domainError.currentStatus = detail;
+  }
+  if (domainError.code === "READINESS_BLOCKED") {
+    domainError.failures = detail.split(",").filter(Boolean);
+  }
+  return domainError;
+};
 
 // submit_event_request reports "<field>:<reason>" pairs in the error detail.
 const SUBMISSION_FAILURES = Object.freeze({
@@ -393,7 +420,7 @@ const toEventRequestError = (error, fields) => {
   const message = error.message || "";
   const code = error.code || "";
 
-  if (DOMAIN_CODES.has(message)) return eventRequestError(message, error.fields);
+  if (DOMAIN_CODES.has(message)) return withLifecycleDetail(eventRequestError(message, error.fields), error.details);
   if (message === "INVALID_EVENT_SUBMISSION") {
     return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, SUBMISSION_FAILURES));
   }
@@ -691,6 +718,45 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
   };
 };
 
+// SPM-173: one coordinator lifecycle action (LIFECYCLE_ACTIONS). The database
+// function locks the event and rechecks role, assignment, version, state and,
+// where the action needs it, readiness and safety approval, then writes the
+// state, history and notifications in one transaction.
+const runLifecycleAction = async ({ action, eventId, actorId, expectedVersion, idempotencyKey = null }) => {
+  const { rpc } = LIFECYCLE_ACTIONS[action];
+  const { data, error } = await supabase.rpc(rpc, {
+    p_event_id: eventId,
+    p_actor_id: actorId,
+    p_expected_version: expectedVersion,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: idempotencyKey ? hashRequest({ action }, {}, [eventId, expectedVersion]) : null,
+  });
+  if (error) throw toEventRequestError(error);
+  if (!data || !data.event) throw new Error(`${rpc} returned no event.`);
+  return { event: data.event, replayed: data.replayed === true };
+};
+
+// SPM-173 AC8: readiness for the assigned coordinator, with each failing condition.
+const getEventReadiness = async ({ eventId, actorId }) => {
+  const { data, error } = await supabase.rpc("get_event_readiness", { p_event_id: eventId, p_actor_id: actorId });
+  if (error) throw toEventRequestError(error);
+  if (!data) throw new Error("get_event_readiness returned no result.");
+  return {
+    ready: data.ready === true,
+    failures: Array.isArray(data.failures) ? data.failures : [],
+    status: data.status,
+    version: data.version,
+    arrangementVersion: data.arrangement_version,
+  };
+};
+
+// SPM-173 AC12: completes up to "limit" ended events; returns how many.
+const completeDueEvents = async (limit) => {
+  const { data, error } = await supabase.rpc("complete_due_events", { p_limit: limit });
+  if (error) throw dbError(error);
+  return Number(data) || 0;
+};
+
 // Submitting is owner-only, so a colleague's visible request is "not found" here.
 const findOwnEvent = async (eventId, organiserId) => {
   const { data, error } = await supabase
@@ -747,11 +813,13 @@ const encodeDiscoveryCursor = (row) => encodeKeysetCursor("startDatetime", row.s
 const decodeDiscoveryCursor = (value) => decodeKeysetCursor(value, "startDatetime");
 
 // Newest edit first (SPM-37). Keyset paging stays stable while auto-save keeps
-// moving updated_at; event_id breaks ties between equal timestamps.
-const findOrganiserEventRequests = async (user, { limit, cursor = null, status = null }) => {
+// moving updated_at; event_id breaks ties between equal timestamps. "statuses"
+// is an organiser label already expanded to its statuses (SPM-173 AC6).
+const findOrganiserEventRequests = async (user, { limit, cursor = null, status = null, statuses = null }) => {
   const after = decodeCursor(cursor);
   let query = supabase.from("event").select(LIST_SELECT).or(buildOrganiserVisibilityFilter(user));
   if (status) query = query.eq("status", status);
+  if (statuses) query = query.in("status", statuses);
   if (after) {
     query = query.or(
       `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`
@@ -889,6 +957,9 @@ module.exports = {
   findLeadAssignments,
   assignCoordinator,
   reassignCoordinator,
+  runLifecycleAction,
+  getEventReadiness,
+  completeDueEvents,
   findOwnEvent,
   findOrganiserEventRequests,
   findPublishedAttendeeEvents,

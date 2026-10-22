@@ -11,9 +11,15 @@ const {
   toWholeNumber,
   MAX_INTEGER,
 } = require("../validators/eventValidator");
-
 const { USER_ROLES } = require("../config/roles");
-const { EVENT_STATUS, EVENT_RELATIONSHIP, EVENT_FIELD_GROUPS } = require("../config/eventConstants");
+const {
+  EVENT_STATUS,
+  EVENT_RELATIONSHIP,
+  EVENT_FIELD_GROUPS,
+  LABEL_STATUSES,
+  LIFECYCLE_ACTIONS,
+  READINESS_MESSAGES,
+} = require("../config/eventConstants");
 
 
 const EVENT_STATUSES = Object.values(EVENT_STATUS);
@@ -43,6 +49,11 @@ const DOMAIN_ERRORS = Object.freeze({
   ASSIGNMENT_CHANGED: [409, "This event was reassigned by someone else. Refresh and try again."],
 
   EVENT_NOT_REASSIGNABLE: [404, "Event request not found."],
+  TRANSITION_NOT_ALLOWED: [403, "This action is not allowed for this event in its current status."],
+  READINESS_BLOCKED: [409, "The event is not ready yet. Resolve the listed items, then try again."],
+  SAFETY_APPROVAL_REQUIRED: [409, "The event needs a safety approval for its current arrangements before it can be confirmed."],
+  EVENT_NOT_ENDED: [409, "The event can be completed only after it has ended."],
+  COORDINATOR_INVARIANT: [409, "The event's coordinator assignment does not allow this action. Refresh and try again."],
 });
 
 // ---------- helpers ----------
@@ -85,25 +96,29 @@ const readIdempotencyKey = (req) => {
   return typeof key === "string" && IDEMPOTENCY_KEY.test(key) ? key : null;
 };
 
+// A sent key must be well formed; a missing one is an error only when "required".
+const readRequestIdempotencyKey = (req, required, errors) => {
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey && (required || req.get("Idempotency-Key") !== undefined)) {
+    errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  }
+  return idempotencyKey;
+};
+
 const isPlainObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-// Returns field errors for the request shape itself. Object.fromEntries keeps a
-// client-sent "__proto__" key as plain data.
+// The first ten unsupported fields, with shortened names. Object.fromEntries
+// keeps a client-sent "__proto__" key as plain data.
+const toUnsupportedFieldErrors = (fields) =>
+  Object.fromEntries(fields.slice(0, 10).map((field) => [field.slice(0, 60), "This field cannot be set."]));
+
+// Returns field errors for the request shape itself.
 const checkRequestBody = (body, { allowAutoSave = false, allowVersion = false } = {}) => {
   if (!isPlainObject(body)) {
     return { body: "Send the event request as a JSON object." };
   }
-  const fields = Object.fromEntries(
-    eventModel
-      .getUnsupportedInputFields(body, { allowAutoSave, allowVersion })
-      .slice(0, 10)
-      .map((field) => [field.slice(0, 60), "This field cannot be set."]),
-  );
-  if (
-    allowAutoSave &&
-    body.isAutoSave !== undefined &&
-    typeof body.isAutoSave !== "boolean"
-  ) {
+  const fields = toUnsupportedFieldErrors(eventModel.getUnsupportedInputFields(body, { allowAutoSave, allowVersion }));
+  if (allowAutoSave && body.isAutoSave !== undefined && typeof body.isAutoSave !== "boolean") {
     fields.isAutoSave = "Auto-save flag must be true or false.";
   }
   return fields;
@@ -163,10 +178,7 @@ const readSaveRequest = (req, body, { allowAutoSave, requireVersion, requireIdem
   if (errors.body) return { errors };
 
   const expectedVersion = readVersion(body, requireVersion, errors);
-  const idempotencyKey = readIdempotencyKey(req);
-  if (!idempotencyKey && (requireIdempotencyKey || req.get("Idempotency-Key") !== undefined)) {
-    errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
-  }
+  const idempotencyKey = readRequestIdempotencyKey(req, requireIdempotencyKey, errors);
   return { errors, expectedVersion, idempotencyKey, isAutoSave: allowAutoSave && body.isAutoSave === true };
 };
 
@@ -355,20 +367,26 @@ const submitDraft = async (req, res, next) => {
   }
 };
 
-// GET /api/events/mine?status=DRAFT — dashboard lists ("My Drafts" / "My Requests")
+// GET /api/events/mine?status=DRAFT or ?label=Draft — dashboard lists ("My Drafts" /
+// "My Requests"). A label is expanded to its statuses here (SPM-173 AC6); the status
+// filter stays for the current organiser pages until they move to labels.
 const listMyEventRequests = async (req, res, next) => {
   try {
-    const { status } = req.query;
+    const { status, label } = req.query;
+    if (status !== undefined && label !== undefined) {
+      return validationFailed(res, { label: "Filter by status or by label, not both." });
+    }
     if (status !== undefined && !EVENT_STATUSES.includes(status)) {
       return validationFailed(res, { status: "Unknown status filter." });
     }
-    const { events, nextCursor } = await eventModel.findOrganiserEventRequests(
-      req.user,
-      {
-        ...req.pagination,
-        status: status ?? null,
-      },
-    );
+    if (label !== undefined && !Object.prototype.hasOwnProperty.call(LABEL_STATUSES, label)) {
+      return validationFailed(res, { label: "Unknown label filter." });
+    }
+    const { events, nextCursor } = await eventModel.findOrganiserEventRequests(req.user, {
+      ...req.pagination,
+      status: status ?? null,
+      ...(label === undefined ? {} : { statuses: [...LABEL_STATUSES[label]] }),
+    });
     return res.status(200).json({ events, nextCursor });
   } catch (error) {
     return handleError(error, res, next);
@@ -544,7 +562,7 @@ const patchCoordinator = async (req, res, next) => {
       coordinatorId: body.coordinatorId,
       leadId: req.user.user_id,
     });
-    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
+    return res.status(200).json({ event: eventModel.toApi(assignedEvent, undefined, { includeStoredStatus: true }) });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -573,7 +591,94 @@ const assignCoordinatorAsLead = async (req, res, next) => {
       coordinatorId: body.coordinatorId,
       leadId: req.user.user_id,
     });
-    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
+    return res.status(200).json({ event: eventModel.toApi(assignedEvent, undefined, { includeStoredStatus: true }) });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+// ---------- SPM-173 lifecycle actions ----------
+
+const toReadinessFailures = (codes) =>
+  codes.map((code) => ({ code, message: READINESS_MESSAGES[code] || "This condition is not met yet." }));
+
+// Refusals that say more than { error, code }: the status that does not allow
+// the action (AC3), or each readiness condition that is not met (AC9).
+const LIFECYCLE_REFUSALS = Object.freeze({
+  TRANSITION_NOT_ALLOWED: (res, error) => {
+    const currentStatus = error.currentStatus ?? null;
+    const [status, generalMessage] = DOMAIN_ERRORS.TRANSITION_NOT_ALLOWED;
+    return res.status(status).json({
+      error: currentStatus ? `This action is not allowed while the event is in ${currentStatus}.` : generalMessage,
+      code: "TRANSITION_NOT_ALLOWED",
+      currentStatus,
+    });
+  },
+  READINESS_BLOCKED: (res, error) => {
+    const [status, message] = DOMAIN_ERRORS.READINESS_BLOCKED;
+    return res.status(status).json({ error: message, code: "READINESS_BLOCKED", failures: toReadinessFailures(error.failures || []) });
+  },
+});
+
+// The body carries only the version of the event the coordinator loaded, so an
+// action taken from an outdated page is refused (409) instead of applied.
+const readActionRequest = (req) => {
+  const body = req.body ?? {};
+  if (!isPlainObject(body)) return { errors: { body: "Send the request as a JSON object." } };
+  const errors = toUnsupportedFieldErrors(Object.keys(body).filter((key) => key !== "version"));
+  const expectedVersion = readVersion(body, true, errors);
+  const idempotencyKey = readRequestIdempotencyKey(req, false, errors);
+  return { errors, expectedVersion, idempotencyKey };
+};
+
+// POST /api/events/:id/submit-for-safety-review, /confirm, /start-preparation and
+// /complete — SPM-173 AC9-AC12. Outside the coordinator's scope is 404 (before
+// this, in requireVisibleEvent); then 400 for the request itself. The database
+// decides the rest under the event lock: 403 for an action the status does not
+// allow (naming the status, AC3), 409 for a stale version (AC5) or an unmet
+// condition (readiness, safety approval, event not ended).
+const lifecycleAction = (action) => async (req, res, next) => {
+  const { eventId } = req.visibleEvent;
+  try {
+    const { errors, expectedVersion, idempotencyKey } = readActionRequest(req);
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const result = await eventModel.runLifecycleAction({
+      action,
+      eventId,
+      actorId: req.user.user_id,
+      expectedVersion,
+      idempotencyKey,
+    });
+    markReplay(res, result);
+    const current = await loadEventForViewer(eventId, req.user);
+    if (!current) return eventNotFound(res);
+    return res.status(200).json({
+      message: LIFECYCLE_ACTIONS[action].message,
+      event: eventModel.toEventView(current.event, req.user, current.access),
+    });
+  } catch (error) {
+    const isRequestError = error.name === "EventRequestError";
+    if (isRequestError && error.code === "EVENT_VERSION_CONFLICT") {
+      return sendVersionConflict(req, res, eventId).catch(next);
+    }
+    const sendRefusal = isRequestError ? LIFECYCLE_REFUSALS[error.code] : undefined;
+    if (sendRefusal) return sendRefusal(res, error);
+    return handleError(error, res, next);
+  }
+};
+
+const submitForSafetyReview = lifecycleAction("SUBMIT_FOR_SAFETY_REVIEW");
+const confirmEvent = lifecycleAction("CONFIRM");
+const startPreparation = lifecycleAction("START_PREPARATION");
+const completeEvent = lifecycleAction("COMPLETE");
+
+// GET /api/events/:id/readiness — SPM-173 AC8: what still blocks safety review and
+// confirmation, one entry per failing condition. Read-only; the actions recheck it.
+const getEventReadiness = async (req, res, next) => {
+  try {
+    const readiness = await eventModel.getEventReadiness({ eventId: req.visibleEvent.eventId, actorId: req.user.user_id });
+    return res.status(200).json({ ...readiness, failures: toReadinessFailures(readiness.failures) });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -603,4 +708,9 @@ module.exports = {
   listLeadAssignments,
   listUnassignedEvents,
   assignCoordinatorAsLead,
+  getEventReadiness,
+  submitForSafetyReview,
+  confirmEvent,
+  startPreparation,
+  completeEvent,
 };
