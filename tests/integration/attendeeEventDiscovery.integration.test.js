@@ -66,7 +66,9 @@ const insertEvent = async (suffix, overrides = {}) => {
     purpose: `Internal planning purpose for ${suffix}`,
     accessibility_needs: `Internal accessibility notes for ${suffix}`,
     organiser_id: fixtures.accounts.organiserA.userId,
-    coordinator_id: fixtures.accounts.coordinator.userId,
+    // Discovery never reads the coordinator, and these events share time slots that
+    // one coordinator cannot hold together (SPM-174 schedule guard, COORDINATOR_CONFLICT).
+    coordinator_id: null,
     organisation_id: fixtures.organisations.A,
     status: "CONFIRMED",
     start_datetime: new Date(startsAt).toISOString(),
@@ -289,7 +291,7 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
       description: "Event used to verify the registration capacity constraint",
       purpose: "Synthetic test-only row",
       organiser_id: fixtures.accounts.organiserA.userId,
-      coordinator_id: fixtures.accounts.coordinator.userId,
+      coordinator_id: null,
       organisation_id: fixtures.organisations.A,
       status: "CONFIRMED",
       start_datetime: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
@@ -362,7 +364,7 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
       description: "Published preparation event",
       purpose: "Internal preparation notes",
       organiser_id: fixtures.accounts.organiserA.userId,
-      coordinator_id: fixtures.accounts.coordinator.userId,
+      coordinator_id: null,
       organisation_id: fixtures.organisations.A,
       status: "PREPARATION",
       start_datetime: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
