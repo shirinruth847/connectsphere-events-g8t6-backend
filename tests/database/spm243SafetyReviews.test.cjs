@@ -109,7 +109,7 @@ beforeEach(async () => {
   await db.exec(read("20261020155933_spm247_safety_review_claims.sql"));
   await db.exec(read("20261020155952_spm250_supersede_safety_review.sql"));
   await db.exec(read("20261020160033_spm249_safety_decisions.sql"));
-  await db.exec(read("20261022120000_spm243_safety_review_hardening.sql"));
+  await db.exec(read("20261022123827_spm243_safety_review_hardening.sql"));
   await db.exec(`
     INSERT INTO public."user" (user_id, email, name, role, is_active) VALUES
       (1, 'spm243-1@connectsphere.test', 'Owner', 'ORGANISER', true),

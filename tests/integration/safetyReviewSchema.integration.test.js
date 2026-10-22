@@ -82,14 +82,18 @@ describe("SPM-244 safety review schema", () => {
     });
   });
 
-  test("[SPM-244] a rejected booking needs a reason, and the backend can never delete rounds", async () => {
+  test("[SPM-244][SPM-243-AC16] a rejected booking needs a reason, and the backend can never delete or rewrite rounds", async () => {
     await inRolledBackTransaction(async (client) => {
+      // Every write goes through the SECURITY DEFINER safety functions; a trigger
+      // also refuses changes to closed rounds (20261022123827).
       const { rows } = await client.query(
         `SELECT has_table_privilege('service_role', 'public.safety_reviews', 'DELETE') AS reviews,
                 has_table_privilege('service_role', 'public.safety_review_rejected_bookings', 'DELETE') AS rejected,
-                has_table_privilege('service_role', 'public.safety_reviews', 'UPDATE') AS update_reviews`
+                has_table_privilege('service_role', 'public.safety_reviews', 'UPDATE') AS update_reviews,
+                has_table_privilege('service_role', 'public.safety_review_rejected_bookings', 'UPDATE') AS update_rejected,
+                (SELECT count(*)::int FROM pg_trigger WHERE tgname IN ('safety_reviews_closed_round_unchanged', 'safety_review_rejected_bookings_unchanged')) AS triggers`
       );
-      expect(rows[0]).toEqual({ reviews: false, rejected: false, update_reviews: true });
+      expect(rows[0]).toEqual({ reviews: false, rejected: false, update_reviews: false, update_rejected: false, triggers: 2 });
       const { rows: checks } = await client.query(
         "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid = 'public.safety_review_rejected_bookings'::regclass AND contype = 'c'"
       );
