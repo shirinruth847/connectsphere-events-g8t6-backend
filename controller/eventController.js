@@ -562,7 +562,7 @@ const patchCoordinator = async (req, res, next) => {
       coordinatorId: body.coordinatorId,
       leadId: req.user.user_id,
     });
-    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
+    return res.status(200).json({ event: eventModel.toApi(assignedEvent, undefined, { includeStoredStatus: true }) });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -591,7 +591,7 @@ const assignCoordinatorAsLead = async (req, res, next) => {
       coordinatorId: body.coordinatorId,
       leadId: req.user.user_id,
     });
-    return res.status(200).json({ event: eventModel.toApi(assignedEvent) });
+    return res.status(200).json({ event: eventModel.toApi(assignedEvent, undefined, { includeStoredStatus: true }) });
   } catch (error) {
     return handleError(error, res, next);
   }

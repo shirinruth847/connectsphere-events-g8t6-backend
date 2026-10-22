@@ -269,7 +269,8 @@ describe("organiser edits (AC2, AC3, AC7)", () => {
     const res = await call("put", `/api/events/${eventId}`, "organiserA", { expectedAttendance: 200, version }, newKey());
 
     expect(res.status).toBe(200);
-    expect(res.body.event).toEqual(expect.objectContaining({ status: "DRAFT", expectedAttendance: 200, version: version + 1 }));
+    expect(res.body.event).toEqual(expect.objectContaining({ statusLabel: "Draft", expectedAttendance: 200, version: version + 1 }));
+    expect(res.body.event).not.toHaveProperty("status");
     const [latest] = await historyFor("organiserA", eventId);
     expect(latest).toEqual(
       expect.objectContaining({

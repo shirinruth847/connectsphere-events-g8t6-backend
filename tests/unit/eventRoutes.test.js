@@ -688,7 +688,8 @@ describe("SPM-36 owned draft submission", () => {
     const input = validRequest();
     const res = await send("put", "/api/events/42/submit", input);
     expect(res.status).toBe(200);
-    expect(res.body.event).toMatchObject({ eventId: 42, requestId: "REQ-000042", status: "SUBMITTED", statusLabel: "Submitted", submittedAt, isAssignedToCoordinator: false });
+    expect(res.body.event).toMatchObject({ eventId: 42, requestId: "REQ-000042", statusLabel: "Submitted", submittedAt, isAssignedToCoordinator: false });
+    expect(res.body.event).not.toHaveProperty("status");
     expect(eventModel.submitEvent).toHaveBeenCalledWith({ organiserId: ORGANISER_ID, eventId: 42, input });
   });
 

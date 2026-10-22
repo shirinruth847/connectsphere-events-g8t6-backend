@@ -133,14 +133,14 @@ const parseAccessibility = (value) => {
 const toOrganisation = (organisation) =>
   organisation ? { organisationId: organisation.organisation_id, name: organisation.name } : null;
 
-const toApi = (row, viewerUserId) => {
+const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
   const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
   return {
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
-    status: row.status,
-    statusLabel: STATUS_LABELS[row.status] || row.status,
+    ...(includeStoredStatus ? { status: row.status } : {}),
+    statusLabel: STATUS_LABELS[row.status] || "Unknown status",
     statusNote: toStatusNote(row),
     title: row.title,
     purpose: row.purpose,
@@ -180,7 +180,9 @@ const toApi = (row, viewerUserId) => {
 // getEventAccess; permissions tell the interface which controls to offer and are
 // enforced again on every save.
 const toEventView = (row, user, access) => ({
-  ...toApi(row, user.user_id),
+  ...toApi(row, user.user_id, {
+    includeStoredStatus: access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR,
+  }),
   ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
     ? {
         coordinatorId: row.coordinator_id,
@@ -197,11 +199,11 @@ const toEventView = (row, user, access) => ({
   },
 });
 
-const toListItem = (row, viewerUserId) => ({
+const toListItem = (row, viewerUserId, { includeStoredStatus = false } = {}) => ({
   eventId: row.event_id,
   requestId: formatRequestId(row.event_id),
-  status: row.status,
-  statusLabel: STATUS_LABELS[row.status] || row.status,
+  ...(includeStoredStatus ? { status: row.status } : {}),
+  statusLabel: STATUS_LABELS[row.status] || "Unknown status",
   statusNote: toStatusNote(row),
   title: row.title,
   startDatetime: row.start_datetime,
@@ -218,7 +220,7 @@ const toListItem = (row, viewerUserId) => ({
 // Leads need the stated purpose and resource needs to decide who should take
 // an unassigned request. Keep this richer representation scoped to that queue.
 const toUnassignedQueueItem = (row) => ({
-  ...toListItem(row),
+  ...toListItem(row, undefined, { includeStoredStatus: true }),
   purpose: row.purpose,
   venuePreferences: Array.isArray(row.event_venue_preference)
     ? row.event_venue_preference
