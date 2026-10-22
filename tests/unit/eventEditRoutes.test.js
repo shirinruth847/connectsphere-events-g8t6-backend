@@ -172,7 +172,8 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.message).toBe("Draft saved successfully.");
-    expect(res.body.event).toEqual(expect.objectContaining({ status: "DRAFT", expectedAttendance: 200, version: 4 }));
+    expect(res.body.event).toEqual(expect.objectContaining({ statusLabel: "Draft", expectedAttendance: 200, version: 4 }));
+    expect(res.body.event).not.toHaveProperty("status");
     expect(eventModel.saveDraft).toHaveBeenCalledWith({
       organiserId: ORGANISER_ID,
       eventId: 42,
