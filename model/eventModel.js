@@ -53,7 +53,8 @@ const isRoundInOfficerScope = (round, officerId) =>
 const officerScopeFilter = (officerId) => {
   const id = Number(officerId);
   if (!Number.isSafeInteger(id)) throw new Error("Invalid officer ID.");
-  return `and(status.eq.OPEN,claimed_by.is.null),and(status.eq.OPEN,claimed_by.eq.${id}),decided_by.eq.${id}`;
+  const open = `status.eq.${SAFETY_ROUND_STATUS.OPEN}`;
+  return `and(${open},claimed_by.is.null),and(${open},claimed_by.eq.${id}),decided_by.eq.${id}`;
 };
 const LIST_SELECT =
   "event_id,title,status,previously_confirmed,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
