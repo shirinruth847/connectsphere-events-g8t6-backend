@@ -105,6 +105,7 @@ test("[BE-17/20] Lead assignment records supervision and preserves time when an 
   assert.equal(assigned.event.status, "UNDER_REVIEW");
   assert.equal(assigned.event.coordinator_id, 3);
   assert.equal(assigned.event.submitted_at.toISOString(), before.submitted_at.toISOString());
+  assert.equal((await one("SELECT count(*)::integer AS count FROM public.activity_log WHERE entity_id=$1 AND action='COORDINATOR_ASSIGNED' AND changes->'status'->>'before'='SUBMITTED' AND changes->'status'->>'after'='UNDER_REVIEW'", [id])).count, 1);
   assert.equal((await one("SELECT assigned_by FROM public.event_assignments WHERE event_id=$1", [id])).assigned_by, 2);
   const { rows: recipients } = await db.query("SELECT n.title, r.recipient_id FROM public.notification n JOIN public.notification_recipient r USING (notification_id) WHERE n.event_id=$1 ORDER BY n.title, r.recipient_id", [id]);
   assert.deepEqual(recipients, [

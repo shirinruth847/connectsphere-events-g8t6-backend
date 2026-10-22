@@ -270,11 +270,12 @@ describe("GET /api/events/mine (organiser data scoping)", () => {
     expect(res.status).toBe(200);
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(byId.get(fixtures.events.ownSubmitted)).toEqual(expect.objectContaining({
-      status: "SUBMITTED",
       statusLabel: "Submitted",
       isOwner: true,
     }));
-    expect(byId.get(fixtures.events.ownDraft)).toEqual(expect.objectContaining({ status: "DRAFT", statusLabel: "Draft", isOwner: true }));
+    expect(byId.get(fixtures.events.ownSubmitted)).not.toHaveProperty("status");
+    expect(byId.get(fixtures.events.ownDraft)).toEqual(expect.objectContaining({ statusLabel: "Draft", isOwner: true }));
+    expect(byId.get(fixtures.events.ownDraft)).not.toHaveProperty("status");
   });
 
   test("[TC-LOGIN-005] should_list_submitted_same_organisation_requests_when_organiser_belongs_to_the_organisation", async () => {

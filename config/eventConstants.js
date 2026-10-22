@@ -80,6 +80,7 @@ const READINESS_MESSAGES = Object.freeze({
   REGISTRATION_INVALID: "Registration is enabled without a valid capacity.",
   REGISTRATION_EXCEEDS_PRIMARY_CAPACITY: "Registration capacity is larger than the primary venue's capacity.",
   OPEN_BLOCKING_INCIDENT: "A venue or equipment incident is still open.",
+  READINESS_DATA_PENDING: "Incident readiness data is unavailable; try again after the resource schema is deployed.",
   OPEN_CHANGE_REQUEST: "A change request is still open.",
 });
 
