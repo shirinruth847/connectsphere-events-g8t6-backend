@@ -177,9 +177,50 @@ const createScenario = async (scenario, people, manifest) => {
   return { eventId: event.event_id, reviewId: round.review_id, title: scenario.title };
 };
 
-// Rounds, notifications and history can only be removed through the privileged
-// test connection; everything goes in one transaction, after checking that each
-// manifest event is one of this seed's.
+// Everything this seed made, in one transaction, after checking that each
+// manifest event is one of this seed's. Rounds, notifications and history can
+// only be removed through the privileged test connection.
+const removeSeedRows = async (client, ids) => {
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT event_id, title FROM public.event WHERE event_id = ANY($1::integer[])", [ids]);
+    if (rows.some((row) => !row.title.startsWith(TITLE_PREFIX))) throw new Error("Refusing to remove an event this seed did not create.");
+    const statements = [
+      "DELETE FROM public.notification_recipient WHERE notification_id IN (SELECT notification_id FROM public.notification WHERE event_id = ANY($1::integer[]))",
+      "DELETE FROM public.notification WHERE event_id = ANY($1::integer[])",
+      "DELETE FROM public.safety_review_rejected_bookings WHERE review_id IN (SELECT review_id FROM public.safety_reviews WHERE event_id = ANY($1::integer[]))",
+      "DELETE FROM public.safety_reviews WHERE event_id = ANY($1::integer[])",
+      "DELETE FROM public.activity_log WHERE entity_name = 'event' AND entity_id = ANY($1::integer[])",
+      "DELETE FROM public.equipment_request WHERE event_id = ANY($1::integer[])",
+      "DELETE FROM public.venue_booking WHERE event_id = ANY($1::integer[])",
+      "DELETE FROM public.event_assignments WHERE event_id = ANY($1::integer[])",
+      "DELETE FROM public.event WHERE event_id = ANY($1::integer[])",
+    ];
+    for (const statement of statements) await client.query(statement, [ids]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+};
+
+// Master 10.4: verify the cleanup and report anything left.
+const verifySeedRowsGone = async (client, ids) => {
+  const { rows: [left] } = await client.query(
+    `SELECT (SELECT count(*) FROM public.event WHERE event_id = ANY($1::integer[])) AS events,
+            (SELECT count(*) FROM public.safety_reviews WHERE event_id = ANY($1::integer[])) AS rounds,
+            (SELECT count(*) FROM public.venue_booking WHERE event_id = ANY($1::integer[])) AS bookings,
+            (SELECT count(*) FROM public.equipment_request WHERE event_id = ANY($1::integer[])) AS equipment,
+            (SELECT count(*) FROM public.notification WHERE event_id = ANY($1::integer[])) AS notifications,
+            (SELECT count(*) FROM public.activity_log WHERE entity_name = 'event' AND entity_id = ANY($1::integer[])) AS history`,
+    [ids],
+  );
+  const remaining = Object.entries(left).filter(([, count]) => Number(count) > 0);
+  if (remaining.length) {
+    throw new Error(`Cleanup left rows behind: ${remaining.map(([table, count]) => `${table} ${count}`).join(", ")}. The manifest is kept.`);
+  }
+};
+
 const cleanup = async () => {
   const manifest = loadManifest();
   if (manifest.eventIds.length) {
@@ -188,26 +229,8 @@ const cleanup = async () => {
     const client = new Client({ connectionString: process.env.TEST_DATABASE_URL });
     await client.connect();
     try {
-      await client.query("BEGIN");
-      const ids = manifest.eventIds;
-      const { rows } = await client.query("SELECT event_id, title FROM public.event WHERE event_id = ANY($1::integer[])", [ids]);
-      if (rows.some((row) => !row.title.startsWith(TITLE_PREFIX))) throw new Error("Refusing to remove an event this seed did not create.");
-      const statements = [
-        "DELETE FROM public.notification_recipient WHERE notification_id IN (SELECT notification_id FROM public.notification WHERE event_id = ANY($1::integer[]))",
-        "DELETE FROM public.notification WHERE event_id = ANY($1::integer[])",
-        "DELETE FROM public.safety_review_rejected_bookings WHERE review_id IN (SELECT review_id FROM public.safety_reviews WHERE event_id = ANY($1::integer[]))",
-        "DELETE FROM public.safety_reviews WHERE event_id = ANY($1::integer[])",
-        "DELETE FROM public.activity_log WHERE entity_name = 'event' AND entity_id = ANY($1::integer[])",
-        "DELETE FROM public.equipment_request WHERE event_id = ANY($1::integer[])",
-        "DELETE FROM public.venue_booking WHERE event_id = ANY($1::integer[])",
-        "DELETE FROM public.event_assignments WHERE event_id = ANY($1::integer[])",
-        "DELETE FROM public.event WHERE event_id = ANY($1::integer[])",
-      ];
-      for (const statement of statements) await client.query(statement, [ids]);
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
+      await removeSeedRows(client, manifest.eventIds);
+      await verifySeedRowsGone(client, manifest.eventIds);
     } finally {
       await client.end();
     }
