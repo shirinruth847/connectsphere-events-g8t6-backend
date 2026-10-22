@@ -1,7 +1,8 @@
 // SPM-44 live integration tests: which events an attendee can see on the
 // Attendee Event Dashboard (GET /api/events/discovery) and through direct detail
-// access. Visibility follows Master section 5.3 and D02: published events in
-// CONFIRMED or PREPARATION that have not ended. State changes are made directly
+// access. Visibility follows Jira SPM-44 and Master 1.3 section 5.3 and D02:
+// published events whose status is exactly CONFIRMED and that have not ended;
+// PREPARATION is hidden. State changes are made directly
 // on this run's fixture events, standing in for the lifecycle transitions.
 const request = require("supertest");
 const app = require("../../server");
@@ -21,7 +22,7 @@ const ALL_EVENT_STATES = [
   "DRAFT", "SUBMITTED", "UNDER_REVIEW", "AWAITING_CLARIFICATION", "APPROVED", "PLANNING",
   "SAFETY_REVIEW", "CONFIRMED", "PREPARATION", "COMPLETED", "CANCELLED", "REJECTED",
 ];
-const DISCOVERABLE_STATES = ["CONFIRMED", "PREPARATION"];
+const DISCOVERABLE_STATES = ["CONFIRMED"];
 const CARD_FIELDS = [
   "description", "endDatetime", "eventId", "location", "organisationName",
   "registrationAvailability", "startDatetime", "title",
@@ -134,7 +135,7 @@ afterAll(async () => {
 });
 
 describe("[SPM-44] Attendee Event Dashboard listing", () => {
-  test("[TC-EVENT-001/002/003/009] should_list_only_published_confirmed_or_preparation_events_as_separate_cards_when_states_are_mixed", async () => {
+  test("[TC-EVENT-001/002/003/009] should_list_only_published_confirmed_events_as_separate_cards_when_states_are_mixed", async () => {
     const byState = {};
     for (const status of ALL_EVENT_STATES) {
       byState[status] = await insertEvent(`state-${status.toLowerCase()}`, { status });
@@ -225,8 +226,8 @@ describe("[SPM-44] Attendee Event Dashboard listing", () => {
 });
 
 describe("[SPM-44 Master 5.3] publication and timing boundaries", () => {
-  test("should_hide_an_unpublished_event_in_preparation", async () => {
-    const eventId = await insertEvent("unpublished-preparation", { status: "PREPARATION", is_published: false });
+  test("[SPM-44] should_hide_a_published_event_in_preparation_from_list_and_detail", async () => {
+    const eventId = await insertEvent("published-preparation", { status: "PREPARATION", is_published: true });
 
     expect((await listDiscoveryIds()).has(eventId)).toBe(false);
     expect((await asAttendee(`/api/events/discovery/${eventId}`)).status).toBe(404);
@@ -275,14 +276,6 @@ describe("[TC-EVENT-007/AC6] empty result", () => {
 });
 
 describe("[SPM-44] lifecycle changes reach the dashboard on the next retrieval", () => {
-  test("[SPM-44 Master 5.3] should_keep_an_event_listed_when_it_moves_from_confirmed_to_preparation", async () => {
-    const eventId = await insertEvent("confirmed-to-preparation");
-    expect((await listDiscoveryIds()).has(eventId)).toBe(true);
-
-    await setStatus(eventId, "PREPARATION");
-
-    expect((await listDiscoveryIds()).has(eventId)).toBe(true);
-  });
 
   test("[TC-EVENT-005] should_list_an_event_and_open_its_detail_after_it_becomes_confirmed", async () => {
     const eventId = await insertEvent("becomes-confirmed", { status: "SAFETY_REVIEW" });
@@ -295,7 +288,7 @@ describe("[SPM-44] lifecycle changes reach the dashboard on the next retrieval",
     expect((await asAttendee(`/api/events/discovery/${eventId}`)).status).toBe(200);
   });
 
-  test.each(["PLANNING", "CANCELLED", "COMPLETED"])(
+  test.each(["PREPARATION", "PLANNING", "CANCELLED", "COMPLETED"])(
     "[TC-EVENT-006] should_remove_an_event_from_list_and_detail_after_it_moves_to_%s",
     async (status) => {
       const eventId = await insertEvent(`leaves-confirmed-${status.toLowerCase()}`);

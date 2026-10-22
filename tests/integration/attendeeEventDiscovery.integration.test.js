@@ -356,7 +356,8 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     expect(listItem.registrationAvailability).toBe("OPEN");
   });
 
-  test("[SPM-126] should_list_published_preparation_events_and_follow_master_registration_rules", async () => {
+  // Master 1.3 / SPM-44: attendee discovery shows only CONFIRMED events.
+  test("[SPM-44] should_hide_a_published_preparation_event_from_list_and_detail", async () => {
     const { data, error } = await supabase.from("event").insert({
       title: `spm34-${runId}-preparation`,
       description: "Published preparation event",
@@ -380,8 +381,8 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
 
     const events = await listAllDiscoveryEvents();
     const detailResponse = await callAs("get", `/api/events/discovery/${data.event_id}`);
-    expect(detailResponse.status).toBe(200);
-    expect(events.find((event) => event.eventId === data.event_id)?.registrationAvailability).toBe("OPEN");
-    expect(detailResponse.body.event.registrationAvailability).toBe("OPEN");
+    expect(events.some((event) => event.eventId === data.event_id)).toBe(false);
+    expect(detailResponse.status).toBe(404);
+    expect(detailResponse.body).toEqual({ error: "Event request not found.", code: "EVENT_NOT_FOUND" });
   });
 });
