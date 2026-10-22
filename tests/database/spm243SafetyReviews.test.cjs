@@ -109,6 +109,7 @@ beforeEach(async () => {
   await db.exec(read("20261020155933_spm247_safety_review_claims.sql"));
   await db.exec(read("20261020155952_spm250_supersede_safety_review.sql"));
   await db.exec(read("20261020160033_spm249_safety_decisions.sql"));
+  await db.exec(read("20261022120000_spm243_safety_review_hardening.sql"));
   await db.exec(`
     INSERT INTO public."user" (user_id, email, name, role, is_active) VALUES
       (1, 'spm243-1@connectsphere.test', 'Owner', 'ORGANISER', true),
@@ -331,4 +332,24 @@ test("[SPM-250 AC12][TC-18][TC-19] superseding closes an open round, voids an ap
   assert.equal(untouched.statusChanged, false);
   assert.equal((await eventRow(planning.event.event_id)).arrangement_version, 2);
   await refused(call("public.record_arrangement_change($1, $2, NULL)", [planning.event.event_id, 999]), "FORBIDDEN");
+});
+
+test("[SPM-243 AC16] a decided round and its rejected bookings never change", async () => {
+  const { round, bookingId } = await reviewEvent({ claimedBy: OFFICER });
+  await decide(round.review_id, {
+    outcome: "REJECTED",
+    checklist: checklist({ layout: { result: "NOT_SATISFACTORY", comment: "Blocked aisle" } }),
+    rejectedBookings: [{ bookingId, reason: "Blocked aisle" }],
+  });
+  await refused(db.query("UPDATE public.safety_reviews SET internal_notes = 'Rewritten' WHERE review_id = $1", [round.review_id]), "SAFETY_REVIEW_CLOSED");
+  await refused(db.query("UPDATE public.safety_reviews SET status = 'APPROVED' WHERE review_id = $1", [round.review_id]), "SAFETY_REVIEW_CLOSED");
+  await refused(db.query("UPDATE public.safety_review_rejected_bookings SET reason = 'Fine' WHERE review_id = $1", [round.review_id]), "SAFETY_REVIEW_CLOSED");
+  assert.equal((await roundRow(round.review_id)).status, "REJECTED");
+});
+
+test("[SPM-243 AC4] a round is claimable only while its event awaits the safety review", async () => {
+  const { event, round } = await reviewEvent();
+  await db.query("UPDATE public.event SET status = 'CANCELLED' WHERE event_id = $1", [event.event_id]);
+  await refused(claim(round.review_id), "ROUND_NOT_CLAIMABLE");
+  assert.equal((await roundRow(round.review_id)).claimed_by, null);
 });
