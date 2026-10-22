@@ -1,6 +1,10 @@
 -- SPM-173 AC8: an open resource incident blocks readiness. The resource
 -- incident table is still an unapproved draft dependency, so fail closed if it
 -- is not deployed yet; once present, inspect its open incidents.
+--
+-- The primary venue's capacity is held in a scalar, which starts as NULL: with
+-- no active booking the primary-venue lookup never runs, and an unassigned
+-- record would raise instead of returning NO_ACTIVE_BOOKING.
 CREATE OR REPLACE FUNCTION public._event_readiness(p_event_id integer)
 RETURNS text[]
 LANGUAGE plpgsql
@@ -11,7 +15,7 @@ AS $$
 DECLARE
   v_event public.event;
   v_failures text[] := ARRAY[]::text[];
-  v_primary record;
+  v_primary_capacity integer;
   v_has_open_incident boolean;
 BEGIN
   SELECT * INTO v_event FROM public.event WHERE event_id = p_event_id;
@@ -58,7 +62,7 @@ BEGIN
       v_failures := array_append(v_failures, 'BOOKING_CONFLICT');
     END IF;
 
-    SELECT * INTO v_primary FROM public._event_primary_venue(p_event_id);
+    SELECT max_capacity INTO v_primary_capacity FROM public._event_primary_venue(p_event_id);
     IF NOT FOUND THEN
       v_failures := array_append(v_failures, 'NO_PRIMARY_VENUE');
     END IF;
@@ -81,7 +85,7 @@ BEGIN
   IF v_event.is_registration_enabled THEN
     IF v_event.registration_capacity IS NULL OR v_event.registration_capacity <= 0 THEN
       v_failures := array_append(v_failures, 'REGISTRATION_INVALID');
-    ELSIF v_primary.max_capacity IS NOT NULL AND v_event.registration_capacity > v_primary.max_capacity THEN
+    ELSIF v_primary_capacity IS NOT NULL AND v_event.registration_capacity > v_primary_capacity THEN
       v_failures := array_append(v_failures, 'REGISTRATION_EXCEEDS_PRIMARY_CAPACITY');
     END IF;
   END IF;

@@ -63,7 +63,7 @@ let nextEvent = 0;
 // change requests the case needs.
 async function event(db, { attendance = 50, registration = null, bookings = [], needs = [], requests = [], changeRequests = [] } = {}) {
   nextEvent += 1;
-  const day = `2030-02-${String(nextEvent).padStart(2, "0")}`;
+  const day = new Date(Date.UTC(2030, 1, nextEvent)).toISOString().slice(0, 10);
   const start = `${day}T09:00:00Z`;
   const end = `${day}T11:00:00Z`;
   const { rows } = await db.query(
@@ -158,6 +158,17 @@ test("registration settings and open change requests", async () => {
   assert.deepEqual(await codes({ registration: 0 }), ["REGISTRATION_INVALID"]);
   assert.deepEqual(await codes({ changeRequests: ["PENDING"] }), ["OPEN_CHANGE_REQUEST"]);
   assert.deepEqual(await codes({ changeRequests: ["APPROVED", "REJECTED"] }), []);
+});
+
+test("registration without a primary venue reports blockers instead of failing", async () => {
+  const db = await setup();
+  const codes = async (options) => readiness(db, (await event(db, options)).eventId);
+  // No active booking: the primary-venue lookup never runs.
+  assert.deepEqual(await codes({ registration: 100 }), ["NO_ACTIVE_BOOKING"]);
+  // Two active bookings: the lookup runs but finds no single primary venue.
+  assert.deepEqual(await codes({ registration: 100, bookings: [{}, { room: 3 }] }), ["NO_PRIMARY_VENUE"]);
+  // An invalid capacity is still reported without a primary venue.
+  assert.deepEqual(await codes({ registration: 0 }), ["NO_ACTIVE_BOOKING", "REGISTRATION_INVALID"]);
 });
 
 test("an open resource incident blocks readiness", async () => {
