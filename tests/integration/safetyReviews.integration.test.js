@@ -379,4 +379,20 @@ describe("SPM-251 outcome visibility", () => {
     expect(techSupport.body.reviews[0]).toEqual({ roundNumber: 1, status: "CHANGES_REQUESTED", decidedAt: expect.any(String) });
     expect((await call("get", `/api/events/${event.event_id}/safety-reviews`, "attendee")).status).toBe(404);
   });
+
+  test("[SPM-243-AC15] staff outside the event's arrangements, and Leads on drafts, get 404", async () => {
+    // Under review, but no booking or equipment request reviewed by this Venue Staff or Technical Support.
+    const { event } = await createReviewEvent(fixtures, eventIds, { round: {} });
+    for (const key of ["venueStaff", "techSupport"]) {
+      const res = await call("get", `/api/events/${event.event_id}/safety-reviews`, key);
+      expect([key, res.status, res.body.code]).toEqual([key, 404, "EVENT_NOT_FOUND"]);
+    }
+    const lead = await call("get", `/api/events/${event.event_id}/safety-reviews`, "coordinatorLead");
+    expect(lead.status).toBe(200);
+    expect(lead.body.reviews).toEqual([{ roundNumber: 1, status: "OPEN", decidedAt: null }]);
+
+    const { event: draft } = await createReviewEvent(fixtures, eventIds, { status: "DRAFT", round: null });
+    const leadOnDraft = await call("get", `/api/events/${draft.event_id}/safety-reviews`, "coordinatorLead");
+    expect([leadOnDraft.status, leadOnDraft.body.code]).toEqual([404, "EVENT_NOT_FOUND"]);
+  });
 });
