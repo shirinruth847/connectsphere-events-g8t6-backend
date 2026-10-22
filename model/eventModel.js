@@ -49,6 +49,16 @@ const isRoundInOfficerScope = (round, officerId) =>
   (round.status === SAFETY_ROUND_STATUS.OPEN && (round.claimed_by == null || round.claimed_by === officerId)) ||
   (round.decided_by != null && round.decided_by === officerId);
 
+// The round the officer opens from the event page: the open one in their scope,
+// otherwise the latest one they decided. The frontend loads it by this ID rather
+// than applying the scope rule itself.
+const findOfficerReviewId = (rounds, officerId) => {
+  const inScope = (Array.isArray(rounds) ? rounds : []).filter((round) => isRoundInOfficerScope(round, officerId));
+  const open = inScope.find((round) => round.status === SAFETY_ROUND_STATUS.OPEN);
+  if (open) return open.review_id;
+  return inScope.reduce((latest, round) => (latest === null || round.review_id > latest ? round.review_id : latest), null);
+};
+
 // The same rule as a PostgREST filter on an embedded safety_reviews resource.
 const officerScopeFilter = (officerId) => {
   const id = Number(officerId);
@@ -215,6 +225,7 @@ const toEventView = (row, user, access) => ({
     ? {
         registeredCount: Array.isArray(row.registration) && row.registration[0] ? row.registration[0].count : 0,
         arrangementVersion: row.arrangement_version,
+        safetyReviewId: findOfficerReviewId(row.safety_reviews, user.user_id),
       }
     : {}),
   viewerRelationship: access.relationship,

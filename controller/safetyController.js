@@ -5,7 +5,7 @@ const safetyModel = require("../model/safetyModel");
 const { loadEventForViewer } = require("../middleware/authorize");
 const { parseEventId } = require("../middleware/validate");
 const { validateProgress, validateHandBack, validateDecision, MESSAGES } = require("../validators/safetyValidator");
-const { EVENT_RELATIONSHIP } = require("../config/eventConstants");
+const { EVENT_RELATIONSHIP, SAFETY_ROUND_STATUS } = require("../config/eventConstants");
 const { USER_ROLES } = require("../config/roles");
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{8,128}$/;
@@ -117,12 +117,17 @@ const decideReview = reviewHandler(async (req, res, reviewId) => {
   if (typeof idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(idempotencyKey)) errors.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
   if (hasErrors(errors)) return validationFailed(res, errors);
 
-  const eventId = await safetyModel.findRoundEventId(reviewId);
-  await safetyModel.assertVenueDetailsReadable(eventId);
+  const { eventId, status, claimedBy } = await safetyModel.findDecisionTarget(reviewId);
+  // AC11: venue_details must be readable before the claimant decides an open round.
+  // Anyone else, or a replay of a recorded decision, goes straight to the database,
+  // which refuses or replays it whatever MongoDB's state.
+  if (status === SAFETY_ROUND_STATUS.OPEN && claimedBy === req.user.user_id) {
+    await safetyModel.assertVenueDetailsReadable(eventId);
+  }
 
   const { arrangementVersion, ...decision } = req.body;
   const result = await safetyModel.decideReview({ reviewId, actorId: req.user.user_id, decision, arrangementVersion, idempotencyKey });
-  if (result.replayed) res.set("Idempotent-Replay", "true");
+  if (result.replayed) res.set("Idempotent-Replayed", "true");
   if (result.superseded) {
     return sendError(res, "ARRANGEMENTS_CHANGED", { review: result.review, currentStatus: result.event ? result.event.status : null });
   }

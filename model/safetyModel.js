@@ -21,7 +21,7 @@ const QUEUE_LIMIT = 100;
 const ROUND_SELECT =
   "review_id,event_id,round_number,arrangement_version,status,submitted_at,claimed_by,claimed_at,checklist,organiser_comment,internal_notes,requested_changes,decided_by,decided_at,superseded_at,safety_review_rejected_bookings(booking_id,reason)";
 const QUEUE_SELECT =
-  "review_id,round_number,submitted_at,claimed_at,event:event!inner(event_id,title,start_datetime,end_datetime,expected_attendance,venue_booking(status,room(venue(venue_id,name))))";
+  "review_id,round_number,submitted_at,claimed_at,event:event!inner(event_id,status,title,start_datetime,end_datetime,expected_attendance,venue_booking(status,room(venue(venue_id,name))))";
 
 // ---------- errors ----------
 
@@ -131,9 +131,14 @@ const toQueueItem = (row) => ({
 
 // ---------- reads ----------
 
-// Open rounds narrowed by "byClaim", oldest submission first.
+// Open rounds narrowed by "byClaim", oldest submission first. Only events still
+// awaiting their review count, should a round be left open on an event that left it.
 const findOpenRounds = async (byClaim) => {
-  const openRounds = supabase.from("safety_reviews").select(QUEUE_SELECT).eq("status", SAFETY_ROUND_STATUS.OPEN);
+  const openRounds = supabase
+    .from("safety_reviews")
+    .select(QUEUE_SELECT)
+    .eq("status", SAFETY_ROUND_STATUS.OPEN)
+    .eq("event.status", EVENT_STATUS.SAFETY_REVIEW);
   const { data, error } = await byClaim(openRounds)
     .order("submitted_at", { ascending: true })
     .order("review_id", { ascending: true })
@@ -188,13 +193,13 @@ const assertVenueDetailsReadable = async (eventId) => {
   }
 };
 
-// The event a round belongs to, without any scope check: a decision by someone
-// who is not the claimant is refused by the database as NOT_CLAIMANT (TC-17).
-const findRoundEventId = async (reviewId) => {
-  const { data, error } = await supabase.from("safety_reviews").select("event_id").eq("review_id", reviewId).maybeSingle();
+// The round a decision targets, without any scope check: the database refuses a
+// decision by someone who is not the claimant (TC-17) and replays a recorded one (TC-22).
+const findDecisionTarget = async (reviewId) => {
+  const { data, error } = await supabase.from("safety_reviews").select("event_id,status,claimed_by").eq("review_id", reviewId).maybeSingle();
   if (error) throw dbError(error);
   if (!data) throw safetyError("REVIEW_NOT_FOUND");
-  return data.event_id;
+  return { eventId: data.event_id, status: data.status, claimedBy: data.claimed_by ?? null };
 };
 
 const toPanelBooking = (booking) => ({
@@ -347,15 +352,22 @@ const recordArrangementChange = async ({ eventId, actorId = null, reason = null 
 // ---------- outcome visibility (SPM-251) ----------
 
 // Lead, Venue Staff and Technical Support have no event page yet; their scope for
-// the safety outcome is: any submitted event (Lead), events where they reviewed a
-// venue booking (Venue Staff) or an equipment request (Technical Support).
+// the safety outcome is: events they supervise (Lead, Master 4.2; the Lead who
+// made the current assignment, SPM-174), events where they reviewed a venue
+// booking (Venue Staff) or an equipment request (Technical Support).
 // Returns the shape to use and, for Venue Staff, their booking IDs; null when the
 // event is outside their scope.
 const OUTCOME_SCOPE_BY_ROLE = Object.freeze({
-  [USER_ROLES.COORDINATOR_LEAD]: async (eventId) => {
-    const { data, error } = await supabase.from("event").select("event_id").eq("event_id", eventId).neq("status", EVENT_STATUS.DRAFT).maybeSingle();
+  [USER_ROLES.COORDINATOR_LEAD]: async (eventId, userId) => {
+    const { data, error } = await supabase
+      .from("event_assignments")
+      .select("assignment_id")
+      .eq("event_id", eventId)
+      .eq("assigned_by", userId)
+      .is("ended_at", null)
+      .limit(1);
     if (error) throw dbError(error);
-    return data ? { shape: "OUTCOME" } : null;
+    return data.length ? { shape: "OUTCOME" } : null;
   },
   [USER_ROLES.VENUE_STAFF]: async (eventId, userId) => {
     const { data, error } = await supabase.from("venue_booking").select("booking_id").eq("event_id", eventId).eq("reviewed_by", userId);
@@ -384,7 +396,7 @@ module.exports = {
   findQueue,
   findOfficerReviews,
   findReviewPanel,
-  findRoundEventId,
+  findDecisionTarget,
   assertVenueDetailsReadable,
   claimReview,
   handBackReview,

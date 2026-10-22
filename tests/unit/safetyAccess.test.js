@@ -70,11 +70,20 @@ describe("Safety Officer relationship and access (AC2)", () => {
   test("[SPM-243-TC-03] should_show_attendance_counts_but_no_organiser_or_participant_details", () => {
     const row = eventRow([round({ claimed_by: 31 })]);
     const view = eventModel.toEventView(row, OFFICER, getEventAccess(OFFICER, row));
-    expect(view).toEqual(expect.objectContaining({ viewerRelationship: "SAFETY_OFFICER", status: "SAFETY_REVIEW", registeredCount: 3, arrangementVersion: 3 }));
+    expect(view).toEqual(expect.objectContaining({ viewerRelationship: "SAFETY_OFFICER", status: "SAFETY_REVIEW", registeredCount: 3, arrangementVersion: 3, safetyReviewId: 7 }));
     expect(view).not.toHaveProperty("organiser");
     expect(view).not.toHaveProperty("coordinatorId");
     expect(view).not.toHaveProperty("safety_reviews");
     expect(view.permissions).toEqual(expect.objectContaining({ canEdit: false, canViewDraftHistory: false, canViewStaffHistory: true }));
+  });
+
+  test.each([
+    ["the open round over one they decided", [round({ review_id: 5, status: "APPROVED", decided_by: 31 }), round({ review_id: 6 })], 6],
+    ["their latest decided round", [round({ review_id: 5, status: "CHANGES_REQUESTED", decided_by: 31 }), round({ review_id: 8, status: "REJECTED", decided_by: 31 })], 8],
+    ["none outside their scope", [round({ review_id: 9, claimed_by: 32 })], null],
+  ])("[SPM-243-AC3] should_name_%s_as_the_review_to_open", (_label, rounds, expected) => {
+    const row = eventRow(rounds);
+    expect(eventModel.toEventView(row, OFFICER, { ...getEventAccess(OFFICER, eventRow([round()])) }).safetyReviewId).toBe(expected);
   });
 });
 

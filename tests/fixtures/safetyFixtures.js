@@ -51,11 +51,19 @@ const createRound = async (event, {
   );
 };
 
-// An event in SAFETY_REVIEW (or "status") assigned to the fixture coordinator,
-// with one round; "eventIds" collects it for cleanupLifecycleRows.
-const createReviewEvent = async (fixtures, eventIds, { status = "SAFETY_REVIEW", round = {}, event = {} } = {}) => {
+// An event in SAFETY_REVIEW (or "status") assigned to the fixture coordinator by
+// the "supervisedBy" Lead (none for null or a draft), with one round;
+// "eventIds" collects it for cleanupLifecycleRows.
+const createReviewEvent = async (fixtures, eventIds, { status = "SAFETY_REVIEW", round = {}, event = {}, supervisedBy = "coordinatorLead" } = {}) => {
   const row = await createLifecycleEvent(fixtures, { status, ...event });
   eventIds.push(row.event_id);
+  if (supervisedBy && status !== "DRAFT") {
+    check(await supabase.from("event_assignments").insert({
+      event_id: row.event_id,
+      coordinator_id: row.coordinator_id,
+      assigned_by: fixtures.accounts[supervisedBy].userId,
+    }), "assignment history");
+  }
   const review = round === null ? null : await createRound(row, { submittedBy: fixtures.accounts.coordinator.userId, ...round });
   return { event: row, review };
 };

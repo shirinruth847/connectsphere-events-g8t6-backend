@@ -11,7 +11,7 @@ jest.mock("../../model/safetyModel", () => {
     findQueue: jest.fn(),
     findOfficerReviews: jest.fn(),
     findReviewPanel: jest.fn(),
-    findRoundEventId: jest.fn(),
+    findDecisionTarget: jest.fn(),
     assertVenueDetailsReadable: jest.fn(),
     claimReview: jest.fn(),
     handBackReview: jest.fn(),
@@ -161,7 +161,7 @@ describe("PUT /api/safety-reviews/:reviewId/progress (AC7)", () => {
 
 describe("POST /api/safety-reviews/:reviewId/decision (AC7-AC11, AC13)", () => {
   beforeEach(() => {
-    safetyModel.findRoundEventId.mockResolvedValue(42);
+    safetyModel.findDecisionTarget.mockResolvedValue({ eventId: 42, status: "OPEN", claimedBy: OFFICER_ID });
     safetyModel.assertVenueDetailsReadable.mockResolvedValue();
   });
 
@@ -203,6 +203,17 @@ describe("POST /api/safety-reviews/:reviewId/decision (AC7-AC11, AC13)", () => {
     expect(res.body.fields).toHaveProperty(field);
   });
 
+  test("[SPM-243-AC10] should_refuse_requested_changes_on_a_rejection_rather_than_drop_them", async () => {
+    const res = await send("post", "/api/safety-reviews/7/decision", decision({
+      outcome: "REJECTED",
+      rejectedBookings: [{ bookingId: 5, reason: "No second exit" }],
+      requestedChanges: ["Add a second exit"],
+    }), { "Idempotency-Key": KEY });
+    expect(res.status).toBe(400);
+    expect(res.body.fields).toEqual({ requestedChanges: "Requested changes are recorded only when you request changes." });
+    expect(safetyModel.decideReview).not.toHaveBeenCalled();
+  });
+
   test("[SPM-243-AC13] should_require_an_idempotency_key", async () => {
     const res = await send("post", "/api/safety-reviews/7/decision", decision());
     expect(res.status).toBe(400);
@@ -215,6 +226,19 @@ describe("POST /api/safety-reviews/:reviewId/decision (AC7-AC11, AC13)", () => {
     expect(res.status).toBe(503);
     expect(res.body.error).toMatch(/Try again/);
     expect(safetyModel.decideReview).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["a non-claimant", { status: "OPEN", claimedBy: OFFICER_ID + 1 }, safetyError("NOT_CLAIMANT"), 403],
+    ["a replay of a recorded decision", { status: "APPROVED", claimedBy: OFFICER_ID }, null, 200],
+  ])("[SPM-243-TC-17][TC-22] should_not_need_venue_details_for_%s", async (_label, target, refusal, status) => {
+    safetyModel.findDecisionTarget.mockResolvedValue({ eventId: 42, ...target });
+    safetyModel.assertVenueDetailsReadable.mockRejectedValue(safetyError("VENUE_DETAILS_UNAVAILABLE"));
+    if (refusal) safetyModel.decideReview.mockRejectedValue(refusal);
+    else safetyModel.decideReview.mockResolvedValue({ superseded: false, replayed: true, review: { reviewId: 7, status: "APPROVED" }, event: { status: "SAFETY_REVIEW" } });
+    const res = await send("post", "/api/safety-reviews/7/decision", decision(), { "Idempotency-Key": KEY });
+    expect(res.status).toBe(status);
+    expect(safetyModel.assertVenueDetailsReadable).not.toHaveBeenCalled();
   });
 
   test("[SPM-243-TC-18] should_answer_409_with_the_superseded_round_when_the_arrangements_changed", async () => {
@@ -240,7 +264,7 @@ describe("POST /api/safety-reviews/:reviewId/decision (AC7-AC11, AC13)", () => {
     safetyModel.decideReview.mockResolvedValue({ superseded: false, replayed: true, review: { reviewId: 7, status: "APPROVED" }, event: { status: "SAFETY_REVIEW" } });
     const res = await send("post", "/api/safety-reviews/7/decision", decision(), { "Idempotency-Key": KEY });
     expect(res.status).toBe(200);
-    expect(res.headers["idempotent-replay"]).toBe("true");
+    expect(res.headers["idempotent-replayed"]).toBe("true");
   });
 });
 

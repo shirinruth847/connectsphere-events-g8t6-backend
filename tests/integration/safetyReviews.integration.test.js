@@ -205,7 +205,7 @@ describe("SPM-249 decisions", () => {
     expect(first.body).toMatchObject({ review: { status: "APPROVED", decidedBy: userId("safetyOfficer") }, event: { status: "SAFETY_REVIEW" } });
     const replay = await decide(review.review_id, "safetyOfficer", body, key);
     expect(replay.status).toBe(200);
-    expect(replay.headers["idempotent-replay"]).toBe("true");
+    expect(replay.headers["idempotent-replayed"]).toBe("true");
 
     const recipients = await recipientsOf(event.event_id);
     expect(recipients.map((row) => row.recipientId).sort()).toEqual([userId("coordinator"), userId("venueStaff"), userId("techSupport")].sort());
@@ -380,7 +380,7 @@ describe("SPM-251 outcome visibility", () => {
     expect((await call("get", `/api/events/${event.event_id}/safety-reviews`, "attendee")).status).toBe(404);
   });
 
-  test("[SPM-243-AC15] staff outside the event's arrangements, and Leads on drafts, get 404", async () => {
+  test("[SPM-243-AC15] staff outside the event's arrangements, and Leads outside their supervision, get 404", async () => {
     // Under review, but no booking or equipment request reviewed by this Venue Staff or Technical Support.
     const { event } = await createReviewEvent(fixtures, eventIds, { round: {} });
     for (const key of ["venueStaff", "techSupport"]) {
@@ -390,6 +390,11 @@ describe("SPM-251 outcome visibility", () => {
     const lead = await call("get", `/api/events/${event.event_id}/safety-reviews`, "coordinatorLead");
     expect(lead.status).toBe(200);
     expect(lead.body.reviews).toEqual([{ roundNumber: 1, status: "OPEN", decidedAt: null }]);
+
+    // Master 4.2: a Lead reads the outcome only of events they supervise.
+    const { event: unsupervised } = await createReviewEvent(fixtures, eventIds, { round: {}, supervisedBy: null });
+    const leadUnsupervised = await call("get", `/api/events/${unsupervised.event_id}/safety-reviews`, "coordinatorLead");
+    expect([leadUnsupervised.status, leadUnsupervised.body.code]).toEqual([404, "EVENT_NOT_FOUND"]);
 
     const { event: draft } = await createReviewEvent(fixtures, eventIds, { status: "DRAFT", round: null });
     const leadOnDraft = await call("get", `/api/events/${draft.event_id}/safety-reviews`, "coordinatorLead");

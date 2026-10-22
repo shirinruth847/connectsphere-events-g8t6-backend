@@ -40,6 +40,7 @@ const MESSAGES = Object.freeze({
   note: `Keep the note to ${LIMITS.handBackNote} characters.`,
   requestedChanges: `List up to ${LIMITS.requestedChanges} changes of at most ${LIMITS.requestedChange} characters each.`,
   requestedChangesRequired: "List at least one change.",
+  requestedChangesOutcome: "Requested changes are recorded only when you request changes.",
   outcome: "Choose APPROVED, CHANGES_REQUESTED or REJECTED.",
   rejectedBookings: `Name up to ${LIMITS.rejectedBookings} venue bookings, each once, with a reason of at most ${LIMITS.rejectionReason} characters.`,
   rejectedBookingsRequired: "Name at least one venue booking and why it is unsuitable.",
@@ -180,8 +181,10 @@ const validateDecision = (body) => {
   }
   if (body.outcome === "REJECTED") Object.assign(errors, rejectedBookingsErrors(body.rejectedBookings));
   else if (body.rejectedBookings !== undefined && body.rejectedBookings !== null) errors.rejectedBookings = MESSAGES.unknownField;
-  if (body.outcome === "APPROVED" && body.requestedChanges !== undefined && body.requestedChanges !== null) {
-    errors.requestedChanges = MESSAGES.unknownField;
+  // Only a CHANGES_REQUESTED round stores requested changes; refuse them elsewhere
+  // rather than drop them silently.
+  if (body.outcome !== "CHANGES_REQUESTED" && body.requestedChanges !== undefined && body.requestedChanges !== null) {
+    errors.requestedChanges = MESSAGES.requestedChangesOutcome;
   }
   return errors;
 };
