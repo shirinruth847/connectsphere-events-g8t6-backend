@@ -198,23 +198,23 @@ All four also answer `403 TRANSITION_NOT_ALLOWED` with `currentStatus` when the 
 
 ### Safety Reviews (SPM-243)
 
-A coordinator's submission for safety review (above) opens a round in `safety_reviews` for the event's current `arrangement_version`. Open rounds form one shared queue; a Safety Officer claims a round, works through a six-factor checklist and decides it (Master 5.9). Every change runs in a database function that locks the round, and the event when the event changes.
+A coordinator's submission for safety review (above) opens a round in `safety_reviews` for the event's current `arrangement_version`. Open rounds form one shared queue; a Safety Officer claims a round, works through a six-factor checklist and decides it (Master 5.9). Every change runs in a database function that locks the round, and the event when the event changes. A decided or superseded round, and a recorded booking rejection, never change afterwards: a trigger refuses it, and the backend's service role has no direct `UPDATE` on either table (`20261022120000`).
 
-Safety Officer routes (`403` for every other role). A Safety Officer sees an event (`GET /api/events/:id`, `/history`) only while it has an open unclaimed round, a round they hold or a round they decided; they see `registeredCount`, never participants, history narrowed to attendance, timing, venue, layout, access, equipment and safety entries, and get `403 FORBIDDEN` on any edit or lifecycle action.
+Safety Officer routes (`403` for every other role). A Safety Officer sees an event (`GET /api/events/:id`, `/history`) only while it has an open unclaimed round, a round they hold or a round they decided; they see `registeredCount`, never participants, and `safetyReviewId`, the round to open (the open one in their scope, otherwise the latest they decided), history narrowed to attendance, timing, venue, layout, access, equipment and safety entries, and get `403 FORBIDDEN` on any edit or lifecycle action.
 
 | Route | Does | Refusals |
 | --- | --- | --- |
-| `GET /api/safety-reviews/queue` | Open, unclaimed rounds, oldest submission first: `{ reviews: [{ reviewId, eventId, requestId, title, startDatetime, endDatetime, expectedAttendance, venues, roundNumber, submittedAt }] }` | — |
+| `GET /api/safety-reviews/queue` | Open, unclaimed rounds of events in `SAFETY_REVIEW`, oldest submission first: `{ reviews: [{ reviewId, eventId, requestId, title, startDatetime, endDatetime, expectedAttendance, venues, roundNumber, submittedAt }] }` | — |
 | `GET /api/safety-reviews/mine` | Open rounds the caller holds, same shape | — |
-| `POST /api/safety-reviews/:reviewId/claim` | Claims the round; first come, first served | `409 ROUND_NOT_CLAIMABLE`, `404 REVIEW_NOT_FOUND` |
+| `POST /api/safety-reviews/:reviewId/claim` | Claims the round while its event is in `SAFETY_REVIEW`; first come, first served | `409 ROUND_NOT_CLAIMABLE`, `404 REVIEW_NOT_FOUND` |
 | `POST /api/safety-reviews/:reviewId/hand-back` | `{ note? }` (≤500): returns the round to the queue and clears saved progress; staff-only history entry | `403 NOT_CLAIMANT`, `409 ROUND_NOT_OPEN` |
 | `PUT /api/safety-reviews/:reviewId/progress` | Any of `{ checklist, organiserComment, internalNotes, requestedChanges }`; the checklist may be partial | `400 VALIDATION_FAILED` naming `checklist.<factor>`, `403 NOT_CLAIMANT`, `409 ROUND_NOT_OPEN` |
 | `GET /api/safety-reviews/:reviewId/panel` | The event, active bookings, requested equipment (`placement` = technical notes), relevant history, every round, and each venue's `emergencyAccess` and `knownRestrictions` from MongoDB `venue_details` with `venueDetailsAvailable` | `404` outside the caller's scope |
-| `POST /api/safety-reviews/:reviewId/decision` | `Idempotency-Key` required. `{ outcome: APPROVED \| CHANGES_REQUESTED \| REJECTED, checklist (all six), arrangementVersion, organiserComment?, internalNotes?, requestedChanges? (≥1 for changes), rejectedBookings? [{ bookingId, reason }] (≥1 for reject) }`. Approval keeps `SAFETY_REVIEW`; the other two return the event to `PLANNING` (never `REJECTED`, nothing released). Notifies the coordinator, the Venue Staff of the affected bookings and the Technical Support on the event | `400`, `403 NOT_CLAIMANT`, `409 SAFETY_FACTOR_NOT_SATISFACTORY` with `factors`, `409 ARRANGEMENTS_CHANGED` (the round was superseded instead; the event is in `PLANNING`), `409 ROUND_NOT_OPEN`, `503 VENUE_DETAILS_UNAVAILABLE` |
+| `POST /api/safety-reviews/:reviewId/decision` | `Idempotency-Key` required. `{ outcome: APPROVED \| CHANGES_REQUESTED \| REJECTED, checklist (all six), arrangementVersion, organiserComment?, internalNotes?, requestedChanges? (≥1, changes only), rejectedBookings? [{ bookingId, reason }] (≥1 for reject) }`. Approval keeps `SAFETY_REVIEW`; the other two return the event to `PLANNING` (never `REJECTED`, nothing released). Notifies the coordinator, the Venue Staff of the affected bookings and the Technical Support on the event. A replay answers with `Idempotent-Replayed: true`. MongoDB is read only when the claimant decides an open round, so a non-claimant or a replay is answered even while it is down | `400`, `403 NOT_CLAIMANT`, `409 SAFETY_FACTOR_NOT_SATISFACTORY` with `factors`, `409 ARRANGEMENTS_CHANGED` (the round's arrangement version is out of date, so it was superseded instead and the event is in `PLANNING`; or the sent `arrangementVersion` is stale, and nothing changed), `409 ROUND_NOT_OPEN`, `503 VENUE_DETAILS_UNAVAILABLE` |
 
 Checklist factors: `attendanceCapacity`, `layout`, `emergencyAccess`, `accessibility`, `equipmentPlacement`, `venueRestrictions`, each `{ result: SATISFACTORY | NOT_SATISFACTORY | NOT_APPLICABLE, comment }`; a comment is required unless the result is `SATISFACTORY`.
 
-`GET /api/events/:id/safety-reviews` (SPM-251) returns every round in order, shaped for the caller: the coordinator and Safety Officers see everything; the organiser sees `{ roundNumber, status, decidedAt, organiserComment }`; a Lead and Technical Support who approved the event's equipment see the outcome; Venue Staff who reviewed one of its bookings also see their own rejected bookings. Anyone else gets `404`.
+`GET /api/events/:id/safety-reviews` (SPM-251) returns every round in order, shaped for the caller: the coordinator and Safety Officers see everything; the organiser sees `{ roundNumber, status, decidedAt, organiserComment }`; the Lead who supervises the event (made its current assignment, Master 4.2) and Technical Support who reviewed one of its equipment requests see the outcome; Venue Staff who reviewed one of its bookings also see their own rejected bookings. Anyone else gets `404`.
 
 **Arrangement changes (SPM-250).** A change to an event's venue bookings, booking decisions, blocking incidents, technical arrangements or expected attendance invalidates its safety review (Master 5.2, 5.9). Inside the database function that makes the change, call:
 
@@ -429,6 +429,17 @@ without affecting other data:
 
 ```bash
 npm run seed:unassigned:cleanup
+```
+
+To give the seed Safety Officer events to review (SPM-243), create three events at the core seed
+venues. Each is submitted through the real database functions: two wait under "Awaiting review",
+and one is in the officer's "My reviews" at round 2, after round 1 requested changes. Re-running
+replaces the set; cleanup needs `TEST_DATABASE_URL`, because rounds and their history can only be
+removed through the privileged test connection.
+
+```bash
+npm run seed:safety-reviews
+npm run seed:safety-reviews:cleanup
 ```
 
 

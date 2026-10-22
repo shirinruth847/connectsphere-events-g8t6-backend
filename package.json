@@ -10,6 +10,8 @@
     "seed:unassigned:cleanup": "node supabase/seed/seedUnassignedEvent.js cleanup",
     "seed:accounts": "node supabase/seed/provisionAccounts.js",
     "seed:accounts:cleanup": "node supabase/seed/provisionAccounts.js cleanup",
+    "seed:safety-reviews": "node supabase/seed/seedSafetyReviews.js",
+    "seed:safety-reviews:cleanup": "node supabase/seed/seedSafetyReviews.js cleanup",
     "dev": "nodemon server.js"
   },
   "author": "",
