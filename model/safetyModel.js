@@ -10,7 +10,8 @@ const eventModel = require("./eventModel");
 const activityModel = require("./activityModel");
 const venueDetailModel = require("./venueDetailModel");
 const { toFieldErrors } = require("../validators/safetyValidator");
-const { HISTORY_AUDIENCE, SAFETY_REVIEW_HISTORY_FIELDS } = require("../config/eventConstants");
+const { EVENT_STATUS, HISTORY_AUDIENCE, SAFETY_REVIEW_HISTORY_FIELDS, SAFETY_ROUND_STATUS } = require("../config/eventConstants");
+const { USER_ROLES } = require("../config/roles");
 
 const ACTIVE_BOOKING_STATUSES = ["PENDING", "APPROVED"];
 const REQUESTED_EQUIPMENT_STATUSES = ["PENDING", "APPROVED", "PARTIALLY_FULFILLED"];
@@ -23,6 +24,8 @@ const QUEUE_SELECT =
   "review_id,round_number,submitted_at,claimed_at,event:event!inner(event_id,title,start_datetime,end_datetime,expected_attendance,venue_booking(status,room(venue(venue_id,name))))";
 
 // ---------- errors ----------
+
+const dbError = (error) => new Error(`[Supabase Error] ${error.message}`);
 
 const safetyError = (code, extra = {}) => Object.assign(new Error(code), { name: "SafetyReviewError", code }, extra);
 
@@ -46,10 +49,8 @@ const toSafetyError = (error) => {
     return safetyError(message, { factors: String(error.details || "").split(",").filter(Boolean) });
   }
   if (DOMAIN_CODES.has(message)) return safetyError(message, error.details ? { currentStatus: error.details } : {});
-  return new Error(`[Supabase Error] ${message}`);
+  return dbError(error);
 };
-
-const dbError = (error) => new Error(`[Supabase Error] ${error.message}`);
 
 const callSafetyRpc = async (name, args) => {
   const { data, error } = await supabase.rpc(name, args);
@@ -130,13 +131,10 @@ const toQueueItem = (row) => ({
 
 // ---------- reads ----------
 
-// AC3: open unclaimed rounds, oldest submission first.
-const findQueue = async () => {
-  const { data, error } = await supabase
-    .from("safety_reviews")
-    .select(QUEUE_SELECT)
-    .eq("status", "OPEN")
-    .is("claimed_by", null)
+// Open rounds narrowed by "byClaim", oldest submission first.
+const findOpenRounds = async (byClaim) => {
+  const openRounds = supabase.from("safety_reviews").select(QUEUE_SELECT).eq("status", SAFETY_ROUND_STATUS.OPEN);
+  const { data, error } = await byClaim(openRounds)
     .order("submitted_at", { ascending: true })
     .order("review_id", { ascending: true })
     .limit(QUEUE_LIMIT);
@@ -144,19 +142,11 @@ const findQueue = async () => {
   return data.map(toQueueItem);
 };
 
+// AC3: the shared queue of unclaimed rounds.
+const findQueue = async () => findOpenRounds((query) => query.is("claimed_by", null));
+
 // AC3: rounds this officer holds and has not decided.
-const findOfficerReviews = async (officerId) => {
-  const { data, error } = await supabase
-    .from("safety_reviews")
-    .select(QUEUE_SELECT)
-    .eq("status", "OPEN")
-    .eq("claimed_by", officerId)
-    .order("submitted_at", { ascending: true })
-    .order("review_id", { ascending: true })
-    .limit(QUEUE_LIMIT);
-  if (error) throw dbError(error);
-  return data.map(toQueueItem);
-};
+const findOfficerReviews = async (officerId) => findOpenRounds((query) => query.eq("claimed_by", officerId));
 
 const findRound = async (reviewId) => {
   const { data, error } = await supabase.from("safety_reviews").select(ROUND_SELECT).eq("review_id", reviewId).maybeSingle();
@@ -361,23 +351,27 @@ const recordArrangementChange = async ({ eventId, actorId = null, reason = null 
 // venue booking (Venue Staff) or an equipment request (Technical Support).
 // Returns the shape to use and, for Venue Staff, their booking IDs; null when the
 // event is outside their scope.
-const findOutcomeScope = async (eventId, user) => {
-  if (user.role === "COORDINATOR_LEAD") {
-    const { data, error } = await supabase.from("event").select("event_id").eq("event_id", eventId).neq("status", "DRAFT").maybeSingle();
+const OUTCOME_SCOPE_BY_ROLE = Object.freeze({
+  [USER_ROLES.COORDINATOR_LEAD]: async (eventId) => {
+    const { data, error } = await supabase.from("event").select("event_id").eq("event_id", eventId).neq("status", EVENT_STATUS.DRAFT).maybeSingle();
     if (error) throw dbError(error);
     return data ? { shape: "OUTCOME" } : null;
-  }
-  if (user.role === "VENUE_STAFF") {
-    const { data, error } = await supabase.from("venue_booking").select("booking_id").eq("event_id", eventId).eq("reviewed_by", user.user_id);
+  },
+  [USER_ROLES.VENUE_STAFF]: async (eventId, userId) => {
+    const { data, error } = await supabase.from("venue_booking").select("booking_id").eq("event_id", eventId).eq("reviewed_by", userId);
     if (error) throw dbError(error);
     return data.length ? { shape: "VENUE_STAFF", ownBookingIds: data.map((row) => row.booking_id) } : null;
-  }
-  if (user.role === "TECH_SUPPORT") {
-    const { data, error } = await supabase.from("equipment_request").select("equip_request_id").eq("event_id", eventId).eq("reviewed_by", user.user_id).limit(1);
+  },
+  [USER_ROLES.TECH_SUPPORT]: async (eventId, userId) => {
+    const { data, error } = await supabase.from("equipment_request").select("equip_request_id").eq("event_id", eventId).eq("reviewed_by", userId).limit(1);
     if (error) throw dbError(error);
     return data.length ? { shape: "OUTCOME" } : null;
-  }
-  return null;
+  },
+});
+
+const findOutcomeScope = async (eventId, user) => {
+  const findScope = OUTCOME_SCOPE_BY_ROLE[user.role];
+  return findScope ? findScope(eventId, user.user_id) : null;
 };
 
 const findEventOutcomes = async (eventId, { shape, ownBookingIds = [] }) => {
