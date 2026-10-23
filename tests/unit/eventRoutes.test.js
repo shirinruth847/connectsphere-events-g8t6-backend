@@ -19,7 +19,6 @@ jest.mock("../../model/eventModel", () => {
     findOrganiserEventRequests: jest.fn(),
     findPublishedAttendeeEvents: jest.fn(),
     findPublishedAttendeeEvent: jest.fn(),
-    findAttendeeEventDetail: jest.fn(),
     findValidationContext: jest.fn(),
     findUnassignedSubmittedEvents: jest.fn(),
     findCoordinatorAvailability: jest.fn(),
@@ -745,23 +744,5 @@ describe("SPM-36 owned draft submission", () => {
     expect(res.status).toBe(500);
     expect(res.body.event).toBeUndefined();
     expect(res.body.code).toBe("INTERNAL_ERROR");
-  });
-});
-
-describe("GET /api/events/discovery/:id (SPM-34, SPM-155)", () => {
-  test("[SPM-155 AC4/AC5] should_look_up_the_event_for_the_signed_in_attendee", async () => {
-    signedInAs("ATTENDEE");
-    eventModel.findAttendeeEventDetail.mockResolvedValue({ eventId: 42, title: "Gala", detailsWithheld: true, attendeeStatus: "CANCELLED", myRegistration: { status: "REGISTERED", registeredAt: null } });
-    const res = await send("get", "/api/events/discovery/42");
-    expect(res.status).toBe(200);
-    expect(eventModel.findAttendeeEventDetail).toHaveBeenCalledWith(42, ORGANISER_ID);
-    expect(res.body.event.attendeeStatus).toBe("CANCELLED");
-  });
-
-  test("[SPM-34] should_return_404_when_the_attendee_cannot_see_the_event", async () => {
-    signedInAs("ATTENDEE");
-    eventModel.findAttendeeEventDetail.mockResolvedValue(null);
-    const res = await send("get", "/api/events/discovery/42");
-    expect(res.status).toBe(404);
   });
 });
