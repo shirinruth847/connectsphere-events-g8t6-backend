@@ -90,7 +90,24 @@ beforeAll(async () => {
   fixtures = await createAuthFixtures(runId, { extraAccounts: [{ key: "attendeeTwo", role: "ATTENDEE" }] });
 });
 
+// Confirmation snapshots (SPM-173) are written only by confirm_event; fixtures
+// add them as the database owner. Their event and confirmed_by keys are
+// ON DELETE RESTRICT, so they are removed before the shared fixture cleanup.
+const snapshotEventIds = [];
+const addSnapshot = async (eventId, snapshotJson = null) => {
+  snapshotEventIds.push(eventId);
+  await asOwner(
+    `INSERT INTO public.event_confirmation_snapshots (event_id, event_version, arrangement_version, snapshot, confirmed_by)
+     SELECT e.event_id, e.version, e.arrangement_version, COALESCE($2::jsonb, public._event_attendee_snapshot(e)), $3
+       FROM public.event AS e WHERE e.event_id = $1`,
+    [eventId, snapshotJson === null ? null : JSON.stringify(snapshotJson), userId("coordinator")]
+  );
+};
+
 afterAll(async () => {
+  if (snapshotEventIds.length) {
+    await asOwner("DELETE FROM public.event_confirmation_snapshots WHERE event_id = ANY($1::integer[])", [snapshotEventIds]);
+  }
   await cleanupAuthFixtures(runId);
 });
 
@@ -204,9 +221,71 @@ describe("[SPM-155 AC4/AC5] GET /api/registrations/mine/:eventId", () => {
     "description", "endDatetime", "eventId", "location", "organisationName",
     "registrationAvailability", "registrationCloseAt", "registrationOpenAt", "startDatetime", "title",
   ];
-  const EVENT_FIELDS = [...DISCOVERY_DETAIL_FIELDS, "attendeeStatus", "detailsWithheld"].sort();
+  const EVENT_FIELDS = [...DISCOVERY_DETAIL_FIELDS, "attendeeStatus", "detailsWithheld", "lastConfirmedAt"].sort();
 
-  test("withholds a cancelled event's details from its waitlisted attendee and hides it from everyone else", async () => {
+  test("[Master 5.7] shows an event back in planning as last confirmed, not its unconfirmed changes", async () => {
+    const eventId = await createEvent("Reconfirming Details");
+    await createRegistration("attendee", eventId);
+    // SPM-173's own snapshot function, as confirm_event stores it.
+    await addSnapshot(eventId);
+    const { data: confirmed } = await supabase.from("event").select("start_datetime,end_datetime").eq("event_id", eventId).single();
+    const moved = (iso) => new Date(new Date(iso).getTime() + 24 * 3600 * 1000).toISOString();
+    const { error } = await supabase.from("event").update({
+      status: "PLANNING",
+      description: "Unconfirmed new description",
+      start_datetime: moved(confirmed.start_datetime),
+      end_datetime: moved(confirmed.end_datetime),
+    }).eq("event_id", eventId);
+    if (error) throw error;
+
+    const res = await call("get", `/api/registrations/mine/${eventId}`, "attendee");
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body.event).sort()).toEqual(EVENT_FIELDS);
+    expect(res.body.event).toMatchObject({
+      attendeeStatus: "PENDING_CONFIRMATION",
+      detailsWithheld: false,
+      title: `spm32-${runId} Reconfirming Details`,
+      description: "Public description for Reconfirming Details",
+      lastConfirmedAt: expect.any(String),
+    });
+    expect(new Date(res.body.event.startDatetime).toISOString()).toBe(new Date(confirmed.start_datetime).toISOString());
+    expect(JSON.stringify(res.body)).not.toMatch(/Unconfirmed new description|Internal planning purpose|venue_id|capacity|is_published/);
+    // Nobody else sees it, and discovery still does not list it.
+    expect((await call("get", `/api/registrations/mine/${eventId}`, "attendeeTwo")).status).toBe(404);
+    expect((await call("get", `/api/events/discovery/${eventId}`, "attendee")).status).toBe(404);
+  });
+
+  test("[Master 5.7] shows a cancelled event's last confirmed details, venue name and address only", async () => {
+    const eventId = await createEvent("Cancelled After Confirmation", { status: "CANCELLED" });
+    await createRegistration("attendee", eventId, "WAITLISTED");
+    await addSnapshot(eventId, {
+      title: `spm32-${runId} Cancelled After Confirmation`,
+      description: "Confirmed description",
+      start_datetime: "2027-02-01T01:00:00+00:00",
+      end_datetime: "2027-02-01T03:00:00+00:00",
+      is_published: true,
+      is_registration_enabled: true,
+      registration_capacity: 77,
+      registration_open_at: null,
+      registration_close_at: null,
+      primary_venue: { venue_id: 987654, name: "Snapshot Hall", address: "9 Snapshot Road" },
+    });
+
+    const res = await call("get", `/api/registrations/mine/${eventId}`, "attendee");
+    expect(res.status).toBe(200);
+    expect(res.body.event).toMatchObject({
+      attendeeStatus: "CANCELLED",
+      detailsWithheld: false,
+      description: "Confirmed description",
+      location: "Snapshot Hall, 9 Snapshot Road",
+      lastConfirmedAt: expect.any(String),
+    });
+    expect(new Date(res.body.event.startDatetime).toISOString()).toBe("2027-02-01T01:00:00.000Z");
+    expect(JSON.stringify(res.body)).not.toMatch(/987654|"77"|:77[,}]|venue_id|capacity/);
+    expect(res.body.myRegistration.status).toBe("WAITLISTED");
+  });
+
+  test("withholds a never-confirmed cancelled event's details from its waitlisted attendee and hides it from everyone else", async () => {
     const eventId = await createEvent("Cancelled Details", { status: "CANCELLED" });
     await createRegistration("attendee", eventId, "WAITLISTED");
 
@@ -223,6 +302,7 @@ describe("[SPM-155 AC4/AC5] GET /api/registrations/mine/:eventId", () => {
       endDatetime: null,
       location: null,
       organisationName: null,
+      lastConfirmedAt: null,
     });
     expect(mine.body.myRegistration).toEqual({ status: "WAITLISTED", registeredAt: expect.any(String) });
     expect(JSON.stringify(mine.body)).not.toContain("Internal planning purpose");
@@ -232,7 +312,7 @@ describe("[SPM-155 AC4/AC5] GET /api/registrations/mine/:eventId", () => {
     expect((await call("get", `/api/events/discovery/${eventId}`, "attendee")).status).toBe(404);
   });
 
-  test("withholds details while an event is back in planning", async () => {
+  test("withholds details while an event without a confirmation snapshot is back in planning", async () => {
     const eventId = await createEvent("Planning Details", { status: "PLANNING" });
     await createRegistration("attendee", eventId);
 
