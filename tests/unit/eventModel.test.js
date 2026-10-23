@@ -721,7 +721,7 @@ describe("[SPM-177 AC2] coordinator point of contact", () => {
   });
 });
 
-describe("Attendee event details for registered and waitlisted attendees (SPM-155 AC4, AC5)", () => {
+describe("An attendee's own registered event (SPM-155 AC4, AC5)", () => {
   const eventRow = (overrides = {}) => ({
     event_id: 7,
     title: "Gala",
@@ -741,23 +741,17 @@ describe("Attendee event details for registered and waitlisted attendees (SPM-15
   });
   const registered = { registration_status: "REGISTERED", registration_datetime: "2026-10-01T00:00:00+00:00" };
 
-  // registration and event lookups are separate queries.
-  const tables = ({ registrations = [], event = null, discoverable = null }) => {
+  // The registration and the event are separate queries.
+  const tables = ({ registrations = [], event = null }) => {
     const registrationQuery = queryReturning({ data: registrations, error: null });
     const eventQuery = queryReturning({ data: event, error: null });
-    const discoveryQuery = queryReturning({ data: discoverable, error: null });
-    let eventCalls = 0;
-    supabase.from.mockImplementation((table) => {
-      if (table === "registration") return registrationQuery;
-      eventCalls += 1;
-      return registrations.length && eventCalls === 1 ? eventQuery : discoveryQuery;
-    });
-    return { registrationQuery, eventQuery, discoveryQuery };
+    supabase.from.mockImplementation((table) => (table === "registration" ? registrationQuery : eventQuery));
+    return { registrationQuery, eventQuery };
   };
 
   test("[SPM-155 AC6] should_look_up_only_this_attendee's_active_registration", async () => {
     const { registrationQuery } = tables({});
-    await eventModel.findAttendeeEventDetail(7, 21);
+    await eventModel.findRegisteredAttendeeEvent(7, 21);
     expect(registrationQuery.eq).toHaveBeenCalledWith("event_id", 7);
     expect(registrationQuery.eq).toHaveBeenCalledWith("attendee_id", 21);
     expect(registrationQuery.in).toHaveBeenCalledWith("registration_status", ["REGISTERED", "WAITLISTED"]);
@@ -767,19 +761,25 @@ describe("Attendee event details for registered and waitlisted attendees (SPM-15
     ["CONFIRMED", "CONFIRMED"],
     ["PREPARATION", "CONFIRMED"],
     ["COMPLETED", "COMPLETED"],
-  ])("[SPM-155 AC5] should_return_full_details_with_my_registration_for_a_%s_event", async (status, attendeeStatus) => {
+  ])("[SPM-155 AC5] should_return_full_details_and_my_registration_for_a_%s_event", async (status, attendeeStatus) => {
     const { eventQuery } = tables({ registrations: [registered], event: eventRow({ status }) });
-    const detail = await eventModel.findAttendeeEventDetail(7, 21);
-    expect(detail).toMatchObject({
+    const found = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(Object.keys(found).sort()).toEqual(["event", "myRegistration"]);
+    expect(found.event).toEqual({
       eventId: 7,
       title: "Gala",
       description: "Public description",
       startDatetime: POSTGREST_TIMESTAMP,
+      endDatetime: "2026-10-07T09:14:14.406209+00:00",
+      organisationName: "Org",
       location: "Hall, 1 Road",
+      registrationAvailability: expect.any(String),
+      registrationOpenAt: null,
+      registrationCloseAt: null,
       attendeeStatus,
       detailsWithheld: false,
-      myRegistration: { status: "REGISTERED", registeredAt: "2026-10-01T00:00:00+00:00" },
     });
+    expect(found.myRegistration).toEqual({ status: "REGISTERED", registeredAt: "2026-10-01T00:00:00+00:00" });
     // A past event the attendee is registered for still opens.
     expect(eventQuery.gt).not.toHaveBeenCalled();
   });
@@ -790,41 +790,40 @@ describe("Attendee event details for registered and waitlisted attendees (SPM-15
     ["CANCELLED", "CANCELLED"],
   ])("[SPM-155 AC5] should_withhold_date_venue_and_description_for_a_%s_event", async (status, attendeeStatus) => {
     tables({ registrations: [{ ...registered, registration_status: "WAITLISTED" }], event: eventRow({ status }) });
-    const detail = await eventModel.findAttendeeEventDetail(7, 21);
-    expect(detail).toEqual({
-      eventId: 7,
-      title: "Gala",
-      description: null,
-      startDatetime: null,
-      endDatetime: null,
-      organisationName: null,
-      location: null,
-      registrationAvailability: "CLOSED",
-      registrationOpenAt: null,
-      registrationCloseAt: null,
-      attendeeStatus,
-      detailsWithheld: true,
+    await expect(eventModel.findRegisteredAttendeeEvent(7, 21)).resolves.toEqual({
+      event: {
+        eventId: 7,
+        title: "Gala",
+        description: null,
+        startDatetime: null,
+        endDatetime: null,
+        organisationName: null,
+        location: null,
+        registrationAvailability: "CLOSED",
+        registrationOpenAt: null,
+        registrationCloseAt: null,
+        attendeeStatus,
+        detailsWithheld: true,
+      },
       myRegistration: { status: "WAITLISTED", registeredAt: "2026-10-01T00:00:00+00:00" },
     });
   });
 
   test("[SPM-155] should_withhold_details_of_an_unpublished_event", async () => {
     tables({ registrations: [registered], event: eventRow({ is_published: false }) });
-    const detail = await eventModel.findAttendeeEventDetail(7, 21);
-    expect(detail.detailsWithheld).toBe(true);
-    expect(detail.startDatetime).toBeNull();
+    const { event } = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(event.detailsWithheld).toBe(true);
+    expect(event.startDatetime).toBeNull();
   });
 
-  test("[SPM-34] should_fall_back_to_discovery_rules_without_an_active_registration", async () => {
-    const { discoveryQuery } = tables({ discoverable: eventRow() });
-    const detail = await eventModel.findAttendeeEventDetail(7, 21);
-    expect(discoveryQuery.gt).toHaveBeenCalledWith("end_datetime", expect.any(String));
-    expect(discoveryQuery.eq).toHaveBeenCalledWith("is_published", true);
-    expect(detail).toMatchObject({ eventId: 7, attendeeStatus: "CONFIRMED", detailsWithheld: false, myRegistration: null });
+  test("[SPM-155 AC6] should_return_null_without_querying_the_event_when_the_attendee_holds_no_place", async () => {
+    const { eventQuery } = tables({ event: eventRow() });
+    await expect(eventModel.findRegisteredAttendeeEvent(7, 21)).resolves.toBeNull();
+    expect(eventQuery.select).not.toHaveBeenCalled();
   });
 
-  test("[SPM-155 AC6] should_return_null_without_a_registration_or_a_discoverable_event", async () => {
-    tables({});
-    await expect(eventModel.findAttendeeEventDetail(7, 21)).resolves.toBeNull();
+  test("[SPM-155] should_return_null_when_the_event_row_is_gone", async () => {
+    tables({ registrations: [registered], event: null });
+    await expect(eventModel.findRegisteredAttendeeEvent(7, 21)).resolves.toBeNull();
   });
 });

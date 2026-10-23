@@ -876,10 +876,10 @@ const findPublishedAttendeeEvent = async (eventId) => {
   return data ? toAttendeeDetail(data) : null;
 };
 
-// ---------- attendee event details (SPM-155 AC4, AC5) ----------
+// ---------- an attendee's own registered event (SPM-155 AC4, AC5) ----------
 
-// The same rule as _notification_visible: a notification's event can be opened
-// while the attendee holds one of these.
+// The same rule as _notification_visible: an attendee may open an event, in
+// any status, while holding one of these. Discovery's own rules are separate.
 const ACTIVE_REGISTRATION_STATUSES = ["REGISTERED", "WAITLISTED"];
 
 // Statuses whose current values are the confirmed, attendee-facing ones.
@@ -905,18 +905,18 @@ const findActiveRegistration = async (eventId, attendeeId) => {
   return data[0] || null;
 };
 
-// An event the attendee is registered or waitlisted for, in any status.
-const toRegisteredAttendeeDetail = (row, registration) => {
-  const myRegistration = { status: registration.registration_status, registeredAt: registration.registration_datetime };
+// The discovery detail fields plus a display status, for an event the
+// attendee is registered or waitlisted for, in any status.
+const toRegisteredAttendeeEvent = (row) => {
   const attendeeStatus = toAttendeeStatus(row.status);
   if (row.is_published && CONFIRMED_DETAIL_STATUSES.includes(row.status)) {
-    return { ...toAttendeeDetail(row), attendeeStatus, detailsWithheld: false, myRegistration };
+    return { ...toAttendeeDetail(row), attendeeStatus, detailsWithheld: false };
   }
   // TODO(SPM-173): while a previously confirmed event is back in PLANNING or
   // SAFETY_REVIEW, or once it is cancelled, Master 5.7 shows attendees the last
-  // confirmation snapshot. Until SPM-173 (event_confirmation_snapshots) is on
-  // main, the current values may be unconfirmed changes, so only the title and
-  // status are returned.
+  // confirmation snapshot. SPM-173's event_confirmation_snapshots is now on
+  // main; until this reads it, the current values may be unconfirmed changes,
+  // so only the title and status are returned.
   return {
     eventId: row.event_id,
     title: row.title,
@@ -930,27 +930,27 @@ const toRegisteredAttendeeDetail = (row, registration) => {
     registrationCloseAt: null,
     attendeeStatus,
     detailsWithheld: true,
-    myRegistration,
   };
 };
 
-// GET /api/events/discovery/:id for one attendee: any event they are
-// registered or waitlisted for, otherwise a discoverable event. Null (404)
-// for everything else, without saying which.
-const findAttendeeEventDetail = async (eventId, attendeeId) => {
+// GET /api/registrations/mine/:eventId: the event and the attendee's own place.
+// Null (404) unless they hold a REGISTERED or WAITLISTED place, without saying
+// whether the event exists.
+const findRegisteredAttendeeEvent = async (eventId, attendeeId) => {
   const registration = await findActiveRegistration(eventId, attendeeId);
-  if (registration) {
-    const { data, error } = await supabase
-      .from("event")
-      .select(`${LIST_ATTENDEE_DISCOVERY_SELECT},is_published`)
-      .eq(...REGISTERED_SEATS_FILTER)
-      .eq("event_id", eventId)
-      .maybeSingle();
-    if (error) throw dbError(error);
-    if (data) return toRegisteredAttendeeDetail(data, registration);
-  }
-  const event = await findPublishedAttendeeEvent(eventId);
-  return event ? { ...event, attendeeStatus: "CONFIRMED", detailsWithheld: false, myRegistration: null } : null;
+  if (!registration) return null;
+  const { data, error } = await supabase
+    .from("event")
+    .select(`${LIST_ATTENDEE_DISCOVERY_SELECT},is_published`)
+    .eq(...REGISTERED_SEATS_FILTER)
+    .eq("event_id", eventId)
+    .maybeSingle();
+  if (error) throw dbError(error);
+  if (!data) return null;
+  return {
+    event: toRegisteredAttendeeEvent(data),
+    myRegistration: { status: registration.registration_status, registeredAt: registration.registration_datetime },
+  };
 };
 
 const toLookupIds = (values) =>
@@ -1041,7 +1041,7 @@ module.exports = {
   findOrganiserEventRequests,
   findPublishedAttendeeEvents,
   findPublishedAttendeeEvent,
-  findAttendeeEventDetail,
+  findRegisteredAttendeeEvent,
   computeRegistrationAvailability,
   encodeCursor,
   decodeCursor,
