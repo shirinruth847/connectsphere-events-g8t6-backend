@@ -82,10 +82,22 @@ const validateCursorPagination = (req, res, next) => {
 const parseEventId = (value) =>
   /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_INTEGER ? Number(value) : null;
 
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{8,128}$/;
+const IDEMPOTENCY_KEY_MESSAGE =
+  "Send an Idempotency-Key header of 8-128 letters, digits, '.', '_', ':' or '-' (a UUID works).";
+
+// The request's Idempotency-Key header, or null when absent or malformed.
+const readIdempotencyKey = (req) => {
+  const key = req.get("Idempotency-Key");
+  return typeof key === "string" && IDEMPOTENCY_KEY.test(key) ? key : null;
+};
+
 module.exports = {
   validatePagination,
   validateCursorPagination,
   parseEventId,
+  readIdempotencyKey,
+  IDEMPOTENCY_KEY_MESSAGE,
   PAGE_LIMIT_DEFAULT,
   PAGE_LIMIT_MAX,
   PAGE_OFFSET_MAX,

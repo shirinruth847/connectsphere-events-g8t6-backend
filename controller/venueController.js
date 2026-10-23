@@ -8,10 +8,12 @@ const {
   validateVenueListQuery,
   validateVenueDetails,
   validateCatalogueQuery,
+  validateVenueOptionsQuery,
   hasErrors,
   MESSAGES,
 } = require("../validators/venueValidator");
 const { MAX_INTEGER } = require("../validators/eventValidator");
+const { readIdempotencyKey, IDEMPOTENCY_KEY_MESSAGE } = require("../middleware/validate");
 const { validatePhotoUpload, validatePhotoEdit, parsePhotoId, PHOTO_TYPES } = require("../validators/venuePhotoValidator");
 
 const BOOKING_NOT_FOUND = { error: "Venue booking not found.", code: "BOOKING_NOT_FOUND" };
@@ -27,6 +29,13 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_PHOTOS_UNAVAILABLE: [503, "Venue photos cannot be loaded or saved right now. Try again shortly."],
   PHOTO_NOT_FOUND: [404, "Photo not found."],
   PHOTO_LIMIT_REACHED: [409, "This venue already has 20 photos. Delete one before adding another."],
+  // Venue suggestion (SPM-72/74).
+  EVENT_NOT_FOUND: [404, "Event request not found."],
+  VENUE_SUGGESTION_NOT_ALLOWED_IN_STATUS: [409, "A venue can be suggested only while the event is under review or in planning."],
+  VENUE_NOT_SELECTABLE: [409, "This venue is no longer available for new requests. Reload the venue list."],
+  VENUE_CAPACITY_TOO_SMALL: [409, "This venue cannot hold the event's expected attendance."],
+  VENUE_SUGGESTION_VERSION_CONFLICT: [409, "The suggested venue was changed after you loaded it. Reload the event, then try again."],
+  IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
   // Never answer with partial availability (SPM-74 TC13, Master 7.4 step 5).
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],
 });
@@ -324,7 +333,89 @@ const deleteVenuePhoto = async (req, res, next) => {
   }
 };
 
+// ---------- event venue options and suggestion (SPM-72/74) ----------
+// requireVisibleEvent has already limited these to the assigned coordinator or
+// the supervising Lead; anyone else was answered "not found".
+
+const getEventVenueOptions = async (req, res, next) => {
+  const { options, fields } = validateVenueOptionsQuery(req.query);
+  if (hasErrors(fields)) return validationFailed(res, fields);
+  try {
+    const { event, access } = req.visibleEvent;
+    const result = await venueModel.getEventVenueOptions(event, req.user, options);
+    return res.status(200).json({ ...result, canSuggestVenue: access.canSuggestVenue });
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const listEventVenuePhotos = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  try {
+    return res.status(200).json(await venueModel.listEventVenuePhotos(venueId));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const getEventVenuePhotoImage = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  const photoId = parsePhotoId(req.params.photoId);
+  if (!photoId) return photoNotFound(res);
+  try {
+    const { contentType, data } = await venueModel.getEventVenuePhotoImage(venueId, photoId);
+    res.set({ "Content-Type": contentType, "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-cache" });
+    return res.status(200).send(data);
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const SUGGESTION_FIELDS = new Set(["venueId", "version"]);
+
+// PUT /api/events/:id/venue-suggestion — body { venueId, version }, where version
+// is the suggestion version the coordinator loaded (0 when there was none).
+const suggestEventVenue = async (req, res, next) => {
+  const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : null;
+  const fields = {};
+  if (!body) {
+    return validationFailed(res, { body: "Send a JSON object with venueId and version." });
+  }
+  for (const key of Object.keys(body)) {
+    if (!SUGGESTION_FIELDS.has(key)) fields[key.slice(0, 60)] = "This field cannot be set.";
+  }
+  const venueId = Number.isInteger(body.venueId) && body.venueId > 0 && body.venueId <= MAX_INTEGER ? body.venueId : null;
+  if (!venueId) fields.venueId = "Choose a venue.";
+  const version = Number.isInteger(body.version) && body.version >= 0 && body.version <= MAX_INTEGER ? body.version : null;
+  if (version === null) fields.version = "Send the suggestion version you loaded (0 when there was none).";
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey) fields.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  if (hasErrors(fields)) return validationFailed(res, fields);
+
+  try {
+    const suggestion = await venueModel.suggestEventVenue({
+      actorId: req.user.user_id,
+      eventId: req.visibleEvent.eventId,
+      venueId,
+      expectedVersion: version,
+      idempotencyKey,
+    });
+    return res.status(200).json({
+      message: `${suggestion.name} was suggested to the organiser.`,
+      suggestion,
+    });
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
 module.exports = {
+  getEventVenueOptions,
+  listEventVenuePhotos,
+  getEventVenuePhotoImage,
+  suggestEventVenue,
   listVenuePhotos,
   getVenuePhotoImage,
   addVenuePhoto,

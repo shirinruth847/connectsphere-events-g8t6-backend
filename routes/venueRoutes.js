@@ -30,14 +30,9 @@ const venueStaffOnly = [requireAuth, requireRole("VENUE_STAFF")];
 // A larger body is answered 413 by the error handler; 2 MB is the per-photo limit.
 const imageBody = express.raw({ type: PHOTO_TYPES, limit: "2mb" });
 
-// Read-only catalogue of available venues (SPM-72).
-// SAFETY_OFFICER joins this list once its ticket adds the role to user_role.
-router.get(
-  "/",
-  requireAuth,
-  requireRole("COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF"),
-  getVenueCatalogue
-);
+// Read-only catalogue of available venues. Coordinators and Leads browse venues
+// inside each event instead (GET /api/events/:id/venue-options, SPM-72/74).
+router.get("/", ...venueStaffOnly, getVenueCatalogue);
 
 // Availability calendar (SPM-74): Event Coordinators and Venue Staff only;
 // declared before /:venueId.
