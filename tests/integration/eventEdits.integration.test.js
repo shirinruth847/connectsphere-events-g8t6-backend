@@ -169,6 +169,7 @@ describe("viewing by role and relationship (AC1)", () => {
       editableFields: [],
       canViewDraftHistory: false,
       canViewStaffHistory: false,
+      canSuggestVenue: false,
     });
     for (const hidden of ["coordinatorId", "organiser", "registrations", "participants"]) {
       expect(event).not.toHaveProperty(hidden);
@@ -234,6 +235,8 @@ describe("viewing by role and relationship (AC1)", () => {
       editableFields: [],
       canViewDraftHistory: false,
       canViewStaffHistory: true,
+      // SPM-72/74: a venue is suggested only under review or in planning.
+      canSuggestVenue: false,
     });
     expect((await call("get", `/api/events/${eventId}/history`, "coordinator")).status).toBe(200);
   });
