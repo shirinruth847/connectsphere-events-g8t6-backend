@@ -12,6 +12,9 @@
     "seed:accounts:cleanup": "node supabase/seed/provisionAccounts.js cleanup",
     "seed:notifications": "node supabase/seed/seedAttendeeNotifications.js",
     "seed:notifications:cleanup": "node supabase/seed/seedAttendeeNotifications.js cleanup",
+    "mongo:migrate": "node mongodb/migrate.js",
+    "seed:venue-calendar": "node mongodb/seed/venueCalendarSeed.js",
+    "seed:venue-calendar:cleanup": "node mongodb/seed/venueCalendarSeed.js cleanup",
     "dev": "nodemon server.js"
   },
   "author": "",
@@ -23,10 +26,12 @@
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "express-rate-limit": "^8.7.1",
+    "mongodb": "^6.20.0",
     "nodemon": "^3.1.10"
   },
   "devDependencies": {
     "jest": "^30.5.2",
+    "mongodb-memory-server": "^10.4.3",
     "pg": "^8.23.1",
     "supertest": "^7.3.1"
   },
