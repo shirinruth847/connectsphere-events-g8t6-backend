@@ -1,4 +1,4 @@
-// SPM-72/SPM-74 live integration tests: the venue section of an event, with
+// SPM-72/74/76 live integration tests: the venue section of an event, with
 // real Express routes, Supabase Auth and the shared development database.
 // MongoDB is a local in-memory server (Master M7). Fixtures are synthetic,
 // namespaced by run ID and removed afterwards.
@@ -111,6 +111,16 @@ beforeAll(async () => {
   // The event's own booking never conflicts with itself.
   await insertBooking(venues.fits.roomId, eventId, "2027-03-10T10:00:00Z", "2027-03-10T12:00:00Z");
 
+  // The organiser's ranked choices: Small, then the now-inactive venue, then Fits.
+  const { error: clearError } = await supabase.from("event_venue_preference").delete().eq("event_id", eventId);
+  if (clearError) throw new Error(`Fixture preferences failed: ${clearError.message}`);
+  const { error: preferenceError } = await supabase.from("event_venue_preference").insert([
+    { event_id: eventId, venue_id: venues.small.venueId, preference_order: 1 },
+    { event_id: eventId, venue_id: venues.inactive.venueId, preference_order: 2 },
+    { event_id: eventId, venue_id: venues.fits.venueId, preference_order: 3 },
+  ]);
+  if (preferenceError) throw new Error(`Fixture preferences failed: ${preferenceError.message}`);
+
   await venuePhotoModel.addPhoto({ venueId: venues.fits.venueId, contentType: "image/png", data: PNG, size: PNG.length, caption: "Front", actorId: fixtures.accounts.venueStaff.userId });
   await venuePhotoModel.addPhoto({ venueId: venues.inactive.venueId, contentType: "image/png", data: PNG, size: PNG.length, caption: "Hidden", actorId: fixtures.accounts.venueStaff.userId });
 });
@@ -192,17 +202,59 @@ describe("GET /api/events/:id/venue-options (SPM-72/74)", () => {
     }
   );
 
-  test("[TC-VC-006][SPM-72-AC4] should_serve_photos_of_offered_venues_only", async () => {
-    const list = await as("coordinator", request(app).get(`/api/events/${eventId}/venue-options/${venues.fits.venueId}/photos`));
+  test("[TC-VC-001][SPM-72-AC1] should_return_the_organisers_ranked_choices_whatever_the_filters", async () => {
+    const { body } = await getOptions("coordinator", "&minCapacity=350");
+
+    expect(body.venues.map((venue) => venue.name)).not.toContain(`${prefix} Small`);
+    expect(body.preferredVenues.map(({ rank, name }) => [rank, name])).toEqual([
+      [1, `${prefix} Small`],
+      [2, `${prefix} Inactive`],
+      [3, `${prefix} Fits`],
+    ]);
+    expect(body.preferredVenues[0].option).toEqual(expect.objectContaining({ venueId: venues.small.venueId, requirements: expect.any(Array) }));
+    expect(body.preferredVenues[1].option).toBeNull();
+  });
+
+  test.each(["coordinator", "organiserA"])("[TC-VC-006][TC-VS-004][SPM-72-AC4] should_serve_photos_of_available_venues_only_to_%s", async (key) => {
+    const list = await as(key, request(app).get(`/api/venues/options/${venues.fits.venueId}/photos`));
     expect(list.status).toBe(200);
     expect(list.body.photos).toHaveLength(1);
 
-    const image = await as("coordinator", request(app).get(`/api/events/${eventId}/venue-options/${venues.fits.venueId}/photos/${list.body.photos[0].photoId}`));
+    const image = await as(key, request(app).get(`/api/venues/options/${venues.fits.venueId}/photos/${list.body.photos[0].photoId}`));
     expect(image.status).toBe(200);
     expect(image.headers["x-content-type-options"]).toBe("nosniff");
 
-    const hidden = await as("coordinator", request(app).get(`/api/events/${eventId}/venue-options/${venues.inactive.venueId}/photos`));
+    const hidden = await as(key, request(app).get(`/api/venues/options/${venues.inactive.venueId}/photos`));
     expect(hidden.status).toBe(404);
+  });
+});
+
+describe("GET /api/venues/options (SPM-76)", () => {
+  const organiserOptions = (query = "") =>
+    as("organiserA", request(app).get(`/api/venues/options?search=${encodeURIComponent(prefix)}${query}`));
+
+  test("[TC-VS-001][TC-VS-003][SPM-76-AC3] should_check_venues_against_the_form_without_revealing_other_events", async () => {
+    const response = await organiserOptions("&startDatetime=2027-03-10T10:00:00Z&endDatetime=2027-03-10T12:00:00Z&expectedAttendance=50");
+
+    expect(response.status).toBe(200);
+    expect(response.body.venues.map((venue) => venue.name)).not.toContain(`${prefix} Inactive`);
+    const booked = byName(response.body, "Booked");
+    expect(booked.availability.status).toBe("UNAVAILABLE_BOOKING");
+    expect(booked.availability.conflicts).toEqual([]);
+    expect(statusOf(byName(response.body, "Small"), "capacity")).toBe("UNMET");
+    expect(JSON.stringify(response.body)).not.toContain("REQ-");
+  });
+
+  test("[SPM-76-AC3] should_ask_for_the_event_date_before_checking_availability", async () => {
+    const { body } = await organiserOptions();
+
+    expect(body.availabilityChecked).toBe(true);
+    expect(byName(body, "Fits").availability.status).toBe("NO_DATES");
+  });
+
+  test.each(["coordinator", "venueStaff"])("[TC-VS-007][SPM-76-AC1] should_refuse_%s", async (key) => {
+    const response = await as(key, request(app).get("/api/venues/options"));
+    expect(response.status).toBe(403);
   });
 });
 

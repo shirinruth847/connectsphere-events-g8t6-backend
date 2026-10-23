@@ -2,7 +2,7 @@ jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), aut
 jest.mock("../../config/mongodb", () => ({ getMongoDb: jest.fn() }));
 
 const supabase = require("../../config/supabase");
-const { venueRequirements, compareOptions, suggestEventVenue } = require("../../model/venueModel");
+const { venueRequirements, toOptionAvailability, compareOptions, suggestEventVenue } = require("../../model/venueModel");
 
 const venue = (overrides = {}) => ({
   venueId: 1,
@@ -69,6 +69,49 @@ describe("venueRequirements (SPM-72 AC5)", () => {
     });
 
     expect(list.map((item) => item.key)).toEqual(["availability"]);
+  });
+});
+
+describe("toOptionAvailability (SPM-72 AC6, SPM-76 AC3)", () => {
+  const check = (overrides = {}) => ({
+    availability: "AVAILABLE",
+    availabilityLabel: "Available",
+    canRequest: true,
+    conflicts: [],
+    occupiedStart: "2026-12-01T01:30:00.000Z",
+    occupiedEnd: "2026-12-01T04:45:00.000Z",
+    operatingHoursWarning: null,
+    ...overrides,
+  });
+
+  test("[SPM-72-AC6] should_mark_a_free_venue_met_with_a_short_label", () => {
+    const summary = toOptionAvailability({ buffersRecorded: true, entries: [], check: check() });
+
+    expect(summary).toMatchObject({ status: "AVAILABLE", label: "Available", requirementStatus: "MET", detail: "Available" });
+  });
+
+  test("[SPM-72-AC6] should_list_the_overlapping_booking", () => {
+    const summary = toOptionAvailability({
+      buffersRecorded: true,
+      entries: [{ entryId: "b1", label: "Booking REQ-000009" }],
+      check: check({
+        availability: "UNAVAILABLE_BOOKING",
+        availabilityLabel: "Unavailable – booking",
+        canRequest: false,
+        conflicts: [{ type: "BOOKING", entryId: "b1", occupiedStart: "s", occupiedEnd: "e" }],
+      }),
+    });
+
+    expect(summary).toMatchObject({ requirementStatus: "UNMET", detail: "Unavailable – booking" });
+    expect(summary.conflicts).toEqual([expect.objectContaining({ type: "BOOKING", label: "Booking REQ-000009" })]);
+  });
+
+  test("[SPM-72-AC6] should_never_show_an_unchecked_venue_as_available", () => {
+    expect(toOptionAvailability(null)).toMatchObject({ status: "NOT_CHECKED", label: "Error checking availability", requirementStatus: "NOT_CHECKED" });
+  });
+
+  test("[SPM-76-AC3] should_ask_for_the_event_date_before_checking", () => {
+    expect(toOptionAvailability(null, { hasDates: false })).toMatchObject({ status: "NO_DATES", label: "Enter the event date", requirementStatus: "NOT_CHECKED" });
   });
 });
 

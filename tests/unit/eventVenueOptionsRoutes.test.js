@@ -6,8 +6,9 @@ jest.mock("../../model/eventModel", () => ({
 }));
 jest.mock("../../model/venueModel", () => ({
   getEventVenueOptions: jest.fn(),
-  listEventVenuePhotos: jest.fn(),
-  getEventVenuePhotoImage: jest.fn(),
+  getRequestVenueOptions: jest.fn(),
+  listSelectableVenuePhotos: jest.fn(),
+  getSelectableVenuePhotoImage: jest.fn(),
   suggestEventVenue: jest.fn(),
 }));
 
@@ -142,20 +143,21 @@ describe("GET /api/events/:id/venue-options (SPM-72/74)", () => {
   });
 });
 
-describe("GET /api/events/:id/venue-options/:venueId/photos (SPM-72 AC4)", () => {
-  test("[SPM-72-AC4] should_list_photos_of_an_offered_venue", async () => {
-    venueModel.listEventVenuePhotos.mockResolvedValue({ photos: [{ photoId: PHOTO_ID, position: 0 }] });
+describe("GET /api/venues/options/:venueId/photos (SPM-72 AC4, SPM-76 AC4)", () => {
+  test.each([["COORDINATOR", COORDINATOR_ID], ["COORDINATOR_LEAD", LEAD_ID], ["ORGANISER", 5]])("[SPM-72-AC4] should_list_photos_of_an_available_venue_to_%s", async (role, userId) => {
+    signedInAs(userId, role);
+    venueModel.listSelectableVenuePhotos.mockResolvedValue({ photos: [{ photoId: PHOTO_ID, position: 0 }] });
 
-    const response = await send("get", "/api/events/42/venue-options/7/photos");
+    const response = await send("get", "/api/venues/options/7/photos");
 
     expect(response.status).toBe(200);
-    expect(venueModel.listEventVenuePhotos).toHaveBeenCalledWith(7);
+    expect(venueModel.listSelectableVenuePhotos).toHaveBeenCalledWith(7);
   });
 
   test("[SPM-72-AC4] should_serve_the_image_with_nosniff", async () => {
-    venueModel.getEventVenuePhotoImage.mockResolvedValue({ contentType: "image/png", data: Buffer.from([137, 80, 78, 71]) });
+    venueModel.getSelectableVenuePhotoImage.mockResolvedValue({ contentType: "image/png", data: Buffer.from([137, 80, 78, 71]) });
 
-    const response = await send("get", `/api/events/42/venue-options/7/photos/${PHOTO_ID}`);
+    const response = await send("get", `/api/venues/options/7/photos/${PHOTO_ID}`);
 
     expect(response.status).toBe(200);
     expect(response.headers["content-type"]).toBe("image/png");
@@ -163,8 +165,8 @@ describe("GET /api/events/:id/venue-options/:venueId/photos (SPM-72 AC4)", () =>
   });
 
   test.each([
-    ["/api/events/42/venue-options/abc/photos", "VENUE_NOT_FOUND"],
-    ["/api/events/42/venue-options/7/photos/not-an-id", "PHOTO_NOT_FOUND"],
+    ["/api/venues/options/abc/photos", "VENUE_NOT_FOUND"],
+    ["/api/venues/options/7/photos/not-an-id", "PHOTO_NOT_FOUND"],
   ])("[SPM-72-AC4] should_return_404_for_%s", async (path, code) => {
     const response = await send("get", path);
 
@@ -173,20 +175,80 @@ describe("GET /api/events/:id/venue-options/:venueId/photos (SPM-72 AC4)", () =>
   });
 
   test("[SPM-72-AC4] should_return_404_for_a_venue_that_cannot_be_chosen", async () => {
-    venueModel.listEventVenuePhotos.mockRejectedValue(venueError("VENUE_NOT_FOUND"));
+    venueModel.listSelectableVenuePhotos.mockRejectedValue(venueError("VENUE_NOT_FOUND"));
 
-    const response = await send("get", "/api/events/42/venue-options/7/photos");
+    const response = await send("get", "/api/venues/options/7/photos");
 
     expect(response.status).toBe(404);
   });
 
-  test("[SPM-72-AC4] should_refuse_photos_to_an_organiser", async () => {
-    signedInAs(5, "ORGANISER");
+  test.each(["VENUE_STAFF", "TECH_SUPPORT", "ATTENDEE"])("should_refuse_photos_to_%s", async (role) => {
+    signedInAs(30, role);
 
-    const response = await send("get", "/api/events/42/venue-options/7/photos");
+    const response = await send("get", "/api/venues/options/7/photos");
 
     expect(response.status).toBe(403);
-    expect(venueModel.listEventVenuePhotos).not.toHaveBeenCalled();
+    expect(venueModel.listSelectableVenuePhotos).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/venues/options (SPM-76)", () => {
+  beforeEach(() => {
+    signedInAs(5, "ORGANISER");
+    venueModel.getRequestVenueOptions.mockResolvedValue({ venues: [], detailsAvailable: true, availabilityChecked: true, filtersNotChecked: [] });
+  });
+
+  test("[SPM-76-AC1] should_check_venues_against_the_organisers_form_values", async () => {
+    const response = await send(
+      "get",
+      "/api/venues/options?search=Hall&sort=capacity&order=desc&startDatetime=2026-12-01T02:00:00.000Z&endDatetime=2026-12-01T04:00:00.000Z"
+        + "&expectedAttendance=150&preferredLayoutType=THEATRE&accessibilityNeeds=Hearing%20loop&accessibilityNeeds=Ramp"
+    );
+
+    expect(response.status).toBe(200);
+    const [need, viewer, options] = venueModel.getRequestVenueOptions.mock.calls[0];
+    expect(need).toEqual({
+      start_datetime: "2026-12-01T02:00:00.000Z",
+      end_datetime: "2026-12-01T04:00:00.000Z",
+      expected_attendance: 150,
+      preferred_layout_type: "THEATRE",
+      accessibility_needs: ["Hearing loop", "Ramp"],
+    });
+    expect(viewer.user_id).toBe(5);
+    expect(options).toEqual({ filters: { search: "Hall" }, requiredFacilities: [], sort: "capacity", order: "desc" });
+  });
+
+  test("[SPM-76-AC1] should_accept_an_incomplete_form", async () => {
+    const response = await send("get", "/api/venues/options");
+
+    expect(response.status).toBe(200);
+    expect(venueModel.getRequestVenueOptions.mock.calls[0][0]).toEqual({
+      start_datetime: null, end_datetime: null, expected_attendance: null, preferred_layout_type: null, accessibility_needs: [],
+    });
+  });
+
+  test.each([
+    ["startDatetime=soon&endDatetime=2026-12-01T04:00:00Z", "startDatetime"],
+    ["startDatetime=2026-12-01T04:00:00Z&endDatetime=2026-12-01T02:00:00Z", "endDatetime"],
+    ["startDatetime=2026-01-01T00:00:00Z&endDatetime=2027-06-01T00:00:00Z", "endDatetime"],
+    ["expectedAttendance=0", "expectedAttendance"],
+    ["minCapacity=0", "minCapacity"],
+    ["eventId=4", "eventId"],
+    [Array.from({ length: 21 }, (_, i) => `accessibilityNeeds=n${i}`).join("&"), "accessibilityNeeds"],
+  ])("[SPM-76-AC2] should_reject_%p", async (query, field) => {
+    const response = await send("get", `/api/venues/options?${query}`);
+
+    expect(response.status).toBe(400);
+    expect(response.body.fields).toHaveProperty(field);
+    expect(venueModel.getRequestVenueOptions).not.toHaveBeenCalled();
+  });
+
+  test.each(["COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF", "ATTENDEE"])("[SPM-76-AC1] should_refuse_%s", async (role) => {
+    signedInAs(30, role);
+
+    const response = await send("get", "/api/venues/options");
+
+    expect(response.status).toBe(403);
   });
 });
 
