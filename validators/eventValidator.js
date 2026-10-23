@@ -248,6 +248,7 @@ module.exports = {
   validateOrdinaryFields,
   hasErrors,
   toWholeNumber,
+  parseDate,
   MESSAGES,
   TEXT_LIMITS,
   MAX_INTEGER,
