@@ -351,7 +351,7 @@ EVENT_COMPLETION_INTERVAL_MS=60000         # how often ended events are complete
 
 The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.
 
-`MONGODB_URI` and `MONGODB_DB_NAME` are required: without them the health check fails and the venue catalogue reports its details as `NOT_CHECKED`. Your Atlas user needs read/write access and your current IP on the Atlas Network Access list (Master section 2.7.1).
+`MONGODB_URI` and `MONGODB_DB_NAME` are required: without them the health check fails, the venue catalogue reports its details as `NOT_CHECKED`, and Safety Officers cannot decide a review (`503 VENUE_DETAILS_UNAVAILABLE`, because emergency access and known restrictions come from `venue_details`). Your Atlas user needs read/write access and your current IP on the Atlas Network Access list (Master section 2.7.1).
 
 ---
 
