@@ -19,6 +19,11 @@ const {
   listLeadAssignments,
   listUnassignedEvents,
   getCoordinatorAvailability,
+  getEventReadiness,
+  submitForSafetyReview,
+  confirmEvent,
+  startPreparation,
+  completeEvent,
 } = require("../controller/eventController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
@@ -34,6 +39,9 @@ const attendeeOnly = [requireAuth, requireRole(USER_ROLES.ATTENDEE)];
 // inside the user's viewing scope, rather than a role error that confirms it exists
 // (SPM-33). It runs last in each chain, so earlier checks keep their precedence.
 const anySignedInUser = [requireAuth];
+// SPM-173 lifecycle actions: the assigned coordinator only; any other coordinator
+// gets "not found" from requireVisibleEvent.
+const assignedCoordinatorOnly = [...coordinatorOnly, requireVisibleEvent];
 
 // GET / is left free for event discovery (Master section 3.4).
 router.post("/", organiserOnly, createAndSubmit);
@@ -53,13 +61,12 @@ if (process.env.ENABLE_COORDINATOR_WORKFLOWS === "true") {
   router.all(["/unassigned", "/coordinator-availability", "/assignments", "/:id/coordinator"], (req, res) => res.status(404).json({ error: "Not found.", code: "NOT_FOUND" }));
 }
 router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
-router.get(
-  "/:id/history",
-  anySignedInUser,
-  validateCursorPagination,
-  requireVisibleEvent,
-  getEventHistory,
-);
+router.get("/:id/readiness", assignedCoordinatorOnly, getEventReadiness);
+router.post("/:id/submit-for-safety-review", assignedCoordinatorOnly, submitForSafetyReview);
+router.post("/:id/confirm", assignedCoordinatorOnly, confirmEvent);
+router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation);
+router.post("/:id/complete", assignedCoordinatorOnly, completeEvent);
+router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
 router.put("/:id/draft", organiserOnly, requireVisibleEvent, updateDraft);

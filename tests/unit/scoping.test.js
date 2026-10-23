@@ -38,7 +38,13 @@ describe("[TC-LOGIN-004] toAttendeeEvent", () => {
     expect(view.venue).toEqual({ name: "Main Hall", address: "2 Main Rd" });
   });
 
-  test.each(["SUBMITTED", "UNDER_REVIEW", "AWAITING_CLARIFICATION", "PLANNING"])(
+  test("[SPM-173-AC11] should_show_an_event_in_preparation_as_confirmed_with_its_venue", () => {
+    const view = toAttendeeEvent({ ...baseEvent, status: "PREPARATION" });
+    expect(view.attendee_status).toBe("CONFIRMED");
+    expect(view.venue).toEqual({ name: "Main Hall", address: "2 Main Rd" });
+  });
+
+  test.each(["SUBMITTED", "UNDER_REVIEW", "AWAITING_CLARIFICATION", "PLANNING", "SAFETY_REVIEW"])(
     "[TC-REG-003] should_report_pending_confirmation_and_hide_venue_when_event_is_%s",
     (status) => {
       const view = toAttendeeEvent({ ...baseEvent, status });

@@ -152,6 +152,7 @@ describe("organiser status note (SPM-33)", () => {
     expect(eventModel.toApi({ event_id: 7, status: "SUBMITTED", coordinator_id: null })).toEqual(
       expect.objectContaining({ statusLabel: "Submitted", statusNote: "Waiting for a coordinator" })
     );
+    expect(eventModel.toApi({ event_id: 7, status: "SUBMITTED", coordinator_id: null })).not.toHaveProperty("status");
   });
 
   test.each([
@@ -181,16 +182,34 @@ describe("organiser status note (SPM-33)", () => {
     ["COMPLETED", "Completed", null],
     ["CANCELLED", "Cancelled", null],
     ["REJECTED", "Rejected", null],
-  ])("[SPM-33-REVIEW] should_show_%s_to_the_organiser_as_%s", (status, statusLabel, statusNote) => {
+  ])("[SPM-173-AC6] should_show_%s_to_the_organiser_as_%s_without_the_stored_state", (status, statusLabel, statusNote) => {
     expect(eventModel.toApi({ event_id: 7, status, coordinator_id: 5 })).toEqual(
       expect.objectContaining({ statusLabel, statusNote })
     );
+    expect(eventModel.toApi({ event_id: 7, status, coordinator_id: 5 })).not.toHaveProperty("status");
   });
 
   test("[SPM-33-REVIEW] should_fall_back_to_the_stored_code_for_a_status_outside_the_lifecycle", () => {
     expect(eventModel.toApi({ event_id: 7, status: "APPROVED", coordinator_id: 5 })).toEqual(
-      expect.objectContaining({ statusLabel: "APPROVED", statusNote: null })
+      expect.objectContaining({ statusLabel: "Unknown status", statusNote: null })
     );
+    expect(eventModel.toApi({ event_id: 7, status: "APPROVED", coordinator_id: 5 })).not.toHaveProperty("status");
+  });
+
+  test("[SPM-173-AC6] should_keep_the_stored_state_in_staff_event_views", () => {
+    const access = {
+      relationship: "ASSIGNED_COORDINATOR",
+      canEdit: false,
+      editableFields: [],
+      historyAudiences: [],
+    };
+    expect(eventModel.toEventView(
+      { event_id: 7, status: "SAFETY_REVIEW", coordinator_id: 5 },
+      { user_id: 5 },
+      access,
+    )).toEqual(expect.objectContaining({ status: "SAFETY_REVIEW", statusLabel: "Approved & Planning" }));
+    expect(eventModel.toApi({ event_id: 7, status: "UNDER_REVIEW" }, undefined, { includeStoredStatus: true }))
+      .toEqual(expect.objectContaining({ status: "UNDER_REVIEW", statusLabel: "Under Review" }));
   });
 });
 
@@ -247,6 +266,7 @@ describe("reads", () => {
       })
     );
     expect(events[0]).not.toHaveProperty("purpose");
+    expect(events[0]).not.toHaveProperty("status");
     expect(events[0]).not.toHaveProperty("organiser_id");
     expect(nextCursor).toBeNull();
   });

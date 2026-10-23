@@ -74,12 +74,12 @@ The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
-| `POST /api/events` | Event fields; `Idempotency-Key` header | `201 { message, event }`, status `SUBMITTED` | `400 VALIDATION_FAILED`, `409 IDEMPOTENCY_KEY_REUSED` |
+| `POST /api/events` | Event fields; `Idempotency-Key` header | `201 { message, event }`, organiser event includes `statusLabel: "Submitted"` | `400 VALIDATION_FAILED`, `409 IDEMPOTENCY_KEY_REUSED` |
 | `POST /api/events/drafts` | Any event fields, `title` required; `Idempotency-Key` header | `201 { message, event, savedAt }`, status `DRAFT` | `400`, `409 IDEMPOTENCY_KEY_REUSED` |
 | `PUT /api/events/:id/draft` | Changed fields, plus `"isAutoSave": true` from the idle timer. Optional `version` and `Idempotency-Key` (see SPM-33) | `200 { message, event, savedAt }`; auto-saves skip the activity log | `400`, `403` (see SPM-33), `404 EVENT_NOT_FOUND`, `409 EVENT_VERSION_CONFLICT` |
-| `PUT /api/events/:id/submit` | Final edits or `{}` | `200 { message, event }`, status `SUBMITTED` | `400` (draft unchanged), `404`, `409 EVENT_NOT_DRAFT` |
+| `PUT /api/events/:id/submit` | Final edits or `{}` | `200 { message, event }`, organiser event includes `statusLabel: "Submitted"` | `400` (draft unchanged), `404`, `409 EVENT_NOT_DRAFT` |
 | `GET /api/events/:id` | — | `200 { event }` with `isOwner`, `version`, `viewerRelationship` and `permissions` | `404 EVENT_NOT_FOUND` (missing, or outside the user's viewing scope) |
-| `GET /api/events/mine` | `?status=<event status>`, `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { events: [{ eventId, requestId, status, statusLabel, statusNote, title, startDatetime, endDatetime, expectedAttendance, organisation, isOwner, createdAt, updatedAt }], nextCursor }`, newest edit first | `400 VALIDATION_FAILED` (including `offset`, which this list does not accept) |
+| `GET /api/events/mine` | `?status=<event status>` or `?label=<organiser label>`, `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { events: [{ eventId, requestId, statusLabel, statusNote, title, startDatetime, endDatetime, expectedAttendance, organisation, isOwner, createdAt, updatedAt }], nextCursor }`, newest edit first; the stored `status` is not returned to organisers | `400 VALIDATION_FAILED` (including `offset`, which this list does not accept) |
 | `GET /api/events/discovery` | `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { events: [{ eventId, title, description, startDatetime, endDatetime, organisationName, location, registrationAvailability }], nextCursor }`, soonest start first (ties by event ID) | `400 VALIDATION_FAILED`, `401 UNAUTHENTICATED`, `403 FORBIDDEN` |
 | `GET /api/events/discovery/:id` | — | `200 { event: { eventId, title, description, startDatetime, endDatetime, organisationName, registrationOpenAt, registrationCloseAt, location, registrationAvailability } }` | `404 EVENT_NOT_FOUND`, `401 UNAUTHENTICATED`, `403 FORBIDDEN` |
 
@@ -88,10 +88,11 @@ The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/
 - **Registration window and capacity:** registration enabled requires a capacity (DB constraint). Registration is open from `registration_open_at` up to, but not including, `registration_close_at`; `registration_open_at = null` means registration opens immediately and `registration_close_at = null` means there is no deadline. `is_registration_enabled = false` returns `NOT_ENABLED`.
 - **Attendee location:** list and detail return the name and address of the unique approved venue through the existing `venue_booking → room → venue` relationship. Pending, rejected and cancelled bookings are excluded. Multiple bookings at one venue count as one location. The current schema has no primary-venue marker: if approved bookings reference multiple venues, location remains `null` until the primary-venue model is available; discovery never chooses an arbitrary venue. No booking, room or venue IDs are returned.
 - **Server-controlled fields** (`status`, `organiserId`, `requestId`, …) are never silently ignored: the two `POST` routes reject them with `400`, and the update routes (`PUT /api/events/:id`, `PUT /api/events/:id/draft`) with `403 FIELD_NOT_EDITABLE` (see SPM-33).
-- **Status label and note:** organiser-facing responses carry `statusLabel` (`DRAFT` → "Draft", `SUBMITTED` → "Submitted", `UNDER_REVIEW` → "Under Review"; other states still return the stored code) (labels per Master section 3.5) and `statusNote`: "Waiting for a coordinator" while a submitted request has no coordinator, otherwise `null` (added by SPM-33; not yet listed in the Master).
+- **Status label and note:** organiser-facing responses carry `statusLabel`, one of the eight Master section 3.5 labels, and `statusNote`: "Waiting for a coordinator" while a submitted request has no coordinator (added by SPM-33; not yet listed in the Master), "Returned – action required" while awaiting clarification, "Reconfirmation pending" when a previously confirmed event is back in `PLANNING` or `SAFETY_REVIEW` (SPM-173), otherwise `null`. Organiser event responses expose the label and note rather than stored `status`; staff responses continue to include stored status.
+- **List filters:** `GET /api/events/mine` takes either `status` (a stored state) or `label` (one of the eight labels, expanded to its states on the backend, e.g. `label=Approved%20%26%20Planning` returns `PLANNING` and `SAFETY_REVIEW`), not both.
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
-- **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the receipt notification for the organiser and active Coordinator Leads in one database transaction (`submit_event_request`). The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
+- **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the receipt notification for the organiser and active Coordinator Leads in one database transaction (`submit_event_request`, which changes the state through the shared lifecycle function since SPM-173). A new request's `version` is 2 after submission, because it is created as a draft and then submitted. The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
 - **Assignment** (`POST /api/events/:id/coordinator`, Coordinator Lead only, requires `ENABLE_COORDINATOR_WORKFLOWS=true`) takes a request from the queue: in one transaction (`assign_event_coordinator`) it sets the coordinator, moves the request from `SUBMITTED` to `UNDER_REVIEW` (Master section 5.2), records the staff-only history entry `COORDINATOR_ASSIGNED` and notifies the organiser and the coordinator.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
@@ -194,7 +195,7 @@ and that Lead. It succeeds even when no Coordinator is available. Assignment is
 still the separate Lead action and enters `UNDER_REVIEW`.
 
 Apply the reviewed migration
-`supabase/migrations/20261019120000_spm36_submission_time_and_lead_receipt.sql`
+`supabase/migrations/20261019183324_spm36_submission_time_and_lead_receipt.sql`
 before deploying this backend. It adds `event.submitted_at`, preserves the first
 submission time on later updates, backfills only from recorded submission history,
 and adds active Leads to the existing durable receipt's recipients in the same
@@ -265,7 +266,27 @@ Saves are checked in this order, and a failed check changes nothing:
   Nobody but the owner could see the draft, so nobody else may read what it used to say. Entries cannot be changed or removed: there is no route for it and the backend's database role has no `UPDATE`, `DELETE` or `TRUNCATE` on `activity_log`. Deleting a profile that wrote history entries is refused (`ON DELETE RESTRICT`); deactivate the profile instead.
 - **History format for other tickets:** when a database function inserts into `activity_log` without the new columns, a trigger fills `actor_role` from the user's role and sets `audience` to `STAFF_ONLY`, unless the action is a known draft or organiser-safe one. To show an entry to organisers, pass `audience => 'ORGANISER_SAFE'` and a `changes` object keyed by API field name (`{ "title": { "before": ..., "after": ... } }`).
 - **Notification:** when the assigned coordinator's edit changes something, the owner gets one in-app notification ("Event details updated", type `STATUS_CHANGE`) written in the same transaction. It names the changed fields, not their values. Draft saves, unchanged saves, failed saves and retries send none.
-- **Coordinator statuses:** the list follows the Master 1.0 lifecycle (section 5.2): `SUBMITTED` is excluded because an event in it has no coordinator, and there is no `APPROVED` state. `SAFETY_REVIEW` and `PREPARATION` are not in the live `event_status` enum yet, so they take effect once that migration lands. The list is one constant, `COORDINATOR_EDITABLE_STATUSES` in `config/eventConstants.js`, passed to the database function, so changing it needs no migration.
+- **Coordinator statuses:** the list follows the Master 1.0 lifecycle (section 5.2): `SUBMITTED` is excluded because an event in it has no coordinator, and there is no `APPROVED` state. `SAFETY_REVIEW` and `PREPARATION` are in the `event_status` enum from migration `20261019075257_spm244_status_and_role_values`. The list is one constant, `COORDINATOR_EDITABLE_STATUSES` in `config/eventConstants.js`, passed to the database function, so changing it needs no migration.
+
+### Event Lifecycle (SPM-173)
+
+Every status change goes through one transition table in the database (`_lifecycle_transitions`, Master section 5.2 actions numbered T01–T17 in migration `20261019075510_spm173_lifecycle_transitions`). An action function locks the event, calls `_check_event_transition` (role, relationship, `version`, current state), checks its own preconditions, then calls `_apply_event_transition`, which writes the state and one history entry (`changes.status.before/after`). Simple actions can call `_transition_event`. The helpers are callable only from other database functions.
+
+Coordinator routes (assigned coordinator only; anyone else gets `404`, other roles `403`). Each `POST` takes `{ "version": <the event version you loaded> }` and an optional `Idempotency-Key`, and returns `200 { message, event }` with the coordinator view:
+
+| Route | Action | Refusals |
+| --- | --- | --- |
+| `GET /api/events/:id/readiness` | Readiness (AC8): `{ ready, failures: [{ code, message }], status, version, arrangementVersion }` | `404` |
+| `POST /api/events/:id/submit-for-safety-review` | `PLANNING` → `SAFETY_REVIEW`; opens a review round for the current `arrangement_version`; notifies every active Safety Officer | `409 READINESS_BLOCKED` with `failures` |
+| `POST /api/events/:id/confirm` | `SAFETY_REVIEW` → `CONFIRMED` when the latest round is `APPROVED` for the current arrangement version and the event is still ready; stores a confirmation snapshot; notifies the owner and the staff who approved its bookings and equipment; tells registered attendees only when a reconfirmation changed the snapshot | `409 SAFETY_APPROVAL_REQUIRED`, `409 READINESS_BLOCKED` |
+| `POST /api/events/:id/start-preparation` | `CONFIRMED` → `PREPARATION`; notifies the staff on the event | — |
+| `POST /api/events/:id/complete` | `CONFIRMED`/`PREPARATION` → `COMPLETED` after the event's end (database time) | `409 EVENT_NOT_ENDED` |
+
+All four also answer `403 TRANSITION_NOT_ALLOWED` with `currentStatus` when the action is not allowed in the current state, and `409 EVENT_VERSION_CONFLICT` with the current `event` for a stale `version` (for example, the second of two simultaneous actions).
+
+- **Readiness** (Master 5.3) is checked by `_event_readiness`. Migration `20261021100000_spm173_fail_closed_incident_readiness.sql` checks open resource incidents when their table exists and reports `READINESS_DATA_PENDING` if the incident schema is unavailable. The full Master resource tables remain drafts `20261019100300` and `20261019100400` until SPM-179/SPM-186 agree; readiness integration tests requiring those tables remain pending.
+- **Completion job:** `jobs/eventCompletionJob.js` starts with the server and calls `complete_due_events` every `EVENT_COMPLETION_INTERVAL_MS` (default one minute, `0` turns it off). It completes ended `CONFIRMED` and `PREPARATION` events in batches of 50, using database time and `SKIP LOCKED`, and records them as `System` in the history (`activity_log.user_id` is null, `actor_role` is `SYSTEM`). Registration closes with the state, because it is open only in `CONFIRMED` and `PREPARATION`.
+- **Assignment uses the shared function:** migration `20261022100000_spm173_assignment_shared_transition.sql` routes Lead assignment through `_check_event_transition` and `_apply_event_transition`, retaining the assignment conflict guard, assignment row and notifications. Other lifecycle writers must use the shared helpers before a database trigger can safely refuse direct status writes.
 
 ### Authentication (SPM-32)
 
@@ -319,6 +340,7 @@ SUPABASE_ANON_KEY=<anon/publishable key>  # tests sign in with it like the brows
 SEED_ACCOUNT_PASSWORD=<private password for seeded dev accounts, 12+ characters>
 SEED_NAMESPACE=dev                         # prefix for seeded emails and organisation names
 SIGNUP_RATE_LIMIT_MAX=5                    # sign-up attempts per IP per 15 minutes (default 5; tests raise it)
+EVENT_COMPLETION_INTERVAL_MS=60000         # how often ended events are completed (default 60000; 0 turns the job off)
 ```
 
 The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.
@@ -362,6 +384,8 @@ Tests that need MongoDB (`tests/unit/venueDetailModel.test.js`, `tests/integrati
 
 `tests/integration/eventEdits.integration.test.js` covers SPM-33 (TC-01 to TC-21, two parallel saves, and an edit racing a reassignment). It needs the four SPM-33 migrations (`spm33_event_edit_history`, `spm33_owner_history_and_edit_notice`, `spm33_request_organisation_and_history_retention`, `spm33_assignment_enters_under_review`) and the `reassign_event_coordinator` function (SPM-180) in the development project. Cleanup deletes everything a run created except the profiles that wrote history entries: those stay, deactivated and without an Auth account, because history is never deleted.
 
+`tests/integration/lifecycle.integration.test.js` covers SPM-173 (the transition table for every action and state, direct status edits, roles, versions, idempotency, Lead notifications, label filter and the completion job). It needs migrations `20261019075257` to `20261019075510`. State-machine cases run inside rolled-back transactions on the privileged connection. `tests/integration/lifecycleReadiness.integration.test.js` covers readiness, submit for safety review and confirmation, and also needs the Master resource tables from the drafts in `supabase/drafts/` (`20261019100300` and `20261019100400`), once agreed and applied.
+
 ---
 
 ## 🗄️ Database Migrations
@@ -402,6 +426,9 @@ connectsphere-events-g8t6-backend/
 │   ├── eventController.js
 │   ├── registrationController.js
 │   └── venueController.js
+│   └── registrationController.js
+├── jobs/                 # Background work started by server.js
+│   └── eventCompletionJob.js  # Completes ended events (SPM-173)
 ├── middleware/           # Request/response middleware functions
 │   ├── auth.js           # Verifies the Supabase access token and loads the profile
 │   ├── authorize.js      # Role checks, the event access policy and requireVisibleEvent (404 outside viewing scope)
