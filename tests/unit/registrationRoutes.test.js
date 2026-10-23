@@ -38,6 +38,7 @@ const found = {
     registrationCloseAt: null,
     attendeeStatus: "CANCELLED",
     detailsWithheld: true,
+    lastConfirmedAt: null,
   },
   myRegistration: { status: "WAITLISTED", registeredAt: "2026-10-01T00:00:00+00:00" },
 };

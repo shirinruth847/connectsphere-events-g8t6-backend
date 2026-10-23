@@ -885,6 +885,10 @@ const ACTIVE_REGISTRATION_STATUSES = ["REGISTERED", "WAITLISTED"];
 // Statuses whose current values are the confirmed, attendee-facing ones.
 const CONFIRMED_DETAIL_STATUSES = ["CONFIRMED", "PREPARATION", "COMPLETED"];
 
+// Statuses whose current values may be unconfirmed changes, so attendees see
+// the last confirmation snapshot instead (Master 5.3, 5.7).
+const SNAPSHOT_DETAIL_STATUSES = ["PLANNING", "SAFETY_REVIEW", "CANCELLED"];
+
 // Attendees see a display status, never the lifecycle state.
 const toAttendeeStatus = (status) => {
   if (status === "CONFIRMED" || status === "PREPARATION") return "CONFIRMED";
@@ -905,18 +909,54 @@ const findActiveRegistration = async (eventId, attendeeId) => {
   return data[0] || null;
 };
 
+// SPM-173's latest event_confirmation_snapshots row: what attendees were told
+// at the last confirmation. Read with the service role; never written here.
+const findLatestConfirmationSnapshot = async (eventId) => {
+  const { data, error } = await supabase
+    .from("event_confirmation_snapshots")
+    .select("snapshot,confirmed_at")
+    .eq("event_id", eventId)
+    .order("snapshot_id", { ascending: false })
+    .limit(1);
+  if (error) throw dbError(error);
+  return data[0] || null;
+};
+
+const snapshotLocation = (venue) =>
+  venue && typeof venue === "object" ? [venue.name, venue.address].filter(Boolean).join(", ") || null : null;
+
 // The discovery detail fields plus a display status, for an event the
-// attendee is registered or waitlisted for, in any status.
-const toRegisteredAttendeeEvent = (row) => {
+// attendee is registered or waitlisted for, in any status. lastConfirmedAt is
+// set when the details are the last confirmed ones rather than the current ones.
+const toRegisteredAttendeeEvent = (row, latestSnapshot) => {
   const attendeeStatus = toAttendeeStatus(row.status);
+  const { registrationAvailability } = toAttendeeDiscoveryItem(row);
   if (row.is_published && CONFIRMED_DETAIL_STATUSES.includes(row.status)) {
-    return { ...toAttendeeDetail(row), attendeeStatus, detailsWithheld: false };
+    return { ...toAttendeeDetail(row), attendeeStatus, detailsWithheld: false, lastConfirmedAt: null };
   }
-  // TODO(SPM-173): while a previously confirmed event is back in PLANNING or
-  // SAFETY_REVIEW, or once it is cancelled, Master 5.7 shows attendees the last
-  // confirmation snapshot. SPM-173's event_confirmation_snapshots is now on
-  // main; until this reads it, the current values may be unconfirmed changes,
-  // so only the title and status are returned.
+  // Only the snapshot's attendee-facing values, named as in the discovery
+  // detail: its venue ID, capacity and registration settings are not passed
+  // on. A snapshot taken while the event was unpublished is not shown.
+  const snapshot = latestSnapshot?.snapshot;
+  if (snapshot && snapshot.is_published === true) {
+    return {
+      eventId: row.event_id,
+      title: snapshot.title ?? row.title,
+      description: snapshot.description ?? null,
+      startDatetime: snapshot.start_datetime ?? null,
+      endDatetime: snapshot.end_datetime ?? null,
+      organisationName: row.organisation?.name ?? null,
+      location: snapshotLocation(snapshot.primary_venue),
+      registrationAvailability,
+      registrationOpenAt: snapshot.registration_open_at ?? null,
+      registrationCloseAt: snapshot.registration_close_at ?? null,
+      attendeeStatus,
+      detailsWithheld: false,
+      lastConfirmedAt: latestSnapshot.confirmed_at,
+    };
+  }
+  // Never confirmed, unpublished, or in another status: the current values may
+  // be unconfirmed, so only the title and status are returned.
   return {
     eventId: row.event_id,
     title: row.title,
@@ -925,11 +965,12 @@ const toRegisteredAttendeeEvent = (row) => {
     endDatetime: null,
     organisationName: null,
     location: null,
-    registrationAvailability: toAttendeeDiscoveryItem(row).registrationAvailability,
+    registrationAvailability,
     registrationOpenAt: null,
     registrationCloseAt: null,
     attendeeStatus,
     detailsWithheld: true,
+    lastConfirmedAt: null,
   };
 };
 
@@ -947,8 +988,9 @@ const findRegisteredAttendeeEvent = async (eventId, attendeeId) => {
     .maybeSingle();
   if (error) throw dbError(error);
   if (!data) return null;
+  const latestSnapshot = SNAPSHOT_DETAIL_STATUSES.includes(data.status) ? await findLatestConfirmationSnapshot(eventId) : null;
   return {
-    event: toRegisteredAttendeeEvent(data),
+    event: toRegisteredAttendeeEvent(data, latestSnapshot),
     myRegistration: { status: registration.registration_status, registeredAt: registration.registration_datetime },
   };
 };
