@@ -1,4 +1,4 @@
-// SPM-72/74/76 live integration tests: the venue section of an event, with
+// SPM-72/74/75 live integration tests: the venue section of an event, with
 // real Express routes, Supabase Auth and the shared development database.
 // MongoDB is a local in-memory server (Master M7). Fixtures are synthetic,
 // namespaced by run ID and removed afterwards.
@@ -179,10 +179,23 @@ describe("GET /api/events/:id/venue-options (SPM-72/74)", () => {
     expect([...unmet].sort((a, b) => a - b)).toEqual(unmet);
   });
 
-  test("[TC-VC-004][SPM-72-AC3] should_filter_by_minimum_capacity", async () => {
+  test("[TC-VC-004][TC-VS-003][SPM-72-AC3][SPM-75-AC4] should_filter_by_minimum_capacity", async () => {
     const { body } = await getOptions("coordinator", "&minCapacity=350");
 
     expect(body.venues.map((venue) => venue.name).sort()).toEqual([`${prefix} Booked`, `${prefix} NoBuffers`]);
+  });
+
+  test("[TC-VS-002][SPM-75-AC3] should_search_by_location_as_well_as_name", async () => {
+    const response = await as("coordinator", request(app).get(`/api/events/${eventId}/venue-options?search=${encodeURIComponent(`${prefix} Booked Road`)}`));
+
+    expect(response.status).toBe(200);
+    expect(response.body.venues.map((venue) => venue.name)).toEqual([`${prefix} Booked`]);
+  });
+
+  test("[TC-VS-004][SPM-75-AC5] should_keep_only_venues_with_the_facility_and_rank_by_required_facilities", async () => {
+    const { body } = await getOptions("coordinator", "&facility=PA%20system");
+
+    expect(body.venues.map((venue) => venue.name).sort()).toEqual([`${prefix} Fits`, `${prefix} NoBuffers`, `${prefix} Small`]);
   });
 
   test("[TC-VC-012][SPM-72-AC2] should_give_the_supervising_lead_read_only_options", async () => {
@@ -215,7 +228,7 @@ describe("GET /api/events/:id/venue-options (SPM-72/74)", () => {
     expect(body.preferredVenues[1].option).toBeNull();
   });
 
-  test.each(["coordinator", "organiserA"])("[TC-VC-006][TC-VS-004][SPM-72-AC4] should_serve_photos_of_available_venues_only_to_%s", async (key) => {
+  test.each(["coordinator", "coordinatorLead"])("[TC-VC-006][SPM-72-AC4] should_serve_photos_of_available_venues_only_to_%s", async (key) => {
     const list = await as(key, request(app).get(`/api/venues/options/${venues.fits.venueId}/photos`));
     expect(list.status).toBe(200);
     expect(list.body.photos).toHaveLength(1);
@@ -226,35 +239,6 @@ describe("GET /api/events/:id/venue-options (SPM-72/74)", () => {
 
     const hidden = await as(key, request(app).get(`/api/venues/options/${venues.inactive.venueId}/photos`));
     expect(hidden.status).toBe(404);
-  });
-});
-
-describe("GET /api/venues/options (SPM-76)", () => {
-  const organiserOptions = (query = "") =>
-    as("organiserA", request(app).get(`/api/venues/options?search=${encodeURIComponent(prefix)}${query}`));
-
-  test("[TC-VS-001][TC-VS-003][SPM-76-AC3] should_check_venues_against_the_form_without_revealing_other_events", async () => {
-    const response = await organiserOptions("&startDatetime=2027-03-10T10:00:00Z&endDatetime=2027-03-10T12:00:00Z&expectedAttendance=50");
-
-    expect(response.status).toBe(200);
-    expect(response.body.venues.map((venue) => venue.name)).not.toContain(`${prefix} Inactive`);
-    const booked = byName(response.body, "Booked");
-    expect(booked.availability.status).toBe("UNAVAILABLE_BOOKING");
-    expect(booked.availability.conflicts).toEqual([]);
-    expect(statusOf(byName(response.body, "Small"), "capacity")).toBe("UNMET");
-    expect(JSON.stringify(response.body)).not.toContain("REQ-");
-  });
-
-  test("[SPM-76-AC3] should_ask_for_the_event_date_before_checking_availability", async () => {
-    const { body } = await organiserOptions();
-
-    expect(body.availabilityChecked).toBe(true);
-    expect(byName(body, "Fits").availability.status).toBe("NO_DATES");
-  });
-
-  test.each(["coordinator", "venueStaff"])("[TC-VS-007][SPM-76-AC1] should_refuse_%s", async (key) => {
-    const response = await as(key, request(app).get("/api/venues/options"));
-    expect(response.status).toBe(403);
   });
 });
 

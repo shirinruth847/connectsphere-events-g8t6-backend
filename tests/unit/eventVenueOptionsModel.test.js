@@ -72,7 +72,7 @@ describe("venueRequirements (SPM-72 AC5)", () => {
   });
 });
 
-describe("toOptionAvailability (SPM-72 AC6, SPM-76 AC3)", () => {
+describe("toOptionAvailability (SPM-72 AC6)", () => {
   const check = (overrides = {}) => ({
     availability: "AVAILABLE",
     availabilityLabel: "Available",
@@ -110,7 +110,7 @@ describe("toOptionAvailability (SPM-72 AC6, SPM-76 AC3)", () => {
     expect(toOptionAvailability(null)).toMatchObject({ status: "NOT_CHECKED", label: "Error checking availability", requirementStatus: "NOT_CHECKED" });
   });
 
-  test("[SPM-76-AC3] should_ask_for_the_event_date_before_checking", () => {
+  test("[SPM-72-AC6] should_not_check_an_event_without_dates", () => {
     expect(toOptionAvailability(null, { hasDates: false })).toMatchObject({ status: "NO_DATES", label: "Enter the event date", requirementStatus: "NOT_CHECKED" });
   });
 });
