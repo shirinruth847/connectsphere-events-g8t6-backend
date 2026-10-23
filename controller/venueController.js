@@ -9,7 +9,6 @@ const {
   validateVenueDetails,
   validateCatalogueQuery,
   validateVenueOptionsQuery,
-  validateRequestVenueOptionsQuery,
   hasErrors,
   MESSAGES,
 } = require("../validators/venueValidator");
@@ -350,17 +349,6 @@ const getEventVenueOptions = async (req, res, next) => {
   }
 };
 
-// GET /api/venues/options (SPM-76): the organiser's form values come in the query.
-const getRequestVenueOptions = async (req, res, next) => {
-  const { need, options, fields } = validateRequestVenueOptionsQuery(req.query);
-  if (hasErrors(fields)) return validationFailed(res, fields);
-  try {
-    return res.status(200).json(await venueModel.getRequestVenueOptions(need, req.user, options));
-  } catch (err) {
-    return handleError(err, res, next);
-  }
-};
-
 const listSelectableVenuePhotos = async (req, res, next) => {
   const venueId = parseVenueId(req.params.venueId);
   if (!venueId) return venueNotFound(res);
@@ -425,7 +413,6 @@ const suggestEventVenue = async (req, res, next) => {
 
 module.exports = {
   getEventVenueOptions,
-  getRequestVenueOptions,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,
   suggestEventVenue,

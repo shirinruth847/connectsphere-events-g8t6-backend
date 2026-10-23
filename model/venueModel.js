@@ -76,7 +76,7 @@ const getVenueCatalogue = async (filters = {}) => {
     .eq("status", VENUE_STATUS.ACTIVE);
   if (filters.search) query = query.or(orIlike(["name", "address"], filters.search));
   if (filters.minCapacity) query = query.gte("max_capacity", filters.minCapacity);
-  // Internal only: the venues an event's organiser chose (SPM-72/76).
+  // Internal only: the venues an event's organiser chose (SPM-72).
   if (filters.venueIds) query = query.in("venue_id", filters.venueIds);
   const { data, error } = await query
     .order("name", { ascending: true })
@@ -701,7 +701,7 @@ const availabilitySummary = (status, label, requirementStatus, check = null, con
 });
 
 // The availability summary for one venue over the event's own window.
-// hasDates is false while an organiser has not entered the event date (SPM-76).
+// hasDates is false for an event without dates (a draft cannot reach this).
 const toOptionAvailability = (calendar, { hasDates = true } = {}) => {
   if (!hasDates) return availabilitySummary("NO_DATES", "Enter the event date", REQUIREMENT_STATUS.NOT_CHECKED);
   // MongoDB could not be read: never shown as available (Master 7.4 step 5).
@@ -746,12 +746,10 @@ const compareOptions = (sort, order) => (left, right) => {
 };
 
 // Each venue with its cover photo, availability over the event window and
-// requirement statuses (SPM-72/74/76), unsorted. `need` holds the requirements
+// requirement statuses (SPM-72/74), unsorted. `need` holds the requirements
 // in event-row shape: start_datetime, end_datetime, expected_attendance,
 // preferred_layout_type and accessibility_needs. Nothing here writes.
-// conflictDetails is false for organisers: they see whether a venue is free,
-// never other events' bookings, holds or blocks (Master 4.2).
-const buildVenueOptions = async (catalogueVenues, need, viewer, { requiredFacilities, excludeEventId = null, conflictDetails = true }) => {
+const buildVenueOptions = async (catalogueVenues, need, viewer, { requiredFacilities, excludeEventId = null }) => {
   const ids = catalogueVenues.map((venue) => venue.venueId);
 
   let covers = new Map();
@@ -787,7 +785,6 @@ const buildVenueOptions = async (catalogueVenues, need, viewer, { requiredFacili
     });
     const unmetCount = requirements.filter((item) => item.status !== REQUIREMENT_STATUS.MET).length;
     const { requirementStatus, detail, ...shownAvailability } = availability;
-    if (!conflictDetails) shownAvailability.conflicts = [];
     return {
       ...venue,
       coverPhotoId: covers.get(String(venue.venueId)) ?? null,
@@ -854,22 +851,6 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
   };
 };
 
-// Venue options while an organiser fills in a request (SPM-76): the
-// requirements come from the form, not a saved event.
-const getRequestVenueOptions = async (need, viewer, { filters, requiredFacilities, sort, order }) => {
-  const catalogue = await getVenueCatalogue(filters);
-  const { options, availabilityChecked } = await buildVenueOptions(catalogue.venues, need, viewer, {
-    requiredFacilities,
-    conflictDetails: false,
-  });
-  return {
-    venues: options.sort(compareOptions(sort, order)),
-    detailsAvailable: catalogue.detailsAvailable,
-    availabilityChecked,
-    filtersNotChecked: catalogue.filtersNotChecked,
-  };
-};
-
 const SUGGESTION_ERRORS = new Set([
   "EVENT_NOT_FOUND",
   "VENUE_SUGGESTION_NOT_ALLOWED_IN_STATUS",
@@ -898,7 +879,7 @@ const suggestEventVenue = async ({ actorId, eventId, venueId, expectedVersion, i
   return data.suggestion;
 };
 
-// Photos of a venue organisers, coordinators and Leads can choose: only
+// Photos of a venue coordinators and Leads can choose: only
 // available venues (Master 6.2). Venue Staff use the gallery routes (T28).
 const requireSelectableVenue = async (venueId) => {
   const { data, error } = await supabase
@@ -1157,7 +1138,6 @@ module.exports = {
   deleteVenuePhoto,
   getVenueAvailability,
   getEventVenueOptions,
-  getRequestVenueOptions,
   suggestEventVenue,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,
