@@ -9,6 +9,7 @@ const {
   validateVenueDetails,
   validateCatalogueQuery,
   validateVenueOptionsQuery,
+  validateRequestVenueOptionsQuery,
   hasErrors,
   MESSAGES,
 } = require("../validators/venueValidator");
@@ -349,23 +350,34 @@ const getEventVenueOptions = async (req, res, next) => {
   }
 };
 
-const listEventVenuePhotos = async (req, res, next) => {
-  const venueId = parseVenueId(req.params.venueId);
-  if (!venueId) return venueNotFound(res);
+// GET /api/venues/options (SPM-76): the organiser's form values come in the query.
+const getRequestVenueOptions = async (req, res, next) => {
+  const { need, options, fields } = validateRequestVenueOptionsQuery(req.query);
+  if (hasErrors(fields)) return validationFailed(res, fields);
   try {
-    return res.status(200).json(await venueModel.listEventVenuePhotos(venueId));
+    return res.status(200).json(await venueModel.getRequestVenueOptions(need, req.user, options));
   } catch (err) {
     return handleError(err, res, next);
   }
 };
 
-const getEventVenuePhotoImage = async (req, res, next) => {
+const listSelectableVenuePhotos = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  try {
+    return res.status(200).json(await venueModel.listSelectableVenuePhotos(venueId));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const getSelectableVenuePhotoImage = async (req, res, next) => {
   const venueId = parseVenueId(req.params.venueId);
   if (!venueId) return venueNotFound(res);
   const photoId = parsePhotoId(req.params.photoId);
   if (!photoId) return photoNotFound(res);
   try {
-    const { contentType, data } = await venueModel.getEventVenuePhotoImage(venueId, photoId);
+    const { contentType, data } = await venueModel.getSelectableVenuePhotoImage(venueId, photoId);
     res.set({ "Content-Type": contentType, "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-cache" });
     return res.status(200).send(data);
   } catch (err) {
@@ -413,8 +425,9 @@ const suggestEventVenue = async (req, res, next) => {
 
 module.exports = {
   getEventVenueOptions,
-  listEventVenuePhotos,
-  getEventVenuePhotoImage,
+  getRequestVenueOptions,
+  listSelectableVenuePhotos,
+  getSelectableVenuePhotoImage,
   suggestEventVenue,
   listVenuePhotos,
   getVenuePhotoImage,

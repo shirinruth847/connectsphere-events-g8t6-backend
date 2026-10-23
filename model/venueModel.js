@@ -76,6 +76,8 @@ const getVenueCatalogue = async (filters = {}) => {
     .eq("status", VENUE_STATUS.ACTIVE);
   if (filters.search) query = query.or(orIlike(["name", "address"], filters.search));
   if (filters.minCapacity) query = query.gte("max_capacity", filters.minCapacity);
+  // Internal only: the venues an event's organiser chose (SPM-72/76).
+  if (filters.venueIds) query = query.in("venue_id", filters.venueIds);
   const { data, error } = await query
     .order("name", { ascending: true })
     .order("venue_id", { ascending: true });
@@ -652,7 +654,7 @@ const venueRequirements = ({ venue, event, requiredFacilities, availability, det
     ));
   }
 
-  list.push(requirement("availability", "Available on the event date", availability.requirementStatus, availability.detail));
+  list.push(requirement("availability", "Availability", availability.requirementStatus, availability.detail));
 
   const layout = event.preferred_layout_type;
   if (layout && layout !== NO_LAYOUT_PREFERENCE) {
@@ -686,44 +688,37 @@ const describeConflicts = (conflicts, entries) => conflicts.map((conflict) => {
   };
 });
 
+const availabilitySummary = (status, label, requirementStatus, check = null, conflicts = []) => ({
+  status,
+  label,
+  requirementStatus,
+  // The requirement chip repeats the label, kept short (SPM-72 AC6).
+  detail: label,
+  occupiedStart: check?.occupiedStart ?? null,
+  occupiedEnd: check?.occupiedEnd ?? null,
+  conflicts,
+  operatingHoursWarning: check?.operatingHoursWarning ?? null,
+});
+
 // The availability summary for one venue over the event's own window.
-const toOptionAvailability = (calendar) => {
-  if (!calendar) {
-    return {
-      status: "NOT_CHECKED",
-      label: "Availability not checked",
-      requirementStatus: REQUIREMENT_STATUS.NOT_CHECKED,
-      detail: "Availability cannot be checked right now, so this venue is not shown as available.",
-      occupiedStart: null,
-      occupiedEnd: null,
-      conflicts: [],
-      operatingHoursWarning: null,
-    };
-  }
+// hasDates is false while an organiser has not entered the event date (SPM-76).
+const toOptionAvailability = (calendar, { hasDates = true } = {}) => {
+  if (!hasDates) return availabilitySummary("NO_DATES", "Enter the event date", REQUIREMENT_STATUS.NOT_CHECKED);
+  // MongoDB could not be read: never shown as available (Master 7.4 step 5).
+  if (!calendar) return availabilitySummary("NOT_CHECKED", "Error checking availability", REQUIREMENT_STATUS.NOT_CHECKED);
   const { check } = calendar;
+  const conflicts = describeConflicts(check.conflicts, calendar.entries);
   // A venue without setup/turnaround minutes cannot receive holds or bookings (Master 5.4.1).
   if (!calendar.buffersRecorded) {
-    return {
-      status: "NOT_BOOKABLE",
-      label: "Not bookable yet",
-      requirementStatus: REQUIREMENT_STATUS.UNMET,
-      detail: "Setup and turnaround times are not recorded for this venue yet.",
-      occupiedStart: check.occupiedStart,
-      occupiedEnd: check.occupiedEnd,
-      conflicts: describeConflicts(check.conflicts, calendar.entries),
-      operatingHoursWarning: check.operatingHoursWarning,
-    };
+    return availabilitySummary("NOT_BOOKABLE", "Not bookable yet", REQUIREMENT_STATUS.UNMET, check, conflicts);
   }
-  return {
-    status: check.availability,
-    label: check.availabilityLabel,
-    requirementStatus: check.canRequest ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET,
-    detail: check.canRequest ? "Free for the event, including setup and turnaround" : "Another booking, hold or block overlaps the event",
-    occupiedStart: check.occupiedStart,
-    occupiedEnd: check.occupiedEnd,
-    conflicts: describeConflicts(check.conflicts, calendar.entries),
-    operatingHoursWarning: check.operatingHoursWarning,
-  };
+  return availabilitySummary(
+    check.availability,
+    check.availabilityLabel,
+    check.canRequest ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET,
+    check,
+    conflicts
+  );
 };
 
 const SORT_VALUES = Object.freeze({
@@ -750,11 +745,14 @@ const compareOptions = (sort, order) => (left, right) => {
   return left.name.localeCompare(right.name) || left.venueId - right.venueId;
 };
 
-// Available venues for one event, with each requirement marked (SPM-72/74).
-// event is the visible event row; nothing here writes.
-const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities, sort, order }) => {
-  const catalogue = await getVenueCatalogue(filters);
-  const ids = catalogue.venues.map((venue) => venue.venueId);
+// Each venue with its cover photo, availability over the event window and
+// requirement statuses (SPM-72/74/76), unsorted. `need` holds the requirements
+// in event-row shape: start_datetime, end_datetime, expected_attendance,
+// preferred_layout_type and accessibility_needs. Nothing here writes.
+// conflictDetails is false for organisers: they see whether a venue is free,
+// never other events' bookings, holds or blocks (Master 4.2).
+const buildVenueOptions = async (catalogueVenues, need, viewer, { requiredFacilities, excludeEventId = null, conflictDetails = true }) => {
+  const ids = catalogueVenues.map((venue) => venue.venueId);
 
   let covers = new Map();
   try {
@@ -763,12 +761,13 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
     console.warn("[venue-options] MongoDB photo read unavailable", { code: error.code });
   }
 
+  const hasDates = Boolean(need.start_datetime && need.end_datetime);
   let calendars = null;
-  if (ids.length && event.start_datetime && event.end_datetime) {
+  if (ids.length && hasDates) {
     try {
-      const window = { start: new Date(event.start_datetime), end: new Date(event.end_datetime) };
+      const window = { start: new Date(need.start_datetime), end: new Date(need.end_datetime) };
       const result = await getVenueAvailability(
-        { from: window.start, to: window.end, venueIds: ids, check: window, excludeEventId: event.event_id },
+        { from: window.start, to: window.end, venueIds: ids, check: window, excludeEventId },
         viewer
       );
       calendars = new Map(result.venues.map((venue) => [venue.venueId, venue]));
@@ -777,28 +776,60 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
     }
   }
 
-  const venues = catalogue.venues
-    .map(({ setupTurnaroundMinutes, ...venue }) => {
-      const availability = toOptionAvailability(calendars?.get(venue.venueId) ?? null);
-      const requirements = venueRequirements({
-        venue,
-        event,
-        requiredFacilities,
-        availability,
-        detailsRead: venue.detailStatus !== "NOT_CHECKED",
-      });
-      const unmetCount = requirements.filter((item) => item.status !== REQUIREMENT_STATUS.MET).length;
-      const { requirementStatus, detail, ...shownAvailability } = availability;
-      return {
-        ...venue,
-        coverPhotoId: covers.get(String(venue.venueId)) ?? null,
-        availability: shownAvailability,
-        requirements,
-        unmetCount,
-        allRequirementsMet: unmetCount === 0,
-      };
-    })
-    .sort(compareOptions(sort, order));
+  const options = catalogueVenues.map(({ setupTurnaroundMinutes, ...venue }) => {
+    const availability = toOptionAvailability(calendars?.get(venue.venueId) ?? null, { hasDates });
+    const requirements = venueRequirements({
+      venue,
+      event: need,
+      requiredFacilities,
+      availability,
+      detailsRead: venue.detailStatus !== "NOT_CHECKED",
+    });
+    const unmetCount = requirements.filter((item) => item.status !== REQUIREMENT_STATUS.MET).length;
+    const { requirementStatus, detail, ...shownAvailability } = availability;
+    if (!conflictDetails) shownAvailability.conflicts = [];
+    return {
+      ...venue,
+      coverPhotoId: covers.get(String(venue.venueId)) ?? null,
+      availability: shownAvailability,
+      requirements,
+      unmetCount,
+      allRequirementsMet: unmetCount === 0,
+    };
+  });
+  return { options, availabilityChecked: !hasDates || !ids.length || calendars !== null };
+};
+
+const preferredVenueIds = (event) =>
+  (Array.isArray(event.event_venue_preference) ? event.event_venue_preference : [])
+    .slice()
+    .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
+    .map((item) => item.venue_id);
+
+const findVenueNames = async (venueIds) => {
+  if (!venueIds.length) return new Map();
+  const { data, error } = await supabase.from("venue").select("venue_id,name").in("venue_id", venueIds);
+  if (error) throw error;
+  return new Map((data || []).map((row) => [row.venue_id, row.name]));
+};
+
+// Available venues for one event, with each requirement marked (SPM-72/74),
+// and the organiser's ranked choices whatever the filters (preferredVenues).
+// A choice that is no longer available keeps its rank with option null.
+// event is the visible event row; nothing here writes.
+const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities, sort, order }) => {
+  const catalogue = await getVenueCatalogue(filters);
+  const preferredIds = preferredVenueIds(event);
+  const listedIds = new Set(catalogue.venues.map((venue) => venue.venueId));
+  const unlistedIds = preferredIds.filter((venueId) => !listedIds.has(venueId));
+  const extra = unlistedIds.length ? (await getVenueCatalogue({ venueIds: unlistedIds })).venues : [];
+
+  const { options, availabilityChecked } = await buildVenueOptions([...catalogue.venues, ...extra], event, viewer, {
+    requiredFacilities,
+    excludeEventId: event.event_id,
+  });
+  const byId = new Map(options.map((option) => [option.venueId, option]));
+  const names = await findVenueNames(preferredIds.filter((venueId) => !byId.has(venueId)));
 
   return {
     event: {
@@ -810,9 +841,31 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
       preferredLayoutType: event.preferred_layout_type,
       accessibilityNeeds: toNeedList(event.accessibility_needs),
     },
-    venues,
+    venues: catalogue.venues.map((venue) => byId.get(venue.venueId)).sort(compareOptions(sort, order)),
+    preferredVenues: preferredIds.map((venueId, index) => ({
+      rank: index + 1,
+      venueId,
+      name: byId.get(venueId)?.name ?? names.get(venueId) ?? null,
+      option: byId.get(venueId) ?? null,
+    })),
     detailsAvailable: catalogue.detailsAvailable,
-    availabilityChecked: calendars !== null,
+    availabilityChecked,
+    filtersNotChecked: catalogue.filtersNotChecked,
+  };
+};
+
+// Venue options while an organiser fills in a request (SPM-76): the
+// requirements come from the form, not a saved event.
+const getRequestVenueOptions = async (need, viewer, { filters, requiredFacilities, sort, order }) => {
+  const catalogue = await getVenueCatalogue(filters);
+  const { options, availabilityChecked } = await buildVenueOptions(catalogue.venues, need, viewer, {
+    requiredFacilities,
+    conflictDetails: false,
+  });
+  return {
+    venues: options.sort(compareOptions(sort, order)),
+    detailsAvailable: catalogue.detailsAvailable,
+    availabilityChecked,
     filtersNotChecked: catalogue.filtersNotChecked,
   };
 };
@@ -845,7 +898,8 @@ const suggestEventVenue = async ({ actorId, eventId, venueId, expectedVersion, i
   return data.suggestion;
 };
 
-// Photos of a venue offered to an event: only venues that can be chosen (Master 6.2).
+// Photos of a venue organisers, coordinators and Leads can choose: only
+// available venues (Master 6.2). Venue Staff use the gallery routes (T28).
 const requireSelectableVenue = async (venueId) => {
   const { data, error } = await supabase
     .from("venue")
@@ -858,12 +912,12 @@ const requireSelectableVenue = async (venueId) => {
   if (!data) throw venueError("VENUE_NOT_FOUND");
 };
 
-const listEventVenuePhotos = async (venueId) => {
+const listSelectableVenuePhotos = async (venueId) => {
   await requireSelectableVenue(venueId);
   return { photos: await callPhotos(() => venuePhotoModel.listPhotos(venueId)) };
 };
 
-const getEventVenuePhotoImage = async (venueId, photoId) => {
+const getSelectableVenuePhotoImage = async (venueId, photoId) => {
   await requireSelectableVenue(venueId);
   const image = await callPhotos(() => venuePhotoModel.getPhotoImage(venueId, photoId));
   if (!image) throw venueError("PHOTO_NOT_FOUND");
@@ -1103,10 +1157,12 @@ module.exports = {
   deleteVenuePhoto,
   getVenueAvailability,
   getEventVenueOptions,
+  getRequestVenueOptions,
   suggestEventVenue,
-  listEventVenuePhotos,
-  getEventVenuePhotoImage,
+  listSelectableVenuePhotos,
+  getSelectableVenuePhotoImage,
   venueRequirements,
+  toOptionAvailability,
   compareOptions,
   findVenueBookings,
   findEventBookings,
