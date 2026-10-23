@@ -257,11 +257,12 @@ describe("POST /api/events (SPM-35)", () => {
       expect.objectContaining({
         eventId: 42,
         requestId: "REQ-000042",
-        status: "SUBMITTED",
         statusLabel: "Submitted",
         statusNote: "Waiting for a coordinator",
       }),
     );
+    // Organisers get the label, not the stored state (SPM-173 AC6).
+    expect(res.body.event).not.toHaveProperty("status");
     expect(res.headers["idempotent-replayed"]).toBeUndefined();
     expect(eventModel.submitEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -422,11 +423,11 @@ describe("POST /api/events/drafts (SPM-37)", () => {
         message: "Draft saved successfully.",
         savedAt: "2026-10-07T07:14:14.406209+00:00",
         event: expect.objectContaining({
-          status: "DRAFT",
           statusLabel: "Draft",
         }),
       }),
     );
+    expect(res.body.event).not.toHaveProperty("status");
   });
 
   test("[SPM-37-S3] should_save_a_draft_when_registration_is_enabled_before_capacity_is_entered", async () => {
@@ -688,7 +689,8 @@ describe("SPM-36 owned draft submission", () => {
     const input = validRequest();
     const res = await send("put", "/api/events/42/submit", input);
     expect(res.status).toBe(200);
-    expect(res.body.event).toMatchObject({ eventId: 42, requestId: "REQ-000042", status: "SUBMITTED", statusLabel: "Submitted", submittedAt, isAssignedToCoordinator: false });
+    expect(res.body.event).toMatchObject({ eventId: 42, requestId: "REQ-000042", statusLabel: "Submitted", submittedAt, isAssignedToCoordinator: false });
+    expect(res.body.event).not.toHaveProperty("status");
     expect(eventModel.submitEvent).toHaveBeenCalledWith({ organiserId: ORGANISER_ID, eventId: 42, input });
   });
 

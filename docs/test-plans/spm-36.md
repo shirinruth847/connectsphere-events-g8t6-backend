@@ -138,7 +138,7 @@ PostgREST, complete hosted constraints/permissions, providers or lock-contention
 verification. The fixture SQL is never a shared database setup script.
 
 Before rollout, review/apply
-`20261019120000_spm36_submission_time_and_lead_receipt.sql`, coordinate the current
+`20261019183324_spm36_submission_time_and_lead_receipt.sql`, coordinate the current
 remote migration head with teammates, configure authorized audit cleanup, and run
 the hosted integration suite. SPM-31 still needs explicit ownership of Lead alert
 presentation. Dedicated supervision/handover modeling stays with assignment
