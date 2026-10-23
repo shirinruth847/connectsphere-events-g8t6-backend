@@ -54,6 +54,8 @@ const createEvent = async (title, { startsInHours = 24 * 30, status = "CONFIRMED
   const start = new Date(Date.now() + startsInHours * 3600 * 1000);
   const { data, error } = await supabase.from("event").insert({
     title: `spm32-${runId} ${title}`,
+    description: `Public description for ${title}`,
+    purpose: `Internal planning purpose for ${title}`,
     organiser_id: userId("organiserB"),
     status,
     start_datetime: start.toISOString(),
@@ -194,6 +196,83 @@ test("[SPM-155-TC-08] marking one and then all as read updates the unread count"
 test("[SPM-155-TC-12] signed-out requests are refused", async () => {
   const res = await request(app).get("/api/notifications");
   expect(res.status).toBe(401);
+});
+
+describe("[SPM-155 AC4/AC5] GET /api/registrations/mine/:eventId", () => {
+  // The discovery detail fields (SPM-34), unchanged on GET /api/events/discovery/:id.
+  const DISCOVERY_DETAIL_FIELDS = [
+    "description", "endDatetime", "eventId", "location", "organisationName",
+    "registrationAvailability", "registrationCloseAt", "registrationOpenAt", "startDatetime", "title",
+  ];
+  const EVENT_FIELDS = [...DISCOVERY_DETAIL_FIELDS, "attendeeStatus", "detailsWithheld"].sort();
+
+  test("withholds a cancelled event's details from its waitlisted attendee and hides it from everyone else", async () => {
+    const eventId = await createEvent("Cancelled Details", { status: "CANCELLED" });
+    await createRegistration("attendee", eventId, "WAITLISTED");
+
+    const mine = await call("get", `/api/registrations/mine/${eventId}`, "attendee");
+    expect(mine.status).toBe(200);
+    expect(Object.keys(mine.body).sort()).toEqual(["event", "myRegistration"]);
+    expect(Object.keys(mine.body.event).sort()).toEqual(EVENT_FIELDS);
+    expect(mine.body.event).toMatchObject({
+      eventId,
+      attendeeStatus: "CANCELLED",
+      detailsWithheld: true,
+      description: null,
+      startDatetime: null,
+      endDatetime: null,
+      location: null,
+      organisationName: null,
+    });
+    expect(mine.body.myRegistration).toEqual({ status: "WAITLISTED", registeredAt: expect.any(String) });
+    expect(JSON.stringify(mine.body)).not.toContain("Internal planning purpose");
+
+    expect((await call("get", `/api/registrations/mine/${eventId}`, "attendeeTwo")).status).toBe(404);
+    // Discovery keeps its own rules: a cancelled event is not discoverable.
+    expect((await call("get", `/api/events/discovery/${eventId}`, "attendee")).status).toBe(404);
+  });
+
+  test("withholds details while an event is back in planning", async () => {
+    const eventId = await createEvent("Planning Details", { status: "PLANNING" });
+    await createRegistration("attendee", eventId);
+
+    const res = await call("get", `/api/registrations/mine/${eventId}`, "attendee");
+    expect(res.status).toBe(200);
+    expect(res.body.event).toMatchObject({ attendeeStatus: "PENDING_CONFIRMATION", detailsWithheld: true, startDatetime: null });
+    expect(res.body.myRegistration.status).toBe("REGISTERED");
+  });
+
+  test("shows a past confirmed event to its registrant only", async () => {
+    const eventId = await createEvent("Past Details", { startsInHours: -5 });
+    await createRegistration("attendee", eventId, "REGISTERED", 10);
+
+    const mine = await call("get", `/api/registrations/mine/${eventId}`, "attendee");
+    expect(mine.status).toBe(200);
+    expect(mine.body.event).toMatchObject({
+      attendeeStatus: "CONFIRMED",
+      detailsWithheld: false,
+      description: "Public description for Past Details",
+      startDatetime: expect.any(String),
+    });
+    expect((await call("get", `/api/registrations/mine/${eventId}`, "attendeeTwo")).status).toBe(404);
+    expect((await call("get", `/api/events/discovery/${eventId}`, "attendee")).status).toBe(404);
+  });
+
+  test("answers 404 once the registration is withdrawn", async () => {
+    const eventId = await createEvent("Withdrawn Details");
+    await createRegistration("attendee", eventId, "WITHDRAWN");
+    const res = await call("get", `/api/registrations/mine/${eventId}`, "attendee");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "Event request not found.", code: "EVENT_NOT_FOUND" });
+  });
+
+  test("[SPM-34] leaves the discovery detail exactly as on main for a registered attendee", async () => {
+    const eventId = await createEvent("Discoverable Details");
+    await createRegistration("attendee", eventId);
+    const res = await call("get", `/api/events/discovery/${eventId}`, "attendee");
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body.event).sort()).toEqual([...DISCOVERY_DETAIL_FIELDS].sort());
+  });
 });
 
 describe("SPM-158 reminders (rolled back)", () => {
