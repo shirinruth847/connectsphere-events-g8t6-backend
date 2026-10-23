@@ -16,7 +16,6 @@ const get = (path) => request(app).get(path).set("Authorization", "Bearer token"
 
 const bookingItem = {
   bookingId: 110,
-  bookingReference: "VB-000110",
   label: "Plenary hall",
   status: "PENDING",
   statusLabel: "Pending",
@@ -73,7 +72,7 @@ describe("GET /api/venues/bookings", () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ bookings: [bookingItem], hasMore: false, pendingCount: 1 });
     expect(venueModel.findVenueBookings).toHaveBeenCalledWith({
-      status: null, venueId: null, eventId: null, from: null, to: null, limit: 100,
+      status: null, venueId: null, eventId: null, from: null, to: null, limit: 100, q: null, sort: "default", order: "asc",
     });
   });
 
@@ -90,6 +89,9 @@ describe("GET /api/venues/bookings", () => {
       from: "2026-11-03T16:00:00.000Z",
       to: "2026-11-04T16:00:00.000Z",
       limit: 100,
+      q: null,
+      sort: "default",
+      order: "asc",
     });
   });
 

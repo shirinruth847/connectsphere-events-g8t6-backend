@@ -115,12 +115,13 @@ Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-che
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
-| `GET /api/venues/manage` | `?search=` (name), `?location=` (address), `?status=ACTIVE\|INACTIVE\|UNDER_MAINTENANCE`, `?limit=1..100` (default 50), `?offset=` | `200 { venues: [venue], nextOffset }`, ordered by name; every status, deleted venues excluded | `400 VALIDATION_FAILED` |
+| `GET /api/venues/manage` | `?search=` (name), `?location=` (address), `?status=ACTIVE\|INACTIVE\|UNDER_MAINTENANCE`, `?sort=name\|capacity\|updatedAt\|setupMinutes\|turnaroundMinutes` (default `name`), `?order=asc\|desc`, `?limit=1..100` (default 50), `?offset=` | `200 { venues: [venue + setupMinutes, turnaroundMinutes, coverPhotoId], nextOffset, detailsAvailable, sortNotChecked }`; every status, deleted venues excluded | `400 VALIDATION_FAILED` |
+| `GET /api/venues/manage/options` | — | `200 { venues: [{ venueId, name, status }] }`: every venue not deleted, by name, for filters and pickers | `401`, `403` |
 | `GET /api/venues/:venueId` | — | `200 { venue, details, detailStatus }`; `details` holds the MongoDB document's editable fields plus `version` and `updatedAt` (version `0` when no document exists), or is `null` with `detailStatus: "NOT_CHECKED"` when MongoDB is unavailable | `404 VENUE_NOT_FOUND` |
 | `POST /api/venues` | `{ name, address, maxCapacity, contactPerson, contactEmail, contactNumber, status?, statusReason? }` | `201 { message, venue }`, status `ACTIVE` unless sent | `400 VALIDATION_FAILED` with `fields`, `409 VENUE_NAME_TAKEN` |
 | `PUT /api/venues/:venueId` | Changed details plus the `version` loaded | `200 { message, venue, changed }` | `400`, `404`, `409 VENUE_NAME_TAKEN`, `409 VENUE_VERSION_CONFLICT` |
 | `PUT /api/venues/:venueId/status` | `{ status, reason?, version, confirmUpcomingBookings? }` | `200 { message, venue, changed, upcomingBookings }` | `400`, `404`, `409 VENUE_VERSION_CONFLICT`, `409 VENUE_HAS_UPCOMING_BOOKINGS` with `upcomingBookings` and `firstStart` |
-| `PUT /api/venues/:venueId/details` | Changed MongoDB fields (`description`, `facilities`, `accessibilityFeatures`, `supportedLayouts`, `emergencyAccess`, `knownRestrictions`, `setupMinutes`, `turnaroundMinutes`) plus the details `version` loaded (`0` for a venue without details) | `200 { message, details, changed }` | `400 VALIDATION_FAILED`, `404`, `409 VENUE_DETAILS_VERSION_CONFLICT`, `409 VENUE_HAS_FUTURE_COMMITMENTS` with `commitments: [{ type, bookingReference?, requestId, status, start, end }]`, `503 VENUE_DETAILS_UNAVAILABLE` |
+| `PUT /api/venues/:venueId/details` | Changed MongoDB fields (`description`, `facilities`, `accessibilityFeatures`, `supportedLayouts`, `emergencyAccess`, `knownRestrictions`, `setupMinutes`, `turnaroundMinutes`) plus the details `version` loaded (`0` for a venue without details) | `200 { message, details, changed }` | `400 VALIDATION_FAILED`, `404`, `409 VENUE_DETAILS_VERSION_CONFLICT`, `409 VENUE_BUFFERS_LOCKED` with field messages, `503 VENUE_DETAILS_UNAVAILABLE` |
 
 `venue` is `{ venueId, name, address, maxCapacity, status, statusReason, contactPerson, contactEmail, contactNumber, version, createdAt, updatedAt, createdBy, updatedBy }`, where `createdBy` and `updatedBy` are `{ userId, name }` or `null` for venues older than SPM-73.
 
@@ -129,15 +130,33 @@ Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-che
 - **Upcoming bookings:** taking a venue out of service while it has upcoming `PENDING` or `APPROVED` bookings returns `409 VENUE_HAS_UPCOMING_BOOKINGS` until the request repeats with `"confirmUpcomingBookings": true`. Bookings are never changed or removed.
 - **Stale saves:** every change raises `version`. Send the one you loaded; an older one gets `409 VENUE_VERSION_CONFLICT`. A save that changes nothing keeps the version and writes no history.
 - **Audit:** create, detail updates and status changes write the venue and one `activity_log` entry (`VENUE_CREATED`, `VENUE_UPDATED` with before/after values, `VENUE_STATUS_CHANGED` with the reason) in one transaction (`create_venue`, `update_venue`, `set_venue_status`). Entries are `STAFF_ONLY` and never appear in event history.
-- **MongoDB details (Master 1.2, T27):** `PUT …/details` writes `venue_details` directly through `venueDetailModel.js`, only while its `version` still matches, then appends a `VENUE_DETAILS_UPDATED` `activity_log` entry (`STAFF_ONLY`, before/after values). Lists are trimmed and de-duplicated (facilities, accessibility and restrictions up to 50 entries, layouts up to 20); minutes are whole numbers from 0 to 1440. Setup or turnaround changes are refused while a `PENDING`/`APPROVED` booking or an unexpired active hold still occupies the venue in the future, and the response lists them (Master 5.4.1). A new venue is created `ACTIVE`; until its details have setup/turnaround minutes it cannot receive holds or bookings. Venue deletion is SPM-210.
+- **MongoDB details (Master 1.2, T27):** `PUT …/details` writes `venue_details` directly through `venueDetailModel.js`, only while its `version` still matches, then appends a `VENUE_DETAILS_UPDATED` `activity_log` entry (`STAFF_ONLY`, before/after values). Lists are trimmed and de-duplicated (facilities, accessibility and restrictions up to 50 entries, layouts up to 20); minutes are whole numbers from 0 to 1440. Setup and turnaround times are each set once (zero counts as set) and can never be changed afterwards; a change answers `409 VENUE_BUFFERS_LOCKED` (Master 5.4.1, T16). The MongoDB write re-checks that the field is still empty, so two simultaneous first saves cannot both succeed. A new venue is created `ACTIVE`; until its details have setup/turnaround minutes it cannot receive holds or bookings. Venue deletion is SPM-210.
+
+### Venue Photo Gallery (T28, SPM-181)
+
+Venue Staff only (`401` without a token, `403` for every other role). Photos live in MongoDB `venue_photos` (Master 6.4); the venue must exist and not be deleted, otherwise `404 VENUE_NOT_FOUND`. MongoDB down answers `503 VENUE_PHOTOS_UNAVAILABLE`.
+
+| Method & path | Input | Success | Errors |
+| --- | --- | --- | --- |
+| `GET /api/venues/:venueId/photos` | — | `200 { photos: [{ photoId, position, caption, contentType, size, uploadedAt, updatedAt, version }] }` in gallery order; position `0` is the cover | `404`, `503` |
+| `GET /api/venues/:venueId/photos/:photoId` | — | `200` image bytes with the stored `Content-Type` and `X-Content-Type-Options: nosniff` | `404 PHOTO_NOT_FOUND`, `503` |
+| `POST /api/venues/:venueId/photos` | Raw image body (`Content-Type: image/jpeg`, `image/png` or `image/webp`), optional `?caption=` (≤ 200) | `201 { message, photo }`, added last | `400` (empty body, caption), `413 PAYLOAD_TOO_LARGE` (over 2 MB), `415 UNSUPPORTED_MEDIA_TYPE`, `409 PHOTO_LIMIT_REACHED` (20 per venue) |
+| `PUT /api/venues/:venueId/photos/:photoId` | JSON `{ caption?, position? }` (position 0–19; past the end means last) | `200 { message, photo }`; the others shift to make room | `400 VALIDATION_FAILED`, `404` |
+| `PUT /api/venues/:venueId/photos/:photoId/image` | Raw image body, as for upload | `200 { message, photo }`; caption and position kept | `400`, `404`, `413`, `415` |
+| `DELETE /api/venues/:venueId/photos/:photoId` | — | `200 { message }`; later photos move up, so the next one becomes the cover | `404` |
+
+- **Type check:** the type is read from the file's own bytes (JPEG, PNG or WebP signature); a body that is not one of these is refused `415` whatever its `Content-Type` said, so HTML or SVG can never be served back.
+- **Storage:** `model/venuePhotoModel.js` is the only file that touches `venue_photos`. Positions are renumbered 0..n-1 after every change. Two uploads that race past the 20-photo count are resolved after insert: the later one is removed and answers `409`.
+- **Audit:** each change appends a `STAFF_ONLY` `activity_log` entry (`VENUE_PHOTO_ADDED`, `VENUE_PHOTO_UPDATED`, `VENUE_PHOTO_REPLACED`, `VENUE_PHOTO_DELETED`) after the MongoDB write; if the append fails, the change stands and the failure is logged.
+- **Cover:** `GET /api/venues/manage` rows carry `coverPhotoId` (the first photo, or `null`; `null` for every row when MongoDB is down).
 
 ### Venue Availability Calendar (SPM-74)
 
 | Method & path | Access | Input | Success | Errors |
 | --- | --- | --- | --- | --- |
-| `GET /api/venues/availability` | `COORDINATOR`, `VENUE_STAFF`; Coordinator Leads and every other role get `403` | `from`, `to` (ISO 8601 with offset, at most 31 days apart); optional `venueId` (repeated or comma-separated, up to 20; default every active venue); optional `checkStart` and `checkEnd` (a proposed booking window) | `200 { from, to, generatedAt, venues: [{ venueId, name, address, status, operatingHours, setupMinutes, turnaroundMinutes, buffersRecorded, entries, overlaps, freePeriods, summary, summaryLabel, check }] }` | `400 VALIDATION_FAILED`, `401`, `403`, `503 AVAILABILITY_UNAVAILABLE` |
+| `GET /api/venues/availability` | `COORDINATOR`, `VENUE_STAFF`; Coordinator Leads and every other role get `403` | `from`, `to` (ISO 8601 with offset, at most 366 days apart, so the calendar's year view loads in one request); optional `venueId` (repeated or comma-separated, up to 20; default every active venue); optional `checkStart` and `checkEnd` (a proposed booking window) | `200 { from, to, generatedAt, venues: [{ venueId, name, address, status, operatingHours, setupMinutes, turnaroundMinutes, buffersRecorded, entries, overlaps, freePeriods, summary, summaryLabel, check }] }` | `400 VALIDATION_FAILED`, `401`, `403`, `503 AVAILABILITY_UNAVAILABLE` |
 
-- **Entries** merge PostgreSQL `PENDING`/`APPROVED` bookings with MongoDB `venue_calendar` holds and blocks. Each has a `type` (`BOOKING`, `HOLD`, `BLOCK`), a backend `label` ("Confirmed booking", "Pending booking request", "Active hold", "Expired hold", "Operational block"), the booked `start`/`end` and the `occupiedStart`/`occupiedEnd` including setup and turnaround, `blocking`, references (`bookingReference`, `requestId`), `holdExpiresAt`, block `reason`/`reasonLabel`/`note` and an `operatingHoursWarning`.
+- **Entries** merge PostgreSQL `PENDING`/`APPROVED` bookings with MongoDB `venue_calendar` holds and blocks. Each has a `type` (`BOOKING`, `HOLD`, `BLOCK`), a backend `label` ("Confirmed booking", "Pending booking request", "Active hold", "Expired hold", "Operational block"), the booked `start`/`end` and the `occupiedStart`/`occupiedEnd` including setup and turnaround, `blocking`, references (`bookingId`, `requestId`), `holdExpiresAt`, block `reason`/`reasonLabel`/`note` and an `operatingHoursWarning`.
 - **Event titles:** Venue Staff see them; a coordinator sees only the titles of events assigned to them. Everyone sees the references.
 - **Rules (Master 5.4, `model/venueConflictModel.js`):** ranges are half-open, so adjacent periods never conflict and a one-second overlap does. A booking occupies `[start − setupMinutes, end + turnaroundMinutes)`. A hold past `holdExpiresAt` is expired at read time and never blocks. Operating hours (`HH:MM-HH:MM`, Singapore time) only produce warnings. `summary` is `AVAILABLE` or the first of `UNAVAILABLE_BOOKING`, `UNAVAILABLE_HOLD`, `UNAVAILABLE_BLOCK` found in the range; `check` reports `availability` (which can also be `AVAILABLE_WITH_WARNING`), `canRequest` and the conflicting entries for the proposed window.
 - **MongoDB unavailable:** the request answers `503 AVAILABILITY_UNAVAILABLE`; no venue is ever shown as available from partial data.
@@ -145,7 +164,8 @@ Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-che
 
 #### MongoDB scripts
 
-- `npm run mongo:migrate` applies `mongodb/migrations/0002_venue_calendar`: it adds the minutes and `version` to the `venue_details` validator and creates `venue_calendar` with its validator and index.
+- `npm run mongo:migrate` applies `mongodb/migrations/0003_venue_photos` (the `venue_photos` collection, validator and `venue_position` index; applied to `connectsphere_dev` on 2026-10-21) and, before it, `0002_venue_calendar`: it adds the minutes and `version` to the `venue_details` validator and creates `venue_calendar` with its validator and index.
+- `npm run seed:venue-photos` downloads free Unsplash photos (Unsplash License, no attribution required) into `venue_photos` for the ten non-test venues, two or three each chosen to match the venue, tagged `fixture: "spm181-unsplash"`; a venue that already has photos is skipped. `npm run seed:venue-photos:cleanup` removes only those documents. The list of photos and their sources is in `mongodb/seed/venuePhotoSeed.js`.
 - `npm run seed:venue-calendar` copies the legacy `setup_turnaround_min` into `venue_details` (as both minutes; `[seed:dev] Grand Hall` gets 30/45 for SPM-74 TC3) and adds holds and blocks tagged `fixture: "spm74-dev"`. `npm run seed:venue-calendar:cleanup` removes only those calendar fixtures.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
@@ -156,14 +176,16 @@ Venue Staff review the venue booking requests that coordinators raise. Every rou
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
-| `GET /api/venues/bookings` | Optional `?status=PENDING\|APPROVED\|REJECTED\|CANCELLED`, `venueId`, `eventId`, `from` and `to` (ISO 8601 with offset, both or neither, at most 31 days apart), `limit=1..200` (default 100). Any other parameter is rejected | `200 { bookings: [{ bookingId, bookingReference, label, status, statusLabel, venueId, venueName, startDatetime, endDatetime, expectedAttendance, submittedAt, event: { eventId, requestId, title, status, eventType, eventTypeLabel } }], hasMore, pendingCount }`, soonest booking first | `400 VALIDATION_FAILED` with `fields` |
+| `GET /api/venues/bookings` | Optional `?status=PENDING\|APPROVED\|REJECTED\|CANCELLED`, `venueId`, `eventId`, `from` and `to` (ISO 8601 with offset, both or neither, at most 31 days apart), `q` (search, at most 100 characters), `sort=default\|date\|attendance\|lastEdited\|alphabetical`, `order=asc\|desc`, `limit=1..200` (default 100). Any other parameter is rejected | `200 { bookings: [{ bookingId, label, status, statusLabel, venueId, venueName, startDatetime, endDatetime, expectedAttendance, submittedAt, updatedAt, event: { eventId, requestId, title, status, eventType, eventTypeLabel } }], hasMore, pendingCount }`; by default pending requests first, then the soonest booking | `400 VALIDATION_FAILED` with `fields` |
 | `GET /api/venues/bookings/:bookingId` | — | `200 { booking, event, otherBookings }`: the booking with its venue, layout, required facilities, accessibility and special requirements; the event's venue-relevant details and `coordinatorName`; the other bookings under the same event with venue and status | `404 BOOKING_NOT_FOUND` |
 | `GET /api/venues/bookings/events/:eventId` | — | `200 { event, bookings }`: every booking under the event, each with its own status | `404 EVENT_NOT_FOUND` (no bookings, missing, or a draft) |
 
 - **Date filter:** `from`/`to` select bookings whose window overlaps `[from, to)`. The frontend sends the Singapore calendar day it shows.
 - **`pendingCount`** is the number of `PENDING` bookings regardless of filters, so the dashboard can say "No pending booking requests."
 - **What Venue Staff see of an event:** title, type, purpose, description, schedule, attendance, preferred layout, accessibility needs, organisation name and coordinator name. No participant data, organiser contact details, clarifications or history (Master section 4.2).
-- **Schema:** migration `20261020070631_spm181_venue_booking_details` adds `venue_booking.booking_reference` (generated `VB-000123`, unique), `label`, `expected_attendance`, `layout_type`, `required_facilities`, `accessibility_requirements` and `special_requirements`, backfilling attendance from the event and layout from the booked room, plus a nullable `event.event_type` (`CONFERENCE`, `WORKSHOP`, `SEMINAR`, `NETWORKING`, `SOCIAL`, `TRAINING`, `OTHER`). The organiser form does not collect the event type yet. `supabase/seed/spm181_venue_booking_details.sql` fills these fields for the existing mock bookings.
+- **Search and sort (SPM-181 follow-up):** `q` matches a booking ID (`110` or `#110`), a request reference (`REQ-000442`), the booking label, the event title or the venue name, case-insensitively and literally. `sort=default` puts `PENDING` first (the `booking_status` enum order), then the soonest booking; the other sorts order by `start_datetime`, `expected_attendance`, `updated_at` or the event title, with missing values last. "Last opened" is per viewer and sorted by the browser.
+- **Booking reference:** the booking's own `booking_id`; migration `20261021090000_spm181_booking_id_and_updated_at` dropped the generated `booking_reference` column and added `updated_at`, kept current by the `venue_booking_touch_updated_at` trigger.
+- **Schema:** migration `20261020070631_spm181_venue_booking_details` added `label`, `expected_attendance`, `layout_type`, `required_facilities`, `accessibility_requirements` and `special_requirements`, backfilling attendance from the event and layout from the booked room, plus a nullable `event.event_type` (`CONFERENCE`, `WORKSHOP`, `SEMINAR`, `NETWORKING`, `SOCIAL`, `TRAINING`, `OTHER`). The organiser form does not collect the event type yet. `supabase/seed/spm181_venue_booking_details.sql` fills these fields for the existing mock bookings.
 
 ### Submission guarantees (SPM-36)
 
@@ -421,6 +443,7 @@ connectsphere-events-g8t6-backend/
 │   ├── venueCalendarModel.js # MongoDB venue_calendar (holds, blocks)
 │   ├── venueConflictModel.js # Occupied ranges, conflicts, availability calendar
 │   ├── venueDetailModel.js # MongoDB venue_details reads and writes
+│   ├── venuePhotoModel.js  # MongoDB venue_photos (gallery, covers)
 │   └── venueModel.js       # Catalogue, maintenance, availability, booking review
 ├── mongodb/
 │   ├── migrate.js        # Applies numbered scripts once (npm run mongo:migrate)
@@ -445,6 +468,7 @@ connectsphere-events-g8t6-backend/
 │   ├── eventValidator.js
 │   ├── venueAvailabilityValidator.js # SPM-74 calendar query
 │   ├── venueBookingValidator.js # SPM-181 booking filters
+│   ├── venuePhotoValidator.js # T28 image type, size, caption and position
 │   └── venueValidator.js # SPM-73 venue fields, details, status, catalogue and list filters
 ├── COMMIT_MESSAGES.md    # Commit message SOP standards
 ├── README.md             # Backend documentation

@@ -1,5 +1,6 @@
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/venueDetailModel", () => ({ getVenueDetailsByIds: jest.fn() }));
+jest.mock("../../model/venuePhotoModel", () => ({ findCoverPhotoIds: jest.fn().mockResolvedValue(new Map()) }));
 
 const supabase = require("../../config/supabase");
 const venueModel = require("../../model/venueModel");
@@ -86,8 +87,13 @@ describe("listManagedVenues", () => {
         updatedAt: "2026-10-19T03:00:00+00:00",
         createdBy: { userId: 31, name: "Venue Staff A" },
         updatedBy: { userId: 31, name: "Venue Staff A" },
+        setupMinutes: null,
+        turnaroundMinutes: null,
+        coverPhotoId: null,
       }],
       nextOffset: null,
+      detailsAvailable: false,
+      sortNotChecked: false,
     });
   });
 
