@@ -342,6 +342,11 @@ const cleanupManifest = async (manifest) => {
   await deleteIn("event_venue_preference", "event_id", eventIds);
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);
+  // Venues and equipment before users: venue.created_by and updated_by reference
+  // the fixture user who made them (SPM-73), so retiring users first is refused.
+  await deleteIn("room", "room_id", manifest.roomIds);
+  await deleteIn("venue", "venue_id", manifest.venueIds);
+  await deleteIn("equipment", "equipment_id", manifest.equipmentIds || []);
   await deleteIn("organisation_membership", "user_id", manifest.userIds);
   if (manifest.userIds.length && process.env.TEST_DATABASE_URL) {
     const { count, error } = await supabase.from("activity_log").select("log_id", { count: "exact", head: true }).in("user_id", manifest.userIds);
@@ -349,9 +354,6 @@ const cleanupManifest = async (manifest) => {
     if (count) await require("./adminCleanup").deleteFixtureAudit(manifest);
   }
   await retireUsers(manifest.userIds);
-  await deleteIn("room", "room_id", manifest.roomIds);
-  await deleteIn("venue", "venue_id", manifest.venueIds);
-  await deleteIn("equipment", "equipment_id", manifest.equipmentIds || []);
   await deleteIn("organisation", "organisation_id", manifest.organisationIds);
   for (const authUserId of manifest.authUserIds) {
     const { error } = await supabase.auth.admin.deleteUser(authUserId);
