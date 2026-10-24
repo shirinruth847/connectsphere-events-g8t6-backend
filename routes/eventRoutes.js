@@ -25,6 +25,10 @@ const {
   startPreparation,
   completeEvent,
 } = require("../controller/eventController");
+const {
+  getEventVenueOptions,
+  suggestEventVenue,
+} = require("../controller/venueController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
 const { validateCursorPagination } = require("../middleware/validate");
@@ -66,6 +70,12 @@ router.post("/:id/submit-for-safety-review", assignedCoordinatorOnly, submitForS
 router.post("/:id/confirm", assignedCoordinatorOnly, confirmEvent);
 router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation);
 router.post("/:id/complete", assignedCoordinatorOnly, completeEvent);
+// Venue section of the event (SPM-72/74): the assigned coordinator and the
+// supervising Lead browse; only the coordinator suggests a venue. Photos are
+// read through GET /api/venues/options/:venueId/photos.
+const eventVenueReaders = [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD), requireVisibleEvent];
+router.get("/:id/venue-options", ...eventVenueReaders, getEventVenueOptions);
+router.put("/:id/venue-suggestion", ...coordinatorOnly, requireVisibleEvent, suggestEventVenue);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);

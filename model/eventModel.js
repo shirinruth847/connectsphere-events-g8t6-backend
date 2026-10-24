@@ -35,10 +35,13 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested),venue_suggestion:event_venue_suggestion(venue_id,suggested_at,version,venue(name,address,max_capacity),suggester:user(name))";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
+// A Lead's scope comes from the open assignment row (SPM-72/74).
+const SUPERVISION_SELECT = `${COORDINATION_SELECT},event_assignments(assigned_by,ended_at)`;
+const SUPERVISION_CLOSED_STATUSES = ["DRAFT", "COMPLETED", "REJECTED", "CANCELLED"];
 const LIST_SELECT =
   "event_id,title,status,previously_confirmed,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 const UNASSIGNED_QUEUE_SELECT =
@@ -180,23 +183,43 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
 // The event as one signed-in user may see it (SPM-33 AC1). "access" comes from
 // getEventAccess; permissions tell the interface which controls to offer and are
 // enforced again on every save.
+// The coordinator's venue suggestion (SPM-72/74). Organiser-safe: it names a
+// venue the organiser could see in their own request form.
+const toVenueSuggestion = (suggestion) => {
+  const row = Array.isArray(suggestion) ? suggestion[0] : suggestion;
+  if (!row) return null;
+  return {
+    venueId: row.venue_id,
+    name: row.venue?.name ?? null,
+    address: row.venue?.address ?? null,
+    maxCapacity: row.venue?.max_capacity ?? null,
+    suggestedAt: row.suggested_at,
+    suggestedBy: row.suggester?.name ?? null,
+    version: row.version,
+  };
+};
+
+const STAFF_RELATIONSHIPS = [EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR, EVENT_RELATIONSHIP.SUPERVISING_LEAD];
+
 const toEventView = (row, user, access) => ({
   ...toApi(row, user.user_id, {
-    includeStoredStatus: access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR,
+    includeStoredStatus: STAFF_RELATIONSHIPS.includes(access.relationship),
   }),
-  ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
+  ...(STAFF_RELATIONSHIPS.includes(access.relationship)
     ? {
         coordinatorId: row.coordinator_id,
         organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
         ...(row.arrangement_version === undefined ? {} : { arrangementVersion: row.arrangement_version }),
       }
     : {}),
+  ...(row.venue_suggestion === undefined ? {} : { venueSuggestion: toVenueSuggestion(row.venue_suggestion) }),
   viewerRelationship: access.relationship,
   permissions: {
     canEdit: access.canEdit,
     editableFields: access.editableFields,
     canViewDraftHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.OWNER_ONLY),
     canViewStaffHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.STAFF_ONLY),
+    canSuggestVenue: access.canSuggestVenue === true,
   },
 });
 
@@ -543,7 +566,20 @@ const buildOrganiserVisibilityFilter = (user) => {
 // One read for every role (SPM-33 AC1, SPM-180 AC3): returns the row only when it is
 // inside the user's viewing scope, so callers answer "not found" for everything else.
 // Venue Staff, Technical Support, Leads and attendees have no scope through this view.
+// Same scope as list_lead_event_assignments: the Lead made the open assignment,
+// or it predates supervision (no assigning Lead, T23), and the event is active.
+const isSupervisedBy = (row, leadId) => {
+  if (row.coordinator_id == null || SUPERVISION_CLOSED_STATUSES.includes(row.status)) return false;
+  const open = (row.event_assignments || []).find((assignment) => assignment.ended_at == null);
+  return !open || open.assigned_by == null || open.assigned_by === leadId;
+};
+
 const findVisibleEvent = async (eventId, user) => {
+  if (user.role === "COORDINATOR_LEAD") {
+    const { data, error } = await supabase.from("event").select(SUPERVISION_SELECT).eq("event_id", eventId).maybeSingle();
+    if (error) throw dbError(error);
+    return data && isSupervisedBy(data, user.user_id) ? { ...data, supervising_lead_id: user.user_id } : null;
+  }
   const select = user.role === "COORDINATOR" ? COORDINATION_SELECT : EVENT_SELECT;
   let query = supabase.from("event").select(select).eq("event_id", eventId);
   if (user.role === "COORDINATOR") {

@@ -9,6 +9,7 @@ const {
   EVENT_FIELD_GROUPS,
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,
+  VENUE_SUGGESTION_STATUSES,
 } = require("../config/eventConstants");
 
 // History audiences each relationship may read (SPM-33 AC8). Only the owner sees
@@ -51,6 +52,10 @@ const getEventRelationship = (user, event) => {
     const isAssigned = event.coordinator_id != null && event.coordinator_id === user.user_id;
     return isAssigned && event.status !== EVENT_STATUS.DRAFT ? EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR : null;
   }
+  // findVisibleEvent only returns an event to the Lead who supervises it.
+  if (user.role === USER_ROLES.COORDINATOR_LEAD) {
+    return event.supervising_lead_id === user.user_id ? EVENT_RELATIONSHIP.SUPERVISING_LEAD : null;
+  }
   return null;
 };
 
@@ -71,6 +76,9 @@ const getEventAccess = (user, event) => {
     canEdit: editableFields.length > 0,
     editableFields: [...editableFields],
     historyAudiences: [...(HISTORY_AUDIENCES[relationship] || [])],
+    // The suggestion RPC re-checks the coordinator and status under the event lock.
+    canSuggestVenue:
+      relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR && VENUE_SUGGESTION_STATUSES.includes(event.status),
   };
 };
 
@@ -79,6 +87,7 @@ const getEventAccess = (user, event) => {
 const getEditDenial = (access, event) => {
   if (access.canEdit) return null;
   if (access.relationship === EVENT_RELATIONSHIP.ORGANISATION_MEMBER) return "EVENT_READ_ONLY";
+  if (access.relationship === EVENT_RELATIONSHIP.SUPERVISING_LEAD) return "EVENT_READ_ONLY";
   if (access.relationship === EVENT_RELATIONSHIP.OWNER && !CLOSED_STATUSES.includes(event.status)) {
     return "EDIT_REQUIRES_CHANGE_REQUEST";
   }

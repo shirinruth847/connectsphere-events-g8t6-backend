@@ -168,6 +168,7 @@ describe("GET /api/venues/:venueId details (SPM-73)", () => {
 
 describe("GET /api/venues search and filters (SPM-72 catalogue)", () => {
   const get = (query) => request(app).get(`/api/venues?${query}`).set("Authorization", "Bearer token");
+  beforeEach(() => as("VENUE_STAFF"));
 
   test("should_pass_the_filters_to_the_model", async () => {
     const response = await get("search=%20Hall%20&minCapacity=100&layout=Theater&facility=Stage&accessibility=Lift");

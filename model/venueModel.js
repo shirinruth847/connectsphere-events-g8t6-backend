@@ -6,7 +6,7 @@ const venuePhotoModel = require("./venuePhotoModel");
 const activityModel = require("./activityModel");
 const { VENUE_STATUS } = require("../config/venueConstants");
 const { MESSAGES } = require("../validators/venueValidator");
-const { formatRequestId, parseAccessibility } = require("./eventModel");
+const { formatRequestId, parseAccessibility, hashRequest } = require("./eventModel");
 const { EVENT_STATUS, EVENT_TYPE_LABELS, VENUE_BOOKING_STATUS_LABELS } = require("../config/eventConstants");
 
 const VENUE_SELECT = `venue_id,name,address,max_capacity,operating_hours,accessibility_features,setup_turnaround_min,rooms:room(room_id,layout_type,capacity)`;
@@ -76,6 +76,8 @@ const getVenueCatalogue = async (filters = {}) => {
     .eq("status", VENUE_STATUS.ACTIVE);
   if (filters.search) query = query.or(orIlike(["name", "address"], filters.search));
   if (filters.minCapacity) query = query.gte("max_capacity", filters.minCapacity);
+  // Internal only: the venues an event's organiser chose (SPM-72).
+  if (filters.venueIds) query = query.in("venue_id", filters.venueIds);
   const { data, error } = await query
     .order("name", { ascending: true })
     .order("venue_id", { ascending: true });
@@ -512,7 +514,9 @@ const BUFFER_MARGIN_MS = 24 * 60 * 60 * 1000;
 const canSeeEventTitle = (viewer, event) =>
   viewer.role === "VENUE_STAFF" || (event?.coordinator_id != null && event.coordinator_id === viewer.user_id);
 
-const getVenueAvailability = async ({ from, to, venueIds = [], check = null }, viewer) => {
+// excludeEventId (internal only) leaves out one event's own bookings and holds,
+// so an event's venue options never conflict with the event itself.
+const getVenueAvailability = async ({ from, to, venueIds = [], check = null, excludeEventId = null }, viewer) => {
   let venueQuery = supabase.from("venue").select(AVAILABILITY_VENUE_SELECT).eq("is_active", true);
   venueQuery = venueIds.length ? venueQuery.in("venue_id", venueIds) : venueQuery.eq("status", VENUE_STATUS.ACTIVE);
   const { data: venueRows, error: venueListError } = await venueQuery
@@ -571,7 +575,7 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null }, v
         turnaroundMinutes: document?.turnaroundMinutes ?? null,
       };
       const bookings = (bookingRows || [])
-        .filter((booking) => booking.room.venue_id === row.venue_id)
+        .filter((booking) => booking.room.venue_id === row.venue_id && booking.event_id !== excludeEventId)
         .map((booking) => ({
           bookingId: booking.booking_id,
           status: booking.status,
@@ -582,7 +586,7 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null }, v
           eventTitle: canSeeEventTitle(viewer, booking.event) ? booking.event.title : null,
         }));
       const entries = calendarEntries
-        .filter((entry) => entry.venueId === row.venue_id)
+        .filter((entry) => entry.venueId === row.venue_id && (excludeEventId == null || String(entry.eventId) !== String(excludeEventId)))
         .map((entry) => {
           const event = entry.eventId ? holdEvents.get(entry.eventId) : null;
           return {
@@ -603,6 +607,302 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null }, v
       };
     }),
   };
+};
+
+// ---------- event venue options (SPM-72/74) ----------
+
+// Each requirement the event states is MET, UNMET or NOT_CHECKED (MongoDB could
+// not be read, Master M4). Matching is advisory, like search (Master 5.4); the
+// booking decision rechecks everything that blocks.
+const REQUIREMENT_STATUS = Object.freeze({ MET: "MET", UNMET: "UNMET", NOT_CHECKED: "NOT_CHECKED" });
+const NO_LAYOUT_PREFERENCE = "NO_PREFERENCE";
+// Words too common to show that a venue meets a need on their own.
+const COMMON_WORDS = new Set(["and", "the", "for", "with", "access", "accessible", "accessibility", "friendly", "free", "available", "none"]);
+
+const normalise = (text) => String(text).toLowerCase().replace(/theatre/g, "theater").replace(/[^a-z0-9]+/g, " ").trim();
+
+// A need is met when any listed feature contains one of its key words, or the
+// whole need when it has none (for example "Ramp").
+const listMeets = (list, need) => {
+  const items = (list || []).map(normalise);
+  const words = normalise(need).split(" ").filter((word) => word.length >= 3 && !COMMON_WORDS.has(word));
+  const terms = words.length ? words : [normalise(need)];
+  return items.some((item) => terms.some((term) => term && item.includes(term)));
+};
+
+const toNeedList = (value) => {
+  const parsed = parseAccessibility(value);
+  const list = Array.isArray(parsed) ? parsed : [parsed];
+  return list.filter((need) => typeof need === "string" && need.trim() && normalise(need) !== "none").map((need) => need.trim());
+};
+
+const requirement = (key, label, status, detail) => ({ key, label, status, detail });
+
+// detailsRead is false when MongoDB was unavailable: PostgreSQL rooms and the
+// accessibility note can still show a need as met, but never as unmet.
+const venueRequirements = ({ venue, event, requiredFacilities, availability, detailsRead }) => {
+  const list = [];
+  const unknownUnlessMet = (met) => (met ? REQUIREMENT_STATUS.MET : detailsRead ? REQUIREMENT_STATUS.UNMET : REQUIREMENT_STATUS.NOT_CHECKED);
+
+  if (event.expected_attendance != null) {
+    const fits = venue.maxCapacity >= event.expected_attendance;
+    list.push(requirement(
+      "capacity",
+      "Capacity",
+      fits ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET,
+      `Holds ${venue.maxCapacity.toLocaleString("en-SG")}; ${event.expected_attendance.toLocaleString("en-SG")} expected`
+    ));
+  }
+
+  list.push(requirement("availability", "Availability", availability.requirementStatus, availability.detail));
+
+  const layout = event.preferred_layout_type;
+  if (layout && layout !== NO_LAYOUT_PREFERENCE) {
+    const layouts = [...(venue.supportedLayouts || []), ...venue.rooms.map((room) => room.layoutType)];
+    const met = layouts.some((item) => normalise(item) === normalise(layout));
+    list.push(requirement("layout", "Layout", unknownUnlessMet(met), `${layout} layout`));
+  }
+
+  toNeedList(event.accessibility_needs).forEach((need, index) => {
+    list.push(requirement(`accessibility-${index}`, "Accessibility", unknownUnlessMet(listMeets(venue.accessibilityFeatures, need)), need));
+  });
+
+  requiredFacilities.forEach((facility, index) => {
+    const status = detailsRead
+      ? (listMeets(venue.facilities, facility) ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET)
+      : REQUIREMENT_STATUS.NOT_CHECKED;
+    list.push(requirement(`facility-${index}`, "Facility", status, facility));
+  });
+  return list;
+};
+
+const describeConflicts = (conflicts, entries) => conflicts.map((conflict) => {
+  const entry = entries.find((item) => item.entryId === conflict.entryId) || {};
+  return {
+    type: conflict.type,
+    label: entry.label ?? conflict.type,
+    occupiedStart: conflict.occupiedStart,
+    occupiedEnd: conflict.occupiedEnd,
+    holdExpiresAt: entry.holdExpiresAt ?? null,
+    reasonLabel: entry.reasonLabel ?? null,
+  };
+});
+
+const availabilitySummary = (status, label, requirementStatus, check = null, conflicts = []) => ({
+  status,
+  label,
+  requirementStatus,
+  // The requirement chip repeats the label, kept short (SPM-72 AC6).
+  detail: label,
+  occupiedStart: check?.occupiedStart ?? null,
+  occupiedEnd: check?.occupiedEnd ?? null,
+  conflicts,
+  operatingHoursWarning: check?.operatingHoursWarning ?? null,
+});
+
+// The availability summary for one venue over the event's own window.
+// hasDates is false for an event without dates (a draft cannot reach this).
+const toOptionAvailability = (calendar, { hasDates = true } = {}) => {
+  if (!hasDates) return availabilitySummary("NO_DATES", "Enter the event date", REQUIREMENT_STATUS.NOT_CHECKED);
+  // MongoDB could not be read: never shown as available (Master 7.4 step 5).
+  if (!calendar) return availabilitySummary("NOT_CHECKED", "Error checking availability", REQUIREMENT_STATUS.NOT_CHECKED);
+  const { check } = calendar;
+  const conflicts = describeConflicts(check.conflicts, calendar.entries);
+  // A venue without setup/turnaround minutes cannot receive holds or bookings (Master 5.4.1).
+  if (!calendar.buffersRecorded) {
+    return availabilitySummary("NOT_BOOKABLE", "Not bookable yet", REQUIREMENT_STATUS.UNMET, check, conflicts);
+  }
+  return availabilitySummary(
+    check.availability,
+    check.availabilityLabel,
+    check.canRequest ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET,
+    check,
+    conflicts
+  );
+};
+
+const SORT_VALUES = Object.freeze({
+  name: (venue) => venue.name.toLowerCase(),
+  capacity: (venue) => venue.maxCapacity,
+  setup: (venue) => venue.setupMinutes,
+  turnaround: (venue) => venue.turnaroundMinutes,
+});
+
+// Venues meeting every requirement first, then fewest unmet; within a group,
+// the chosen sort (missing values last), then name.
+const compareOptions = (sort, order) => (left, right) => {
+  if (left.unmetCount !== right.unmetCount) return left.unmetCount - right.unmetCount;
+  const value = SORT_VALUES[sort];
+  if (value) {
+    const a = value(left);
+    const b = value(right);
+    if (a == null || b == null) {
+      if (a != null || b != null) return a == null ? 1 : -1;
+    } else if (a !== b) {
+      return (a < b ? -1 : 1) * (order === "desc" ? -1 : 1);
+    }
+  }
+  return left.name.localeCompare(right.name) || left.venueId - right.venueId;
+};
+
+// Each venue with its cover photo, availability over the event window and
+// requirement statuses (SPM-72/74), unsorted. `need` holds the requirements
+// in event-row shape: start_datetime, end_datetime, expected_attendance,
+// preferred_layout_type and accessibility_needs. Nothing here writes.
+const buildVenueOptions = async (catalogueVenues, need, viewer, { requiredFacilities, excludeEventId = null }) => {
+  const ids = catalogueVenues.map((venue) => venue.venueId);
+
+  let covers = new Map();
+  try {
+    covers = await venuePhotoModel.findCoverPhotoIds(ids);
+  } catch (error) {
+    console.warn("[venue-options] MongoDB photo read unavailable", { code: error.code });
+  }
+
+  const hasDates = Boolean(need.start_datetime && need.end_datetime);
+  let calendars = null;
+  if (ids.length && hasDates) {
+    try {
+      const window = { start: new Date(need.start_datetime), end: new Date(need.end_datetime) };
+      const result = await getVenueAvailability(
+        { from: window.start, to: window.end, venueIds: ids, check: window, excludeEventId },
+        viewer
+      );
+      calendars = new Map(result.venues.map((venue) => [venue.venueId, venue]));
+    } catch (error) {
+      if (error.name !== "VenueError" || error.code !== "AVAILABILITY_UNAVAILABLE") throw error;
+    }
+  }
+
+  const options = catalogueVenues.map(({ setupTurnaroundMinutes, ...venue }) => {
+    const availability = toOptionAvailability(calendars?.get(venue.venueId) ?? null, { hasDates });
+    const requirements = venueRequirements({
+      venue,
+      event: need,
+      requiredFacilities,
+      availability,
+      detailsRead: venue.detailStatus !== "NOT_CHECKED",
+    });
+    const unmetCount = requirements.filter((item) => item.status !== REQUIREMENT_STATUS.MET).length;
+    const { requirementStatus, detail, ...shownAvailability } = availability;
+    return {
+      ...venue,
+      coverPhotoId: covers.get(String(venue.venueId)) ?? null,
+      availability: shownAvailability,
+      requirements,
+      unmetCount,
+      allRequirementsMet: unmetCount === 0,
+    };
+  });
+  return { options, availabilityChecked: !hasDates || !ids.length || calendars !== null };
+};
+
+const preferredVenueIds = (event) =>
+  (Array.isArray(event.event_venue_preference) ? event.event_venue_preference : [])
+    .slice()
+    .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
+    .map((item) => item.venue_id);
+
+const findVenueNames = async (venueIds) => {
+  if (!venueIds.length) return new Map();
+  const { data, error } = await supabase.from("venue").select("venue_id,name").in("venue_id", venueIds);
+  if (error) throw error;
+  return new Map((data || []).map((row) => [row.venue_id, row.name]));
+};
+
+// Available venues for one event, with each requirement marked (SPM-72/74),
+// and the organiser's ranked choices whatever the filters (preferredVenues).
+// A choice that is no longer available keeps its rank with option null.
+// event is the visible event row; nothing here writes.
+const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities, sort, order }) => {
+  const catalogue = await getVenueCatalogue(filters);
+  const preferredIds = preferredVenueIds(event);
+  const listedIds = new Set(catalogue.venues.map((venue) => venue.venueId));
+  const unlistedIds = preferredIds.filter((venueId) => !listedIds.has(venueId));
+  const extra = unlistedIds.length ? (await getVenueCatalogue({ venueIds: unlistedIds })).venues : [];
+
+  const { options, availabilityChecked } = await buildVenueOptions([...catalogue.venues, ...extra], event, viewer, {
+    requiredFacilities,
+    excludeEventId: event.event_id,
+  });
+  const byId = new Map(options.map((option) => [option.venueId, option]));
+  const names = await findVenueNames(preferredIds.filter((venueId) => !byId.has(venueId)));
+
+  return {
+    event: {
+      eventId: event.event_id,
+      requestId: formatRequestId(event.event_id),
+      startDatetime: event.start_datetime,
+      endDatetime: event.end_datetime,
+      expectedAttendance: event.expected_attendance,
+      preferredLayoutType: event.preferred_layout_type,
+      accessibilityNeeds: toNeedList(event.accessibility_needs),
+    },
+    venues: catalogue.venues.map((venue) => byId.get(venue.venueId)).sort(compareOptions(sort, order)),
+    preferredVenues: preferredIds.map((venueId, index) => ({
+      rank: index + 1,
+      venueId,
+      name: byId.get(venueId)?.name ?? names.get(venueId) ?? null,
+      option: byId.get(venueId) ?? null,
+    })),
+    detailsAvailable: catalogue.detailsAvailable,
+    availabilityChecked,
+    filtersNotChecked: catalogue.filtersNotChecked,
+  };
+};
+
+const SUGGESTION_ERRORS = new Set([
+  "EVENT_NOT_FOUND",
+  "VENUE_SUGGESTION_NOT_ALLOWED_IN_STATUS",
+  "VENUE_NOT_SELECTABLE",
+  "VENUE_CAPACITY_TOO_SMALL",
+  "VENUE_SUGGESTION_VERSION_CONFLICT",
+  "IDEMPOTENCY_KEY_REUSED",
+]);
+
+// One transaction in suggest_event_venue: suggestion, activity_log entry and the
+// organiser's notification commit together or not at all.
+const suggestEventVenue = async ({ actorId, eventId, venueId, expectedVersion, idempotencyKey }) => {
+  const { data, error } = await supabase.rpc("suggest_event_venue", {
+    p_actor_id: actorId,
+    p_event_id: eventId,
+    p_venue_id: venueId,
+    p_expected_version: expectedVersion,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({ venueId }, {}, [eventId, expectedVersion]),
+  });
+  if (error) {
+    if (SUGGESTION_ERRORS.has(error.message)) throw venueError(error.message);
+    throw error;
+  }
+  if (!data || !data.suggestion) throw new Error("suggest_event_venue returned no suggestion.");
+  return data.suggestion;
+};
+
+// Photos of a venue coordinators and Leads can choose: only
+// available venues (Master 6.2). Venue Staff use the gallery routes (T28).
+const requireSelectableVenue = async (venueId) => {
+  const { data, error } = await supabase
+    .from("venue")
+    .select("venue_id")
+    .eq("venue_id", venueId)
+    .eq("is_active", true)
+    .eq("status", VENUE_STATUS.ACTIVE)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw venueError("VENUE_NOT_FOUND");
+};
+
+const listSelectableVenuePhotos = async (venueId) => {
+  await requireSelectableVenue(venueId);
+  return { photos: await callPhotos(() => venuePhotoModel.listPhotos(venueId)) };
+};
+
+const getSelectableVenuePhotoImage = async (venueId, photoId) => {
+  await requireSelectableVenue(venueId);
+  const image = await callPhotos(() => venuePhotoModel.getPhotoImage(venueId, photoId));
+  if (!image) throw venueError("PHOTO_NOT_FOUND");
+  return image;
 };
 
 // ---------- venue booking review (SPM-181) ----------
@@ -837,6 +1137,13 @@ module.exports = {
   replaceVenuePhotoImage,
   deleteVenuePhoto,
   getVenueAvailability,
+  getEventVenueOptions,
+  suggestEventVenue,
+  listSelectableVenuePhotos,
+  getSelectableVenuePhotoImage,
+  venueRequirements,
+  toOptionAvailability,
+  compareOptions,
   findVenueBookings,
   findEventBookings,
   findVenueBooking,

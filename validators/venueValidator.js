@@ -359,6 +359,39 @@ const validateCatalogueQuery = (query) => {
   return { filters, fields };
 };
 
+// ---------- event venue options (GET /api/events/:id/venue-options, SPM-72/74) ----------
+
+const VENUE_OPTION_SORTS = Object.freeze(["match", "name", "capacity", "setup", "turnaround"]);
+const MAX_REQUIRED_FACILITIES = 10;
+const FACILITY_TERM_LIMIT = 100;
+
+// The catalogue filters plus the coordinator's required facilities (ranked and
+// highlighted, never filtered out), sort and order.
+const validateVenueOptionsQuery = (query) => {
+  const { requiredFacilities, sort, order, ...catalogueQuery } = query;
+  const { filters, fields } = validateCatalogueQuery(catalogueQuery);
+  const options = { filters, requiredFacilities: [], sort: "match", order: "asc" };
+
+  if (requiredFacilities !== undefined) {
+    const terms = typeof requiredFacilities === "string"
+      ? requiredFacilities.split(",").map((term) => term.trim()).filter(Boolean)
+      : null;
+    if (!terms) fields.requiredFacilities = MESSAGES.textInvalid;
+    else if (terms.length > MAX_REQUIRED_FACILITIES) fields.requiredFacilities = `Enter at most ${MAX_REQUIRED_FACILITIES} facilities.`;
+    else if (terms.some((term) => term.length > FACILITY_TERM_LIMIT)) fields.requiredFacilities = `Each facility must be ${FACILITY_TERM_LIMIT} characters or fewer.`;
+    else options.requiredFacilities = [...new Set(terms)];
+  }
+  if (sort !== undefined) {
+    if (!VENUE_OPTION_SORTS.includes(sort)) fields.sort = `Sort by one of: ${VENUE_OPTION_SORTS.join(", ")}.`;
+    else options.sort = sort;
+  }
+  if (order !== undefined) {
+    if (order !== "asc" && order !== "desc") fields.order = "Order must be asc or desc.";
+    else options.order = order;
+  }
+  return { options, fields };
+};
+
 const hasErrors = (fields) => Object.keys(fields).length > 0;
 
 module.exports = {
@@ -369,6 +402,8 @@ module.exports = {
   MANAGED_VENUE_SORTS,
   validateVenueDetails,
   validateCatalogueQuery,
+  validateVenueOptionsQuery,
+  VENUE_OPTION_SORTS,
   hasErrors,
   MESSAGES,
   DETAIL_MESSAGES,
