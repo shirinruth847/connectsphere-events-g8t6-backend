@@ -10,6 +10,7 @@
 const request = require("supertest");
 const app = require("../../server");
 const supabase = require("../../config/supabase");
+const { closeMongoDb } = require("../../config/mongodb");
 const { MAX_VENUE_CAPACITY } = require("../../config/venueConstants");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
 const { newRunId, createAuthFixtures, cleanupAuthFixtures, recordFixtureIds } = require("../fixtures/authFixtures");
@@ -106,7 +107,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await cleanupAuthFixtures(runId);
+  try {
+    await cleanupAuthFixtures(runId);
+  } finally {
+    // The venue routes open MongoDB for venue details; close it so Jest can exit.
+    await closeMongoDb();
+  }
 });
 
 describe("SPM-73 venue catalogue maintenance", () => {
