@@ -76,6 +76,11 @@ const toEquipmentError = (error) => {
   return error;
 };
 
+const readData = ({ data, error }) => {
+  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  return data;
+};
+
 const callRpc = async (name, args) => {
   const { data, error } = await supabase.rpc(name, args);
   if (error) throw toEquipmentError(error);
@@ -89,8 +94,7 @@ const toPerson = (userId, names) => (userId ? { userId, name: names.get(userId) 
 const findUserNames = async (rows) => {
   const ids = [...new Set(rows.flatMap((row) => [row.created_by, row.updated_by]).filter(Boolean))];
   if (!ids.length) return new Map();
-  const { data, error } = await supabase.from("user").select("user_id,name").in("user_id", ids);
-  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  const data = readData(await supabase.from("user").select("user_id,name").in("user_id", ids));
   return new Map(data.map((user) => [user.user_id, user.name]));
 };
 
@@ -151,14 +155,13 @@ const toUnavailability = (row, names = new Map()) => ({
 const findUnavailableNow = async (equipmentIds) => {
   if (!equipmentIds.length) return new Map();
   const now = new Date().toISOString();
-  const { data, error } = await supabase
+  const data = readData(await supabase
     .from("equipment_unavailability")
     .select("equipment_id,quantity")
     .in("equipment_id", equipmentIds)
     .eq("status", UNAVAILABILITY_STATUS.ACTIVE)
     .lte("starts_at", now)
-    .gt("ends_at", now);
-  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+    .gt("ends_at", now));
   const totals = new Map();
   for (const row of data) totals.set(row.equipment_id, (totals.get(row.equipment_id) || 0) + row.quantity);
   return totals;
@@ -178,6 +181,13 @@ const toEquipmentList = async (rows) => {
   }));
 };
 
+// The columns behind each status the list can filter by (toStatus in reverse).
+const STATUS_FILTERS = Object.freeze({
+  [EQUIPMENT_STATUS.ACTIVE]: { is_active: true, details_pending: false },
+  [EQUIPMENT_STATUS.INACTIVE]: { is_active: false },
+  [EQUIPMENT_STATUS.DETAILS_PENDING]: { is_active: true, details_pending: true },
+});
+
 // LIKE treats % and _ as wildcards; escape them so a search matches literally.
 const escapeLike = (text) => text.replace(/[\\%_]/g, (character) => `\\${character}`);
 
@@ -189,16 +199,13 @@ const listEquipment = async ({ search, category, status }, { limit, offset }) =>
   let query = supabase.from("equipment").select(EQUIPMENT_SELECT);
   if (search) query = query.ilike("name", `%${escapeLike(search)}%`);
   if (category) query = query.ilike("category", escapeLike(category));
-  if (status === EQUIPMENT_STATUS.INACTIVE) query = query.eq("is_active", false);
-  if (status === EQUIPMENT_STATUS.ACTIVE) query = query.eq("is_active", true).eq("details_pending", false);
-  if (status === EQUIPMENT_STATUS.DETAILS_PENDING) query = query.eq("is_active", true).eq("details_pending", true);
+  if (STATUS_FILTERS[status]) query = query.match(STATUS_FILTERS[status]);
 
   // One extra row tells whether another page exists.
-  const { data, error } = await query
+  const data = readData(await query
     .order("name", { ascending: true })
     .order("equipment_id", { ascending: true })
-    .range(offset, offset + limit);
-  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+    .range(offset, offset + limit));
 
   const rows = data.slice(0, limit);
   return {
@@ -210,8 +217,7 @@ const listEquipment = async ({ search, category, status }, { limit, offset }) =>
 // Categories in use, for the filter. Read on demand, so a new or renamed
 // category appears in the next read.
 const listEquipmentCategories = async () => {
-  const { data, error } = await supabase.from("equipment").select("category");
-  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  const data = readData(await supabase.from("equipment").select("category"));
   const byKey = new Map();
   for (const { category } of data) {
     const key = category.toLowerCase();
@@ -221,9 +227,7 @@ const listEquipmentCategories = async () => {
 };
 
 const findEquipmentRow = async (equipmentId) => {
-  const { data, error } = await supabase.from("equipment").select(EQUIPMENT_SELECT).eq("equipment_id", equipmentId).maybeSingle();
-  if (error) throw new Error(`[Supabase Error] ${error.message}`);
-  return data;
+  return readData(await supabase.from("equipment").select(EQUIPMENT_SELECT).eq("equipment_id", equipmentId).maybeSingle());
 };
 
 const findEquipmentSummary = async (equipmentId) => {
@@ -236,7 +240,7 @@ const findEquipmentSummary = async (equipmentId) => {
 // Current and upcoming unavailable stock; ended and cancelled records are in
 // the activity history.
 const findOpenUnavailability = async (equipmentId) => {
-  const { data, error } = await supabase
+  return readData(await supabase
     .from("equipment_unavailability")
     .select(UNAVAILABILITY_SELECT)
     .eq("equipment_id", equipmentId)
@@ -244,20 +248,16 @@ const findOpenUnavailability = async (equipmentId) => {
     .gt("ends_at", new Date().toISOString())
     .order("starts_at", { ascending: true })
     .order("unavailability_id", { ascending: true })
-    .limit(MAX_UNAVAILABILITY_SHOWN);
-  if (error) throw new Error(`[Supabase Error] ${error.message}`);
-  return data;
+    .limit(MAX_UNAVAILABILITY_SHOWN));
 };
 
 const findUnavailabilityRow = async (equipmentId, unavailabilityId) => {
-  const { data, error } = await supabase
+  return readData(await supabase
     .from("equipment_unavailability")
     .select(UNAVAILABILITY_SELECT)
     .eq("equipment_id", equipmentId)
     .eq("unavailability_id", unavailabilityId)
-    .maybeSingle();
-  if (error) throw new Error(`[Supabase Error] ${error.message}`);
-  return data;
+    .maybeSingle());
 };
 
 // The MongoDB document's display fields, or null when there is none. Throws
@@ -381,7 +381,7 @@ const recordUnavailability = async (actorId, equipmentId, values) => {
   return afterUnavailabilityWrite(equipmentId, data);
 };
 
-const updateUnavailability = async (actorId, equipmentId, unavailabilityId, version, changes) => {
+const updateUnavailability = async ({ actorId, equipmentId, unavailabilityId, version, changes }) => {
   const data = await callRpc("update_equipment_unavailability", {
     p_actor_id: actorId,
     p_equipment_id: equipmentId,
@@ -392,7 +392,7 @@ const updateUnavailability = async (actorId, equipmentId, unavailabilityId, vers
   return afterUnavailabilityWrite(equipmentId, data);
 };
 
-const endUnavailability = async (actorId, equipmentId, unavailabilityId, version) => {
+const endUnavailability = async ({ actorId, equipmentId, unavailabilityId, version }) => {
   const data = await callRpc("end_equipment_unavailability", {
     p_actor_id: actorId,
     p_equipment_id: equipmentId,

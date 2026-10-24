@@ -174,7 +174,13 @@ const updateUnavailability = async (req, res, next) => {
     const { values, fields, version } = validateUnavailabilityUpdate(req.body, current);
     if (hasErrors(fields)) return validationFailed(res, fields);
 
-    const result = await equipmentModel.updateUnavailability(req.user.user_id, equipmentId, unavailabilityId, version, values);
+    const result = await equipmentModel.updateUnavailability({
+      actorId: req.user.user_id,
+      equipmentId,
+      unavailabilityId,
+      version,
+      changes: values,
+    });
     return res.status(200).json({ message: result.changed ? "Unavailable stock updated." : "No changes to save.", ...result });
   } catch (err) {
     return handleError(err, res, next, equipmentId);
@@ -189,7 +195,7 @@ const endUnavailability = async (req, res, next) => {
   const { version, fields } = validateVersionOnly(req.body);
   if (hasErrors(fields)) return validationFailed(res, fields);
   try {
-    const result = await equipmentModel.endUnavailability(req.user.user_id, equipmentId, unavailabilityId, version);
+    const result = await equipmentModel.endUnavailability({ actorId: req.user.user_id, equipmentId, unavailabilityId, version });
     const message = result.unavailability.status === UNAVAILABILITY_STATUS.CANCELLED ? "Unavailable stock cancelled." : "Unavailable stock ended.";
     return res.status(200).json({ message, ...result });
   } catch (err) {

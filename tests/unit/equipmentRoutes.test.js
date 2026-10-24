@@ -240,5 +240,27 @@ describe("SPM-52 unavailable stock", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.message).toBe("Unavailable stock cancelled.");
+    expect(equipmentModel.endUnavailability).toHaveBeenLastCalledWith({ actorId: TECH_ID, equipmentId: 9, unavailabilityId: 3, version: 1 });
+  });
+
+  test("[AC8] should_pass_only_the_sent_changes_and_version_to_the_model", async () => {
+    equipmentModel.findUnavailabilityRow.mockResolvedValue({
+      unavailability_id: 3,
+      starts_at: "2099-11-02T01:00:00+00:00",
+      ends_at: "2099-11-02T02:00:00+00:00",
+    });
+    equipmentModel.updateUnavailability.mockResolvedValue({ unavailability: { unavailabilityId: 3 }, equipment: saved, changed: true });
+
+    const response = await as("put", "/api/equipment/9/unavailability/3").send({ note: "Lens replaced", version: 2 });
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe("Unavailable stock updated.");
+    expect(equipmentModel.updateUnavailability).toHaveBeenLastCalledWith({
+      actorId: TECH_ID,
+      equipmentId: 9,
+      unavailabilityId: 3,
+      version: 2,
+      changes: { note: "Lens replaced" },
+    });
   });
 });
