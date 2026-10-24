@@ -6,6 +6,7 @@ const authRoutes = require("./authRoutes");
 const eventRoutes = require("./eventRoutes");
 const venueRoutes = require("./venueRoutes");
 const registrationRoutes = require("./registrationRoutes");
+const equipmentRoutes = require("./equipmentRoutes");
 
 router.get("/healthcheck", test);
 
@@ -13,5 +14,6 @@ router.use("/auth", authRoutes);
 router.use("/events", eventRoutes);
 router.use("/venues", venueRoutes);
 router.use("/registrations", registrationRoutes);
+router.use("/equipment", equipmentRoutes);
 
 module.exports = router;

@@ -887,8 +887,10 @@ const toLookupIds = (values) =>
 const NO_ROWS = { data: [], error: null };
 
 // Looks up only the layout, venues and equipment this request mentions, so an
-// auto-save does not read whole catalogue tables.
-const findValidationContext = async (input) => {
+// auto-save does not read whole catalogue tables. Equipment must be selectable
+// (active, detail applied: SPM-52 AC4) unless the event already has it, because
+// every save resends all requirements and existing requests are kept (AC9).
+const findValidationContext = async (input, keptEquipmentIds = []) => {
   const layout = typeof input.preferredLayoutType === "string" ? input.preferredLayoutType.trim() : "";
   const venueIds = toLookupIds(input.venuePreferences);
   const equipmentIds = toLookupIds(
@@ -907,7 +909,7 @@ const findValidationContext = async (input) => {
       ? supabase.from("venue").select("venue_id").in("venue_id", venueIds).eq("is_active", true).eq("status", VENUE_STATUS.ACTIVE)
       : NO_ROWS,
     equipmentIds.length
-      ? supabase.from("equipment").select("equipment_id").in("equipment_id", equipmentIds)
+      ? supabase.from("equipment").select("equipment_id,is_active,details_pending").in("equipment_id", equipmentIds)
       : NO_ROWS,
   ]);
   for (const result of [layouts, venues, equipment]) {
@@ -917,7 +919,9 @@ const findValidationContext = async (input) => {
   return {
     allowedLayouts: [NO_LAYOUT_PREFERENCE, ...layouts.data.map((room) => room.layout_type)],
     venueIds: venues.data.map(({ venue_id }) => venue_id),
-    equipmentIds: equipment.data.map(({ equipment_id }) => equipment_id),
+    equipmentIds: equipment.data
+      .filter((item) => (item.is_active && !item.details_pending) || keptEquipmentIds.includes(item.equipment_id))
+      .map(({ equipment_id }) => equipment_id),
   };
 };
 
