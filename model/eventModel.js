@@ -2,6 +2,7 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
+const { VENUE_STATUS } = require("../config/venueConstants");
 const {
   EVENT_STATUS,
   NO_LAYOUT_PREFERENCE,
@@ -878,6 +879,125 @@ const findPublishedAttendeeEvent = async (eventId) => {
   return data ? toAttendeeDetail(data) : null;
 };
 
+// ---------- an attendee's own registered event (SPM-155 AC4, AC5) ----------
+
+// The same rule as _notification_visible: an attendee may open an event, in
+// any status, while holding one of these. Discovery's own rules are separate.
+const ACTIVE_REGISTRATION_STATUSES = ["REGISTERED", "WAITLISTED"];
+
+// Statuses whose current values are the confirmed, attendee-facing ones.
+const CONFIRMED_DETAIL_STATUSES = ["CONFIRMED", "PREPARATION", "COMPLETED"];
+
+// Statuses whose current values may be unconfirmed changes, so attendees see
+// the last confirmation snapshot instead (Master 5.3, 5.7).
+const SNAPSHOT_DETAIL_STATUSES = ["PLANNING", "SAFETY_REVIEW", "CANCELLED"];
+
+// Attendees see a display status, never the lifecycle state.
+const toAttendeeStatus = (status) => {
+  if (status === "CONFIRMED" || status === "PREPARATION") return "CONFIRMED";
+  if (status === "COMPLETED" || status === "CANCELLED") return status;
+  return "PENDING_CONFIRMATION";
+};
+
+const findActiveRegistration = async (eventId, attendeeId) => {
+  const { data, error } = await supabase
+    .from("registration")
+    .select("registration_status,registration_datetime")
+    .eq("event_id", eventId)
+    .eq("attendee_id", attendeeId)
+    .in("registration_status", ACTIVE_REGISTRATION_STATUSES)
+    .order("registration_datetime", { ascending: false })
+    .limit(1);
+  if (error) throw dbError(error);
+  return data[0] || null;
+};
+
+// SPM-173's latest event_confirmation_snapshots row: what attendees were told
+// at the last confirmation. Read with the service role; never written here.
+const findLatestConfirmationSnapshot = async (eventId) => {
+  const { data, error } = await supabase
+    .from("event_confirmation_snapshots")
+    .select("snapshot,confirmed_at")
+    .eq("event_id", eventId)
+    .order("snapshot_id", { ascending: false })
+    .limit(1);
+  if (error) throw dbError(error);
+  return data[0] || null;
+};
+
+const snapshotLocation = (venue) =>
+  venue && typeof venue === "object" ? [venue.name, venue.address].filter(Boolean).join(", ") || null : null;
+
+// The discovery detail fields plus a display status, for an event the
+// attendee is registered or waitlisted for, in any status. lastConfirmedAt is
+// set when the details are the last confirmed ones rather than the current ones.
+const toRegisteredAttendeeEvent = (row, latestSnapshot) => {
+  const attendeeStatus = toAttendeeStatus(row.status);
+  const { registrationAvailability } = toAttendeeDiscoveryItem(row);
+  if (row.is_published && CONFIRMED_DETAIL_STATUSES.includes(row.status)) {
+    return { ...toAttendeeDetail(row), attendeeStatus, detailsWithheld: false, lastConfirmedAt: null };
+  }
+  // Only the snapshot's attendee-facing values, named as in the discovery
+  // detail: its venue ID, capacity and registration settings are not passed
+  // on. A snapshot taken while the event was unpublished is not shown.
+  const snapshot = latestSnapshot?.snapshot;
+  if (snapshot && snapshot.is_published === true) {
+    return {
+      eventId: row.event_id,
+      title: snapshot.title ?? row.title,
+      description: snapshot.description ?? null,
+      startDatetime: snapshot.start_datetime ?? null,
+      endDatetime: snapshot.end_datetime ?? null,
+      organisationName: row.organisation?.name ?? null,
+      location: snapshotLocation(snapshot.primary_venue),
+      registrationAvailability,
+      registrationOpenAt: snapshot.registration_open_at ?? null,
+      registrationCloseAt: snapshot.registration_close_at ?? null,
+      attendeeStatus,
+      detailsWithheld: false,
+      lastConfirmedAt: latestSnapshot.confirmed_at,
+    };
+  }
+  // Never confirmed, unpublished, or in another status: the current values may
+  // be unconfirmed, so only the title and status are returned.
+  return {
+    eventId: row.event_id,
+    title: row.title,
+    description: null,
+    startDatetime: null,
+    endDatetime: null,
+    organisationName: null,
+    location: null,
+    registrationAvailability,
+    registrationOpenAt: null,
+    registrationCloseAt: null,
+    attendeeStatus,
+    detailsWithheld: true,
+    lastConfirmedAt: null,
+  };
+};
+
+// GET /api/registrations/mine/:eventId: the event and the attendee's own place.
+// Null (404) unless they hold a REGISTERED or WAITLISTED place, without saying
+// whether the event exists.
+const findRegisteredAttendeeEvent = async (eventId, attendeeId) => {
+  const registration = await findActiveRegistration(eventId, attendeeId);
+  if (!registration) return null;
+  const { data, error } = await supabase
+    .from("event")
+    .select(`${LIST_ATTENDEE_DISCOVERY_SELECT},is_published`)
+    .eq(...REGISTERED_SEATS_FILTER)
+    .eq("event_id", eventId)
+    .maybeSingle();
+  if (error) throw dbError(error);
+  if (!data) return null;
+  const latestSnapshot = SNAPSHOT_DETAIL_STATUSES.includes(data.status) ? await findLatestConfirmationSnapshot(eventId) : null;
+  return {
+    event: toRegisteredAttendeeEvent(data, latestSnapshot),
+    myRegistration: { status: registration.registration_status, registeredAt: registration.registration_datetime },
+  };
+};
+
 const toLookupIds = (values) =>
   Array.isArray(values)
     ? [...new Set(values.map(toWholeNumber))]
@@ -902,7 +1022,11 @@ const findValidationContext = async (input) => {
     layout && layout !== NO_LAYOUT_PREFERENCE
       ? supabase.from("room").select("layout_type").eq("layout_type", layout).limit(1)
       : NO_ROWS,
-    venueIds.length ? supabase.from("venue").select("venue_id").in("venue_id", venueIds) : NO_ROWS,
+    // Only available venues can be chosen (SPM-73: inactive or unavailable
+    // venues cannot be selected for new bookings).
+    venueIds.length
+      ? supabase.from("venue").select("venue_id").in("venue_id", venueIds).eq("is_active", true).eq("status", VENUE_STATUS.ACTIVE)
+      : NO_ROWS,
     equipmentIds.length
       ? supabase.from("equipment").select("equipment_id").in("equipment_id", equipmentIds)
       : NO_ROWS,
@@ -922,7 +1046,12 @@ const findValidationContext = async (input) => {
 // This read does not reserve a venue or expose internal venue planning data.
 const findRequestOptions = async () => {
   const [venues, rooms] = await Promise.all([
-    supabase.from("venue").select("venue_id,name").order("name", { ascending: true }),
+    supabase
+      .from("venue")
+      .select("venue_id,name")
+      .eq("is_active", true)
+      .eq("status", VENUE_STATUS.ACTIVE)
+      .order("name", { ascending: true }),
     supabase.from("room").select("layout_type"),
   ]);
   for (const result of [venues, rooms]) if (result.error) throw dbError(result.error);
@@ -966,10 +1095,12 @@ module.exports = {
   findOrganiserEventRequests,
   findPublishedAttendeeEvents,
   findPublishedAttendeeEvent,
+  findRegisteredAttendeeEvent,
   computeRegistrationAvailability,
   encodeCursor,
   decodeCursor,
   encodeDiscoveryCursor,
   decodeDiscoveryCursor,
+  isValidCursorTimestamp,
   findValidationContext,
 };
