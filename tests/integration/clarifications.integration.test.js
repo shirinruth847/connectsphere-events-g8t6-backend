@@ -1,9 +1,9 @@
-// SPM-41 live integration tests for clarification rounds: the real Express route,
+// SPM-41 live integration tests for clarification rounds: the real Express routes,
 // Supabase Auth and the shared development database. Needs the
-// spm41_clarification_rounds migration and TEST_DATABASE_URL: rounds are written
-// only by database functions (added with the SPM-173 lifecycle engine), so this
-// suite inserts them through the privileged test connection, as those functions
-// will, and checks what the table itself guarantees.
+// spm41_clarification_rounds and spm41_clarification_lifecycle migrations and
+// TEST_DATABASE_URL. The read tests insert rounds through the privileged test
+// connection to check what the table itself guarantees; the action tests write
+// them through POST /clarifications and /resubmit, as the application does.
 const { Client } = require("pg");
 const request = require("supertest");
 const app = require("../../server");
@@ -248,5 +248,318 @@ describe("what the clarifications table guarantees (SPM-41)", () => {
 
     expect(error && error.code).toBe("23503");
     expect(error.constraint).toBe("clarifications_event_id_fkey");
+  });
+});
+
+// ---------- request clarification and resubmit (SPM-41 AC1-AC5) ----------
+// One event goes through the whole loop in order: each test starts from the
+// state the previous one left, so they must run in this file's order.
+describe("request clarification and resubmit through the API (SPM-41)", () => {
+  let eventId;
+  const key = (name) => `spm41-${runId}-${name}`;
+
+  const call = async (method, path, account, body, idempotencyKey) => {
+    let req = request(app)[method](path).set("Authorization", `Bearer ${(await signIn(account)).access_token}`);
+    if (idempotencyKey) req = req.set("Idempotency-Key", idempotencyKey);
+    return body === undefined ? req : req.send(body);
+  };
+  const requestClarification = (account, body, idempotencyKey) =>
+    call("post", `/api/events/${eventId}/clarifications`, account, body, idempotencyKey);
+  const resubmit = (account, body, idempotencyKey) => call("post", `/api/events/${eventId}/resubmit`, account, body, idempotencyKey);
+
+  const eventState = async (id = eventId) =>
+    (await admin.query(
+      "SELECT status::text AS status, version, coordinator_id, title, expected_attendance FROM public.event WHERE event_id = $1",
+      [id]
+    )).rows[0];
+  const storedRounds = async () =>
+    (await admin.query(
+      "SELECT round_number, status, message, response, requested_by, responded_by FROM public.clarifications WHERE event_id = $1 ORDER BY round_number",
+      [eventId]
+    )).rows;
+  const notificationsFor = async (account) =>
+    (await admin.query(
+      `SELECT n.title, n.message FROM public.notification AS n
+         JOIN public.notification_recipient AS r ON r.notification_id = n.notification_id
+        WHERE n.event_id = $1 AND r.recipient_id = $2 ORDER BY n.notification_id`,
+      [eventId, userId(account)]
+    )).rows;
+  const historyEntries = async (action) =>
+    (await admin.query(
+      "SELECT log_id, user_id, action, details, actor_role, changes, audience, \"timestamp\" FROM public.activity_log WHERE entity_name = 'event' AND entity_id = $1 AND action = $2 ORDER BY log_id",
+      [eventId, action]
+    )).rows;
+
+  const QUESTION = "Please confirm the stage size and whether you need a lectern.";
+
+  beforeAll(async () => {
+    // Owner organiserA2; organiserA is the same-organisation colleague.
+    eventId = fixtures.events.colleagueSubmitted;
+    await admin.query("UPDATE public.event SET status = 'UNDER_REVIEW' WHERE event_id = $1", [eventId]);
+  });
+
+  test("[SPM-41-TC-02] should_refuse_an_empty_message_and_leave_the_event_under_review", async () => {
+    const before = await eventState();
+
+    const res = await requestClarification("coordinator", { message: "   ", version: before.version }, key("empty"));
+
+    expect(res.status).toBe(400);
+    expect(res.body.fields).toHaveProperty("message");
+    expect(await eventState()).toEqual(before);
+    expect(await storedRounds()).toEqual([]);
+  });
+
+  test("[SPM-41-AC1] should_answer_404_to_a_coordinator_who_is_not_assigned", async () => {
+    const before = await eventState();
+
+    const res = await requestClarification("coordinatorTwo", { message: QUESTION, version: before.version }, key("wrong"));
+
+    expect(res.status).toBe(404);
+    expect(await eventState()).toEqual(before);
+    expect(await storedRounds()).toEqual([]);
+  });
+
+  test("[SPM-41-AC1] should_answer_409_with_the_current_event_for_a_stale_version", async () => {
+    const before = await eventState();
+
+    const res = await requestClarification("coordinator", { message: QUESTION, version: before.version - 1 }, key("stale"));
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("EVENT_VERSION_CONFLICT");
+    expect(res.body.event).toEqual(expect.objectContaining({ eventId, version: before.version }));
+    expect(await eventState()).toEqual(before);
+    expect(await storedRounds()).toEqual([]);
+  });
+
+  test("[SPM-41-TC-01] should_return_the_event_store_the_round_and_notify_the_owner", async () => {
+    const before = await eventState();
+
+    const res = await requestClarification("coordinator", { message: QUESTION, version: before.version }, key("request-1"));
+
+    expect(res.status).toBe(200);
+    expect(res.body.event).toEqual(expect.objectContaining({ status: "AWAITING_CLARIFICATION", version: before.version + 1 }));
+    expect(res.body.event.permissions).toEqual(expect.objectContaining({ canRequestClarification: false, canResubmit: false }));
+    expect(res.body.clarification).toEqual(expect.objectContaining({
+      round: 1,
+      status: "OPEN",
+      message: QUESTION,
+      requestedBy: { userId: userId("coordinator"), name: expect.any(String) },
+    }));
+    expect(await eventState()).toEqual(expect.objectContaining({ status: "AWAITING_CLARIFICATION", coordinator_id: userId("coordinator") }));
+    expect(await storedRounds()).toEqual([expect.objectContaining({ round_number: 1, status: "OPEN", message: QUESTION })]);
+    const notes = await notificationsFor("organiserA2");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].title).toBe("Clarification requested");
+    expect(notes[0].message).toContain(QUESTION);
+  });
+
+  test("[SPM-41-TC-05] should_keep_an_immutable_timestamped_audit_entry_with_the_coordinator_and_full_question", async () => {
+    const [entry] = await historyEntries("CLARIFICATION_REQUESTED");
+
+    expect(entry).toEqual(expect.objectContaining({
+      user_id: userId("coordinator"),
+      actor_role: "COORDINATOR",
+      audience: "ORGANISER_SAFE",
+      changes: { status: { before: "UNDER_REVIEW", after: "AWAITING_CLARIFICATION" } },
+    }));
+    expect(entry.details).toContain(QUESTION);
+    expect(entry.timestamp).toBeInstanceOf(Date);
+
+    const updated = await supabase.from("activity_log").update({ details: "Tampered." }).eq("log_id", entry.log_id);
+    const deleted = await supabase.from("activity_log").delete().eq("log_id", entry.log_id);
+    expect(updated.error).toEqual(expect.objectContaining({ code: "42501" }));
+    expect(deleted.error).toEqual(expect.objectContaining({ code: "42501" }));
+    expect((await historyEntries("CLARIFICATION_REQUESTED"))[0].details).toBe(entry.details);
+
+    // The owner reads the same entry in their history.
+    const history = await call("get", `/api/events/${eventId}/history`, "organiserA2");
+    expect(JSON.stringify(history.body)).toContain(QUESTION);
+  });
+
+  test("[SPM-41-AC1] should_replay_a_retried_request_without_a_second_round_or_notification", async () => {
+    const res = await requestClarification("coordinator", { message: QUESTION, version: (await eventState()).version - 1 }, key("request-1"));
+    const reused = await requestClarification("coordinator", { message: "A different question.", version: 1 }, key("request-1"));
+
+    expect(res.status).toBe(200);
+    expect(res.headers["idempotent-replayed"]).toBe("true");
+    expect(reused.status).toBe(409);
+    expect(reused.body.code).toBe("IDEMPOTENCY_KEY_REUSED");
+    expect(await storedRounds()).toHaveLength(1);
+    expect(await notificationsFor("organiserA2")).toHaveLength(1);
+  });
+
+  test("[SPM-41-TC-03] should_block_planning_actions_and_direct_edits_while_the_event_is_returned", async () => {
+    const before = await eventState();
+
+    const action = await call("post", `/api/events/${eventId}/submit-for-safety-review`, "coordinator", { version: before.version });
+    const edit = await call("put", `/api/events/${eventId}`, "coordinator", { title: "Coordinator edit", version: before.version }, key("edit"));
+
+    expect(action.status).toBe(403);
+    expect(action.body).toEqual(expect.objectContaining({ code: "TRANSITION_NOT_ALLOWED", currentStatus: "AWAITING_CLARIFICATION" }));
+    expect(edit.status).toBe(403);
+    expect(edit.body.code).toBe("EVENT_NOT_EDITABLE_IN_STATUS");
+    expect(await eventState()).toEqual(before);
+  });
+
+  test("[SPM-41-AC3] should_offer_resubmit_to_the_owner_only", async () => {
+    const owner = await call("get", `/api/events/${eventId}`, "organiserA2");
+    const colleague = await call("get", `/api/events/${eventId}`, "organiserA");
+
+    expect(owner.body.event.permissions.canResubmit).toBe(true);
+    expect(colleague.body.event.permissions.canResubmit).toBe(false);
+  });
+
+  test("[SPM-41-AC3] should_answer_403_when_a_same_organisation_organiser_resubmits", async () => {
+    const before = await eventState();
+
+    const res = await resubmit("organiserA", { response: "Answering for them.", version: before.version }, key("colleague"));
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("EVENT_READ_ONLY");
+    expect(await eventState()).toEqual(before);
+    expect((await storedRounds())[0].status).toBe("OPEN");
+  });
+
+  test("[SPM-41-AC3] should_roll_back_everything_when_the_amended_dates_clash_with_the_coordinators_schedule", async () => {
+    const before = await eventState();
+
+    // "reassignable" holds the same coordinator on 2027-03-10 10:00-12:00.
+    const res = await resubmit("organiserA2", {
+      response: "Moved to the 10th.",
+      changes: { title: "Should not be saved", startDatetime: "2027-03-10T10:30:00Z", endDatetime: "2027-03-10T11:30:00Z" },
+      version: before.version,
+    }, key("clash"));
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      code: "COORDINATOR_CONFLICT",
+      error: "The new dates clash with your coordinator's schedule. Choose different dates or contact your coordinator.",
+    });
+    expect(await eventState()).toEqual(before);
+    expect(await storedRounds()).toEqual([expect.objectContaining({ status: "OPEN", response: null })]);
+    expect(await historyEntries("CLARIFICATION_AMENDED")).toEqual([]);
+    expect(await notificationsFor("coordinator")).toEqual([]);
+  });
+
+  test("[SPM-41-AC3] should_roll_back_the_amended_fields_when_a_later_step_of_the_resubmit_fails", async () => {
+    const before = await eventState();
+
+    // The title update succeeds inside the function; the venue preference write
+    // after it fails its foreign key, so the whole call must leave nothing behind.
+    let error = null;
+    try {
+      await admin.query(
+        "SELECT public.resubmit_event_after_clarification($1, $2, $3, 'Answer.', $4::jsonb, '[2147483000]'::jsonb, NULL, NULL, NULL)",
+        [eventId, userId("organiserA2"), before.version, JSON.stringify({ title: "Should roll back" })]
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error && error.code).toBe("23503");
+    expect(await eventState()).toEqual(before);
+    expect(await storedRounds()).toEqual([expect.objectContaining({ status: "OPEN", response: null })]);
+    expect(await historyEntries("CLARIFICATION_AMENDED")).toEqual([]);
+    expect(await historyEntries("EVENT_RESUBMITTED")).toEqual([]);
+  });
+
+  test("[SPM-41-AC3] should_refuse_a_resubmit_that_neither_answers_nor_changes_anything", async () => {
+    const before = await eventState();
+
+    const res = await resubmit("organiserA2", { changes: { expectedAttendance: before.expected_attendance }, version: before.version }, key("same"));
+
+    expect(res.status).toBe(400);
+    expect(res.body.fields.response).toBe("Add a response or change at least one detail before resubmitting.");
+    expect(await eventState()).toEqual(before);
+  });
+
+  test("[SPM-41-TC-04] should_return_the_event_to_review_with_the_same_coordinator_and_keep_the_round_visible", async () => {
+    const before = await eventState();
+
+    const res = await resubmit("organiserA2", {
+      response: "The stage is 6m wide; no lectern needed.",
+      changes: { title: `${before.title} (amended)`, expectedAttendance: 80 },
+      version: before.version,
+    }, key("resubmit-1"));
+
+    expect(res.status).toBe(200);
+    expect(res.body.event.permissions.canResubmit).toBe(false);
+    expect(res.body.clarification).toEqual(expect.objectContaining({
+      round: 1,
+      status: "RESPONDED",
+      response: "The stage is 6m wide; no lectern needed.",
+      respondedBy: { userId: userId("organiserA2"), name: expect.any(String) },
+    }));
+    expect(await eventState()).toEqual(expect.objectContaining({
+      status: "UNDER_REVIEW",
+      coordinator_id: userId("coordinator"),
+      title: `${before.title} (amended)`,
+      expected_attendance: 80,
+    }));
+
+    const [amended] = await historyEntries("CLARIFICATION_AMENDED");
+    expect(amended).toEqual(expect.objectContaining({ user_id: userId("organiserA2"), audience: "ORGANISER_SAFE" }));
+    expect(amended.changes).toEqual({
+      title: { before: before.title, after: `${before.title} (amended)` },
+      expectedAttendance: { before: before.expected_attendance, after: 80 },
+    });
+    const [resubmitted] = await historyEntries("EVENT_RESUBMITTED");
+    expect(resubmitted.details).toContain("no lectern needed");
+
+    const notes = await notificationsFor("coordinator");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].title).toBe("Event request resubmitted");
+
+    const rounds = await getRounds(eventId, "coordinator");
+    expect(rounds.body.clarifications).toEqual([expect.objectContaining({ round: 1, status: "RESPONDED", message: QUESTION })]);
+  });
+
+  test("[SPM-41-AC3] should_replay_a_retried_resubmit_without_a_second_notification", async () => {
+    const before = await eventState();
+    const [round] = await storedRounds();
+
+    // The same body as the first attempt, made against the version it loaded.
+    const res = await resubmit("organiserA2", {
+      response: round.response,
+      changes: { title: before.title, expectedAttendance: 80 },
+      version: before.version - 2,
+    }, key("resubmit-1"));
+
+    expect(res.status).toBe(200);
+    expect(res.headers["idempotent-replayed"]).toBe("true");
+    expect(await eventState()).toEqual(before);
+    expect(await notificationsFor("coordinator")).toHaveLength(1);
+  });
+
+  test("[SPM-41-AC1] should_keep_every_round_when_the_event_is_returned_again", async () => {
+    const question = "Thanks. Can you also confirm catering numbers?";
+    const asked = await requestClarification("coordinator", { message: question, version: (await eventState()).version }, key("request-2"));
+    expect(asked.status).toBe(200);
+    expect(asked.body.clarification).toEqual(expect.objectContaining({ round: 2, status: "OPEN" }));
+
+    // Answered with amendments only.
+    const answered = await resubmit("organiserA2", { changes: { expectedAttendance: 90 }, version: (await eventState()).version }, key("resubmit-2"));
+    expect(answered.status).toBe(200);
+    expect(answered.body.clarification).toEqual(expect.objectContaining({ round: 2, status: "RESPONDED", response: null }));
+
+    expect(await storedRounds()).toEqual([
+      expect.objectContaining({ round_number: 1, status: "RESPONDED", message: QUESTION }),
+      expect.objectContaining({ round_number: 2, status: "RESPONDED", message: question, response: null, responded_by: userId("organiserA2") }),
+    ]);
+    const rounds = await getRounds(eventId, "organiserA");
+    expect(rounds.body.clarifications.map(({ round }) => round)).toEqual([2, 1]);
+    expect(await eventState()).toEqual(expect.objectContaining({ status: "UNDER_REVIEW", coordinator_id: userId("coordinator"), expected_attendance: 90 }));
+  });
+
+  test("[SPM-41-AC3] should_answer_409_when_a_returned_event_has_no_open_round", async () => {
+    const soloEvent = fixtures.events.soloSubmitted;
+    await admin.query("UPDATE public.event SET status = 'AWAITING_CLARIFICATION' WHERE event_id = $1", [soloEvent]);
+    const before = await eventState(soloEvent);
+
+    const res = await call("post", `/api/events/${soloEvent}/resubmit`, "organiserSolo", { response: "Answer.", version: before.version }, key("no-round"));
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("CLARIFICATION_NOT_OPEN");
+    expect(await eventState(soloEvent)).toEqual(before);
   });
 });
