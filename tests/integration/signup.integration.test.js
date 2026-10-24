@@ -213,7 +213,8 @@ describe("[SPM-123 AC3-AC5] validation creates nothing", () => {
     expect(res.body.fields).toEqual({ email: MESSAGES.emailInvalid });
   });
 
-  test.each(["COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT"])(
+  // SPM-243-TC-02: the Safety Officer is a staff role too.
+  test.each(["COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"])(
     "[TC-AUTH-025] should_reject_%s_and_create_nothing_when_requested_at_sign_up",
     async (accountType) => {
       const email = emailFor(`staff-${accountType.toLowerCase()}`);
