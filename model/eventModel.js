@@ -197,6 +197,10 @@ const toEventView = (row, user, access) => ({
     editableFields: access.editableFields,
     canViewDraftHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.OWNER_ONLY),
     canViewStaffHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.STAFF_ONLY),
+    canRequestClarification: access.canRequestClarification === true,
+    canPostClarificationMessage: access.canPostClarificationMessage === true,
+    canSaveAmendments: access.canSaveAmendments === true,
+    canCompleteClarification: access.canCompleteClarification === true,
   },
 });
 
@@ -345,6 +349,9 @@ const DOMAIN_CODES = new Set([
   "SAFETY_APPROVAL_REQUIRED",
   "EVENT_NOT_ENDED",
   "COORDINATOR_INVARIANT",
+  "CLARIFICATION_NOT_OPEN",
+  "CLARIFICATION_NOT_FOUND",
+  "CLARIFICATION_CLOSED",
 ]);
 
 // The lifecycle functions report the event's current status (a refused or stale
@@ -402,6 +409,15 @@ const RPC_FIELD_ERRORS = Object.freeze({
   DRAFT_TITLE_REQUIRED: { title: MESSAGES.titleRequired },
   INVALID_VENUE_PREFERENCES: { venuePreferences: MESSAGES.venuePreferencesInvalid },
   INVALID_EQUIPMENT_REQUIREMENTS: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
+  AMENDMENT_EMPTY: { changes: MESSAGES.amendmentEmpty },
+});
+
+// SPM-41 database checks, reported as "field:FAILURE" in the error detail.
+const CLARIFICATION_FAILURES = Object.freeze({
+  "message:REQUIRED": MESSAGES.clarificationMessageRequired,
+  "message:TOO_LONG": MESSAGES.clarificationTooLong,
+  "body:REQUIRED": MESSAGES.clarificationBodyRequired,
+  "body:TOO_LONG": MESSAGES.clarificationTooLong,
 });
 
 // Constraints are the final check (e.g. a stale draft merge); report them against the field.
@@ -427,6 +443,9 @@ const toEventRequestError = (error, fields) => {
   }
   if (message === "INVALID_EVENT_DETAILS") {
     return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, DETAILS_FAILURES));
+  }
+  if (message === "INVALID_CLARIFICATION") {
+    return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, CLARIFICATION_FAILURES));
   }
   if (RPC_FIELD_ERRORS[message]) return eventRequestError("VALIDATION_FAILED", RPC_FIELD_ERRORS[message]);
 
@@ -751,6 +770,89 @@ const getEventReadiness = async ({ eventId, actorId }) => {
   };
 };
 
+// SPM-41 clarification functions return what they wrote under "resultKey" (the
+// round, the message or the event) and "replayed" for a repeated Idempotency-Key.
+const callClarificationRpc = async (name, args, resultKey) => {
+  const { data, error } = await supabase.rpc(name, args);
+  if (error) throw toEventRequestError(error);
+  if (!data || !data[resultKey]) throw new Error(`${name} returned an incomplete result.`);
+  return { data, replayed: data.replayed === true };
+};
+
+const toRoundResult = ({ data, replayed }) => ({ clarificationId: data.clarification.clarification_id, replayed });
+
+// SPM-41 AC1: the assigned coordinator returns an UNDER_REVIEW event with a
+// question, which opens a thread. The database rechecks role, assignment,
+// version and state under the event lock (SPM-173 transition table), then writes
+// the round, its first message, the status, its history and the owner's
+// notification in one transaction.
+const requestClarification = async ({ eventId, actorId, message, expectedVersion, idempotencyKey }) =>
+  toRoundResult(await callClarificationRpc("request_event_clarification", {
+    p_event_id: eventId,
+    p_actor_id: actorId,
+    p_expected_version: expectedVersion,
+    p_message: message,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({ message }, {}, [eventId, expectedVersion]),
+  }, "clarification"));
+
+// SPM-41 v2: the owner or the assigned coordinator adds a message to the open
+// thread. Messages are never edited; the other party is notified unless they
+// were already notified and have not opened the thread since.
+const postClarificationMessage = async ({ eventId, round, actorId, body, idempotencyKey }) => {
+  const { data, replayed } = await callClarificationRpc("post_clarification_message", {
+    p_event_id: eventId,
+    p_round_number: round,
+    p_actor_id: actorId,
+    p_body: body,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({ body }, {}, [eventId, round]),
+  }, "message");
+  return { messageId: data.message.message_id, replayed };
+};
+
+// SPM-41 v2: the owner amends submission fields while the thread is open. The
+// event stays AWAITING_CLARIFICATION; any failure leaves the event and its
+// requirements as they were.
+const saveClarificationAmendments = async ({ eventId, actorId, input, expectedVersion, idempotencyKey }) => {
+  const row = toRow(input);
+  const requirements = toRequirementPayload(input);
+  const { replayed } = await callClarificationRpc("save_clarification_amendments", {
+    p_event_id: eventId,
+    p_actor_id: actorId,
+    p_expected_version: expectedVersion,
+    p_changes: row,
+    p_venue_preferences: requirements.venuePreferences ?? null,
+    p_equipment_requirements: requirements.equipmentRequirements ?? null,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest(row, requirements, [eventId, expectedVersion]),
+  }, "event");
+  return { replayed };
+};
+
+// SPM-41 v2: the assigned coordinator completes the open thread, which returns
+// the event to UNDER_REVIEW with the same coordinator and notifies the owner.
+const completeClarification = async ({ eventId, round, actorId, expectedVersion, idempotencyKey }) =>
+  toRoundResult(await callClarificationRpc("complete_event_clarification", {
+    p_event_id: eventId,
+    p_round_number: round,
+    p_actor_id: actorId,
+    p_expected_version: expectedVersion,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({}, {}, [eventId, round, expectedVersion]),
+  }, "clarification"));
+
+// Records that the owner or assigned coordinator opened a thread, which lets the
+// next message notify them again. The database ignores anyone else.
+const markClarificationRead = async ({ eventId, round, actorId }) => {
+  const { error } = await supabase.rpc("mark_clarification_read", {
+    p_event_id: eventId,
+    p_round_number: round,
+    p_actor_id: actorId,
+  });
+  if (error) throw dbError(error);
+};
+
 // SPM-173 AC12: completes up to "limit" ended events; returns how many.
 const completeDueEvents = async (limit) => {
   const { data, error } = await supabase.rpc("complete_due_events", { p_limit: limit });
@@ -768,6 +870,68 @@ const findOwnEvent = async (eventId, organiserId) => {
     .maybeSingle();
   if (error) throw dbError(error);
   return data;
+};
+
+// SPM-41 clarification threads. Joins are named by foreign key because the
+// tables reference "user" more than once. "reads" is filtered to the reader.
+const CLARIFICATION_SELECT =
+  "clarification_id,round_number,status,message,requested_at,requested_by,responded_at,responded_by," +
+  "requester:user!clarifications_requested_by_fkey(name),responder:user!clarifications_responded_by_fkey(name)," +
+  "messages:clarification_messages!clarification_messages_clarification_id_fkey(" +
+  "message_id,body,created_at,author_id,author:user!clarification_messages_author_id_fkey(name,role))," +
+  "reads:clarification_reads!clarification_reads_clarification_id_fkey(user_id,last_read_at)";
+
+const toClarificationMessage = (row) => ({
+  messageId: row.message_id,
+  body: row.body,
+  createdAt: row.created_at,
+  author: { userId: row.author_id, name: row.author ? row.author.name : null, role: row.author ? row.author.role : null },
+});
+
+// Messages from the other party since the reader last opened the thread; null
+// for readers who are not a party (they are never notified, so nothing is stored).
+const countUnread = (messages, readerId, reads) => {
+  if (readerId == null) return null;
+  const read = (reads || []).find((entry) => entry.user_id === readerId);
+  const readAt = read && read.last_read_at ? Date.parse(read.last_read_at) : null;
+  return messages.filter((message) => message.author_id !== readerId && (readAt === null || Date.parse(message.created_at) > readAt)).length;
+};
+
+// A completed thread is stored as RESPONDED (SPM-41 v1 schema) and reported as
+// COMPLETED; completedBy is the coordinator who closed it, or for rounds closed
+// before threads existed, the organiser who resubmitted.
+const toClarification = (row, readerId) => {
+  const messages = [...(row.messages || [])].sort(
+    (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.message_id - b.message_id
+  );
+  return {
+    clarificationId: row.clarification_id,
+    round: row.round_number,
+    status: row.status === "OPEN" ? "OPEN" : "COMPLETED",
+    message: row.message,
+    requestedAt: row.requested_at,
+    requestedBy: { userId: row.requested_by, name: row.requester ? row.requester.name : null },
+    completedAt: row.responded_at ?? null,
+    completedBy:
+      row.responded_by == null ? null : { userId: row.responded_by, name: row.responder ? row.responder.name : null },
+    messages: messages.map(toClarificationMessage),
+    unreadCount: countUnread(messages, readerId, row.reads),
+  };
+};
+
+// Every thread for one event, newest first, each with its messages oldest first.
+// Callers check that the reader may see the event; every relationship that can
+// see it may read its threads (SPM-41). Pass readerId only for the owner and the
+// assigned coordinator, whose reads are tracked.
+const findEventClarifications = async (eventId, { readerId = null } = {}) => {
+  const { data, error } = await supabase
+    .from("clarifications")
+    .select(CLARIFICATION_SELECT)
+    .eq("event_id", eventId)
+    .eq("reads.user_id", readerId ?? 0)
+    .order("round_number", { ascending: false });
+  if (error) throw dbError(error);
+  return data.map((row) => toClarification(row, readerId));
 };
 
 // PostgREST timestamptz text, e.g. 2026-10-07T07:14:14.406209+00:00. The cursor keeps the
@@ -1088,8 +1252,15 @@ module.exports = {
   reassignCoordinator,
   runLifecycleAction,
   getEventReadiness,
+  requestClarification,
+  postClarificationMessage,
+  saveClarificationAmendments,
+  completeClarification,
+  markClarificationRead,
   completeDueEvents,
   findOwnEvent,
+  findEventClarifications,
+  toClarification,
   findOrganiserEventRequests,
   findPublishedAttendeeEvents,
   findPublishedAttendeeEvent,

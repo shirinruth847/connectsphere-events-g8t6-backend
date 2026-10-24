@@ -7,9 +7,11 @@ const {
   validateSubmission,
   validateRequirements,
   validateOrdinaryFields,
+  validateClarificationText,
   hasErrors,
   toWholeNumber,
   MAX_INTEGER,
+  MESSAGES,
 } = require("../validators/eventValidator");
 const { USER_ROLES } = require("../config/roles");
 const {
@@ -19,6 +21,7 @@ const {
   LABEL_STATUSES,
   LIFECYCLE_ACTIONS,
   READINESS_MESSAGES,
+  AMENDMENT_FIELDS,
 } = require("../config/eventConstants");
 
 
@@ -54,6 +57,9 @@ const DOMAIN_ERRORS = Object.freeze({
   SAFETY_APPROVAL_REQUIRED: [409, "The event needs a safety approval for its current arrangements before it can be confirmed."],
   EVENT_NOT_ENDED: [409, "The event can be completed only after it has ended."],
   COORDINATOR_INVARIANT: [409, "The event's coordinator assignment does not allow this action. Refresh and try again."],
+  CLARIFICATION_NOT_OPEN: [409, "This request has no open clarification. Refresh to see its current status."],
+  CLARIFICATION_NOT_FOUND: [404, "Clarification request not found."],
+  CLARIFICATION_CLOSED: [409, "This clarification request is already complete. Refresh to see its current status."],
 });
 
 // ---------- helpers ----------
@@ -439,16 +445,48 @@ const getEventRequest = async (req, res, next) => {
 
 // GET /api/events/:id/history — SPM-33 AC8: change history, filtered by audience.
 // Being able to view the event does not by itself show staff-only entries, or
-// entries from before submission, which are for the owner alone.
+// entries from before submission, which are for the owner alone. lastViewedAt is
+// when this viewer last marked the history viewed (SPM-41 v2), or null.
 const getEventHistory = async (req, res, next) => {
   try {
     const { eventId, access } = req.visibleEvent;
-    const { history, nextCursor } = await activityModel.findEventHistory(eventId, {
-      ...req.pagination,
-      audiences: access.historyAudiences,
-    });
-    return res.status(200).json({ history, nextCursor });
+    const [{ history, nextCursor }, lastViewedAt] = await Promise.all([
+      activityModel.findEventHistory(eventId, { ...req.pagination, audiences: access.historyAudiences }),
+      activityModel.findLastHistoryView(eventId, req.user.user_id),
+    ]);
+    return res.status(200).json({ history, nextCursor, lastViewedAt });
 
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+// POST /api/events/:id/history/viewed — SPM-41 v2: anyone who can see the event's
+// history records that they viewed it; requireVisibleEvent has already answered
+// "not found" for anyone else.
+const markEventHistoryViewed = async (req, res, next) => {
+  try {
+    const lastViewedAt = await activityModel.markEventHistoryViewed(req.visibleEvent.eventId, req.user.user_id);
+    return res.status(200).json({ lastViewedAt });
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
+// Only the owner and the assigned coordinator take part in a thread, so only
+// their reads are tracked and counted.
+const threadReaderId = (req) =>
+  [EVENT_RELATIONSHIP.OWNER, EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR].includes(req.visibleEvent.access.relationship)
+    ? req.user.user_id
+    : null;
+
+// SPM-41: the owner, same-organisation organisers (read-only) and the assigned
+// coordinator all see every thread and message; requireVisibleEvent has already
+// answered "not found" for anyone else.
+const getEventClarifications = async (req, res, next) => {
+  try {
+    const clarifications = await eventModel.findEventClarifications(req.visibleEvent.eventId, { readerId: threadReaderId(req) });
+    return res.status(200).json({ clarifications });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -684,6 +722,215 @@ const getEventReadiness = async (req, res, next) => {
   }
 };
 
+/// ---------- SPM-41 clarification threads ----------
+
+const KNOWN_AMENDMENT_FIELDS = new Set(AMENDMENT_FIELDS);
+const AMENDMENT_COORDINATOR_CONFLICT =
+  "The new dates clash with your coordinator's schedule. Choose different dates or contact your coordinator.";
+
+// The body holds the named fields only, plus the version the user loaded where
+// the action checks it. The Idempotency-Key header is required because every
+// action may notify someone.
+const readClarificationRequest = (req, allowed, { requireVersion = true } = {}) => {
+  const body = req.body ?? {};
+  if (!isPlainObject(body)) return { body: {}, errors: { body: "Send the request as a JSON object." } };
+  const accepted = requireVersion ? [...allowed, "version"] : allowed;
+  const errors = toUnsupportedFieldErrors(Object.keys(body).filter((key) => !accepted.includes(key)));
+  const expectedVersion = requireVersion ? readVersion(body, true, errors) : null;
+  const idempotencyKey = readRequestIdempotencyKey(req, true, errors);
+  return { body, errors, expectedVersion, idempotencyKey };
+};
+
+// ":round" is the thread's number on its event; anything else names no thread.
+const readRound = (req) => parseEventId(req.params.round);
+
+const findThread = async (req, round) => {
+  const threads = await eventModel.findEventClarifications(req.visibleEvent.eventId, { readerId: threadReaderId(req) });
+  return threads.find((thread) => thread.round === round) ?? null;
+};
+
+// The event and the thread just written, as the actor now sees them.
+const sendClarificationResult = async (req, res, result, message) => {
+  const { eventId } = req.visibleEvent;
+  markReplay(res, result);
+  const [current, threads] = await Promise.all([
+    loadEventForViewer(eventId, req.user),
+    eventModel.findEventClarifications(eventId, { readerId: req.user.user_id }),
+  ]);
+  if (!current) return eventNotFound(res);
+  return res.status(200).json({
+    message,
+    event: eventModel.toEventView(current.event, req.user, current.access),
+    clarification: threads.find((thread) => thread.clarificationId === result.clarificationId) ?? null,
+  });
+};
+
+// The database refuses like the SPM-173 actions: 403 naming the status, 409 with
+// the current event for a stale version.
+const sendClarificationError = (req, res, next, error, overrides = {}) => {
+  if (error.name === "EventRequestError") {
+    if (error.code === "EVENT_VERSION_CONFLICT") return sendVersionConflict(req, res, req.visibleEvent.eventId).catch(next);
+    if (overrides[error.code]) return overrides[error.code](res);
+    if (LIFECYCLE_REFUSALS[error.code]) return LIFECYCLE_REFUSALS[error.code](res, error);
+  }
+  return handleError(error, res, next);
+};
+
+// POST /api/events/:id/clarifications — SPM-41 AC1/AC2: the assigned coordinator
+// returns an UNDER_REVIEW event with a question, which opens a thread. Another
+// coordinator gets 404 (requireVisibleEvent); then 400 for the request; then the
+// database decides under the event lock: 403 in another status, 409 for a stale version.
+const requestClarification = async (req, res, next) => {
+  try {
+    const { body, errors, expectedVersion, idempotencyKey } = readClarificationRequest(req, ["message"]);
+    if (!errors.body) Object.assign(errors, validateClarificationText(body.message, { field: "message" }));
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const result = await eventModel.requestClarification({
+      eventId: req.visibleEvent.eventId,
+      actorId: req.user.user_id,
+      message: body.message.trim(),
+      expectedVersion,
+      idempotencyKey,
+    });
+    return await sendClarificationResult(req, res, result, "Clarification requested. The organiser has been notified.");
+  } catch (error) {
+    return sendClarificationError(req, res, next, error);
+  }
+};
+
+// POST /api/events/:id/clarifications/:round/messages — SPM-41 v2: the owner or
+// the assigned coordinator writes in the open thread. Outside the viewing scope
+// is 404 (requireVisibleEvent); same-organisation organisers read the thread but
+// cannot write in it (403); then 400 for the message; then 404 for an unknown
+// thread or 409 for a completed one. Returns the thread with the new message.
+const postClarificationMessage = async (req, res, next) => {
+  const { eventId, access } = req.visibleEvent;
+  try {
+    if (access.relationship === EVENT_RELATIONSHIP.ORGANISATION_MEMBER) return sendDomainError(res, "EVENT_READ_ONLY");
+    const round = readRound(req);
+    if (!round) return sendDomainError(res, "CLARIFICATION_NOT_FOUND");
+
+    const { body, errors, idempotencyKey } = readClarificationRequest(req, ["body"], { requireVersion: false });
+    if (!errors.body) {
+      Object.assign(errors, validateClarificationText(body.body, { field: "body", requiredMessage: MESSAGES.clarificationBodyRequired }));
+    }
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const result = await eventModel.postClarificationMessage({
+      eventId,
+      round,
+      actorId: req.user.user_id,
+      body: body.body.trim(),
+      idempotencyKey,
+    });
+    markReplay(res, result);
+    return res.status(201).json({ message: "Message sent.", clarification: await findThread(req, round) });
+  } catch (error) {
+    return sendClarificationError(req, res, next, error);
+  }
+};
+
+// Field errors for the owner's amendments, judged against the saved request:
+// the merged result must still be a complete submission. Registration settings,
+// the organisation and system fields are refused (403), unknown keys are 400.
+const checkAmendments = async (existing, changes) => {
+  if (changes === undefined) return { errors: { changes: MESSAGES.amendmentEmpty } };
+  if (!isPlainObject(changes)) return { errors: { changes: "Send the changed details as a JSON object." } };
+
+  const denied = {};
+  const unknown = [];
+  for (const key of Object.keys(changes)) {
+    if (KNOWN_AMENDMENT_FIELDS.has(key)) continue;
+    if (KNOWN_EVENT_FIELDS.has(key)) denied[key] = "This field cannot be changed during a clarification.";
+    else unknown.push(key);
+  }
+  if (hasErrors(denied)) return { denied };
+  if (unknown.length) return { errors: toUnsupportedFieldErrors(unknown) };
+
+  const input = eventModel.pickEventInput(changes);
+  if (Object.keys(input).length === 0) return { errors: { changes: MESSAGES.amendmentEmpty } };
+  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input));
+  // The 48-hour lead time applies only to a newly chosen start (team decision, 2026-10-24).
+  if (input.startDatetime === undefined && errors.startDatetime === MESSAGES.leadTime) delete errors.startDatetime;
+  return { input, errors };
+};
+
+// POST /api/events/:id/amendments — SPM-41 v2 AC3: while the thread is open the
+// owner saves amendments; the event stays AWAITING_CLARIFICATION until the
+// coordinator completes the thread. Same-organisation organisers get 403.
+const saveClarificationAmendments = async (req, res, next) => {
+  const { eventId, event: existing, access } = req.visibleEvent;
+  try {
+    if (access.relationship !== EVENT_RELATIONSHIP.OWNER) return sendDomainError(res, "EVENT_READ_ONLY");
+
+    const { body, errors, expectedVersion, idempotencyKey } = readClarificationRequest(req, ["changes"]);
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const { input, errors: fieldErrors, denied } = await checkAmendments(existing, body.changes);
+    if (denied) return sendDomainError(res, "FIELD_NOT_EDITABLE", denied);
+    if (hasErrors(fieldErrors)) return validationFailed(res, fieldErrors);
+
+    const result = await eventModel.saveClarificationAmendments({
+      eventId,
+      actorId: req.user.user_id,
+      input,
+      expectedVersion,
+      idempotencyKey,
+    });
+    markReplay(res, result);
+    const current = await loadEventForViewer(eventId, req.user);
+    if (!current) return eventNotFound(res);
+    return res.status(200).json({
+      message: "Amendments saved. Your coordinator can see what changed.",
+      event: eventModel.toEventView(current.event, req.user, current.access),
+    });
+  } catch (error) {
+    return sendClarificationError(req, res, next, error, {
+      COORDINATOR_CONFLICT: (response) =>
+        sendError(response, DOMAIN_ERRORS.COORDINATOR_CONFLICT[0], "COORDINATOR_CONFLICT", AMENDMENT_COORDINATOR_CONFLICT),
+    });
+  }
+};
+
+// POST /api/events/:id/clarifications/:round/complete — SPM-41 v2: the assigned
+// coordinator closes the open thread, and the event returns to UNDER_REVIEW with
+// the same coordinator. The version check means they have seen the latest
+// amendments (409 otherwise).
+const completeClarification = async (req, res, next) => {
+  try {
+    const round = readRound(req);
+    if (!round) return sendDomainError(res, "CLARIFICATION_NOT_FOUND");
+    const { errors, expectedVersion, idempotencyKey } = readClarificationRequest(req, []);
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const result = await eventModel.completeClarification({
+      eventId: req.visibleEvent.eventId,
+      round,
+      actorId: req.user.user_id,
+      expectedVersion,
+      idempotencyKey,
+    });
+    return await sendClarificationResult(req, res, result, "Clarification marked complete. The request is back under review.");
+  } catch (error) {
+    return sendClarificationError(req, res, next, error);
+  }
+};
+
+// POST /api/events/:id/clarifications/:round/read — SPM-41 v2: opening a thread
+// lets the next message notify this person again. Anyone who can see the event
+// may call it; only the owner's and assigned coordinator's reads are stored.
+const markClarificationRead = async (req, res, next) => {
+  try {
+    const round = readRound(req);
+    if (!round) return sendDomainError(res, "CLARIFICATION_NOT_FOUND");
+    await eventModel.markClarificationRead({ eventId: req.visibleEvent.eventId, round, actorId: req.user.user_id });
+    return res.status(204).end();
+  } catch (error) {
+    return handleError(error, res, next);
+  }
+};
+
 const getRequestOptions = async (req, res, next) => {
   try { res.status(200).json(await eventModel.findRequestOptions()); }
   catch (error) { return next(error); }
@@ -704,6 +951,13 @@ module.exports = {
   getAttendeeEventDetail,
   getEventRequest,
   getEventHistory,
+  getEventClarifications,
+  markEventHistoryViewed,
+  requestClarification,
+  postClarificationMessage,
+  saveClarificationAmendments,
+  completeClarification,
+  markClarificationRead,
   listAssignedEvents,
   listLeadAssignments,
   listUnassignedEvents,

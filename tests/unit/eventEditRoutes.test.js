@@ -113,6 +113,10 @@ describe("GET /api/events/:id (AC1)", () => {
       editableFields: [],
       canViewDraftHistory: false,
       canViewStaffHistory: false,
+      canRequestClarification: false,
+      canPostClarificationMessage: false,
+      canSaveAmendments: false,
+      canCompleteClarification: false,
     });
     expect(res.body.event).not.toHaveProperty("coordinatorId");
     expect(res.body.event).not.toHaveProperty("organiser");
@@ -134,6 +138,10 @@ describe("GET /api/events/:id (AC1)", () => {
           editableFields: ["title", "purpose", "description"],
           canViewDraftHistory: false,
           canViewStaffHistory: true,
+          canRequestClarification: true,
+          canPostClarificationMessage: false,
+          canSaveAmendments: false,
+          canCompleteClarification: false,
         },
       })
     );
