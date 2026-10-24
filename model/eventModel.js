@@ -268,7 +268,9 @@ const LIST_ATTENDEE_DISCOVERY_SELECT =
   "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name),registration(count),venue_booking(status,room(venue(venue_id,name,address)))";
 const REGISTERED_SEATS_FILTER = ["registration.registration_status", "REGISTERED"];
 
-const ATTENDEE_DISCOVERY_STATUSES = ["CONFIRMED", "PREPARATION"];
+// Attendees discover only confirmed events (SPM-44, Master 5.3). PREPARATION is
+// deliberately absent; registration availability below is a separate rule.
+const ATTENDEE_DISCOVERY_STATUS = EVENT_STATUS.CONFIRMED;
 
 const attendeeLocation = (bookings = []) => {
   // The legacy schema has no primary-venue flag. Publish only an unambiguous
@@ -846,7 +848,7 @@ const attendeeDiscoveryQuery = () =>
     .select(LIST_ATTENDEE_DISCOVERY_SELECT)
     .eq(...REGISTERED_SEATS_FILTER)
     .eq("is_published", true)
-    .in("status", ATTENDEE_DISCOVERY_STATUSES)
+    .eq("status", ATTENDEE_DISCOVERY_STATUS)
     .gt("end_datetime", new Date().toISOString());
 
 // Soonest start first; event_id breaks ties between equal start times.
