@@ -2,9 +2,9 @@
 
 | Document field | Value |
 | --- | --- |
-| Version | 1.3 |
-| Updated | 21 October 2026 (1.3.1) |
-| Status | Release 1 baseline: customer requirements complete (Week 7 changes and clarification sessions 1–3). 1.1 adds the shared frontend workspace agreement. 1.2 moves venue setup/turnaround times, holds and blocks to MongoDB under a per-venue PostgreSQL lock (T27, pending team sign-off) and makes notifications in-app only; 1.3 adds venue photo galleries in MongoDB (T28); all take effect when the `SPM-181-review-venue-req` branches are merged. Repository verification required per ticket |
+| Version | 1.3.2 |
+| Updated | 23 October 2026 |
+| Status | Release 1 baseline: customer requirements complete (Week 7 changes and clarification sessions 1–3). Section 12.3 lists what each version changed and whether it is accepted, implemented or waiting for its branches to reach `main`. Repository verification required per ticket |
 | Application style | Next.js frontend with one JavaScript/Express modular-monolith backend |
 | Repositories | `connectsphere-g8t6` (frontend) and `connectsphere-events-g8t6-backend` (backend) |
 | Data platform | Supabase PostgreSQL and Supabase Auth; MongoDB Atlas for venue and equipment detail, venue setup/turnaround times, the venue calendar (holds and blocks) and venue photo galleries |
@@ -323,6 +323,7 @@ connectsphere-g8t6/
 │   ├── coordinator-lead/
 │   ├── venue-staff/
 │   ├── tech-support/
+│   ├── safety-officer/            # Safety Officer dashboard and step-by-step review (SPM-243)
 │   └── attendee/
 ├── lib/
 │   ├── api.ts                     # the single backend API client
@@ -379,7 +380,6 @@ connectsphere-g8t6/
 │   │       │   ├── page.tsx
 │   │       │   └── [venueId]/page.tsx
 │   │       ├── technical-requests/page.tsx
-│   │       ├── safety-reviews/page.tsx
 │   │       ├── my-registrations/page.tsx
 │   │       └── notifications/page.tsx
 │   ├── components/
@@ -693,12 +693,11 @@ Payments, pricing, full reporting/export suites, general document management, re
 | URL | Main purpose |
 | --- | --- |
 | `/login`, `/signup` | Authentication and permitted external onboarding |
-| `/dashboard` | Role-specific drafts, assignments and outstanding work; for Venue Staff, the venue booking requests ("My Requests", SPM-181): pending first by default, searched as you type, filtered by status, venue and date (no event filter: events are found by search), sortable by date/time, venue attendance, last accessed (the later of this viewer's last opening, kept in the browser, and the booking's last edit) and event title, with a one-button order toggle; booking panels in the event view ease open and closed |
-| `/events`, `/events/new`, `/events/[eventId]` | Event discovery/list, creation and role-aware workspace; Venue Staff open an event through its venue bookings, with `?booking=<id>` selecting one (SPM-181) |
+| `/dashboard` | Role-specific drafts, assignments and outstanding work; for Venue Staff, the venue booking requests ("My Requests", SPM-181): pending first by default, searched as you type, filtered by status, venue and date (no event filter: events are found by search), sortable by date/time, venue attendance, last accessed (the later of this viewer's last opening, kept in the browser, and the booking's last edit) and event title, with a one-button order toggle; booking panels in the event view ease open and closed; for Safety Officers, the shared "Awaiting review" queue and their "My reviews" (SPM-243) |
+| `/events`, `/events/new`, `/events/[eventId]` | Event discovery/list, creation and role-aware workspace; Venue Staff open an event through its venue bookings, with `?booking=<id>` selecting one (SPM-181); Safety Officers review an event's safety round there, in a step-by-step review view (SPM-243) |
 | `/assignments` | Lead's unassigned queue, supervised events, transfer requests and handovers |
 | `/venues`, `/venues/[venueId]` | Venue catalogue with search and filters (Coordinators, Leads); venue management, status and details including setup/turnaround (Venue Staff, "My Venues": searched as you type, sortable by name, capacity, last updated, setup and turnaround time, shown as a list or large icons; `/venues/[venueId]` is Venue Staff only and opens with the venue's photo gallery carousel, where Venue Staff upload, re-caption, reorder, replace and delete photos; the first photo is the cover on the large-icon cards, T28); the availability calendar at `/venues?view=availability` in the shared year/month/week/day calendar (Coordinators, Venue Staff); blocks and suitability |
 | `/technical-requests` | Technical review and preparation queue |
-| `/safety-reviews` | Safety Officer's review queue and review workspace |
 | `/my-registrations` | Current user's registrations, invitations and withdrawal actions |
 | `/notifications` | Durable inbox and read state |
 
@@ -711,7 +710,7 @@ Payments, pricing, full reporting/export suites, general document management, re
 | `COORDINATOR` | Event Coordinator | `/dashboard` |
 | `VENUE_STAFF` | Venue Staff | `/dashboard` |
 | `TECH_SUPPORT` | Technical Support | `/dashboard` |
-| `SAFETY_OFFICER` | Safety Officer | Not implemented yet; added by its ticket |
+| `SAFETY_OFFICER` | Safety Officer | `/dashboard` |
 | `ATTENDEE` | Attendee | `/my-registrations` |
 
 `/dashboard` renders the signed-in role's dashboard. A URL in the first table appears in navigation only once its page and access rules are implemented; until then the item renders disabled. A role landing page is an extension point for that role's tickets, not a claim that its workflows exist.
@@ -760,7 +759,7 @@ Do not trust a decoded-only token, a body-supplied actor ID, an `X-User-ID` head
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Private draft | Owner read/write only | No access | No access | No access | No access | No access | No access |
 | Unassigned queue | Own event shows "Unassigned" | Basic information for every queued event (all Leads) | No access | No access | No access | No access | No access |
-| Submitted event | Own and permitted organization events; limited editing | Events they supervise, read-only | Assigned events | Relevant venue information | Assigned technical information | Events in the safety queue or claimed by them, with relevant change history | Published attendee-safe view only |
+| Submitted event | Own and permitted organization events; limited editing | Events they supervise, read-only | Assigned events | Relevant venue information | Assigned technical information | Events in the safety queue, claimed by them or decided by them, with relevant change history | Published attendee-safe view only |
 | Coordinator assignment or reassignment | No | Assign from the queue; reassign events they supervise | No; may request a transfer | No | No | No | No |
 | Lifecycle decision | No | No | Assigned coordinator only | No | No | Safety outcome only | No |
 | Venue arrangements | Each venue's status, unavailability and next action | Read | Request holds, bookings and replacements; choose the primary venue | Maintain venues, buffers, holds and blocks; decide bookings; record venue preparation | Relevant operational read | Read venue safety information | Primary venue only |
@@ -1447,7 +1446,7 @@ IDs: `D` items predate v0.8, `Q` items were raised during the Week 7 review, `T`
 | T7 | Any change to venue bookings, technical arrangements or expected attendance invalidates safety approval | These are the review factors in Week 7 change #6 |
 | T8 | Events without technical needs can be submitted for safety review once all venue bookings are approved | There is no technical arrangement to wait for |
 | T11 | Completion runs automatically after the event end, and the coordinator may also complete manually | Session 2 defines completed as the event date/time having passed |
-| T12 | New pages use `/assignments` and `/safety-reviews` | Follows the URL style in section 10.5.4 |
+| T12 | New pages use `/assignments`. Safety Officers work from `/dashboard` and review an event on `/events/[eventId]`, with no separate `/safety-reviews` page | Follows the URL style in section 10.5.4; every staff role lands on its own `/dashboard` and opens events in the shared event workspace (3.4). Amended 22 October 2026 for SPM-243 |
 | T14 | The coordinator explicitly submits an event for safety review | Keeps lifecycle moves explicit, as with feasibility and confirmation |
 | T15 | New holds, bookings and technical requests are created only in `PLANNING` | Prevents arrangement changes from bypassing the safety review |
 | T16 | Setup and turnaround times are each set once and can never be changed afterwards | Session 3 (times cannot be changed once set); developer decision of 20 October 2026 applies it to every venue, replacing the earlier rule that allowed changes while no future booking or hold existed |
@@ -1517,6 +1516,7 @@ If this master, Jira, a repository README and implemented code disagree, surface
 
 | Version | Date | Status | Change |
 | --- | --- | --- | --- |
+| 1.3.2 | 2026-10-23 | Implemented on backend and frontend `feature/SPM-243-safety-officer-review`; takes effect when merged | Combines the two copies of this master into one text. Before it, backend `main` held 1.2 and frontend `main` held 1.3.1 (merged with the frontend SPM-181 work), and the SPM-243 branch had amended 1.2 as its own 1.2.1. This version is 1.3.1 plus that amendment, and both repositories hold it byte for byte (backend canonical). T12 amended by team decision of 22 October 2026: Safety Officers work from `/dashboard` (the shared "Awaiting review" queue and "My reviews") and review an event on `/events/[eventId]`; there is no `/safety-reviews` page (3.4 URL and role-home tables, 2.5 target tree, 12.1.2). The Safety Officer's event scope in 4.2 also covers rounds they decided, as SPM-243 AC2 states. 2.4 lists `components/safety-officer/`. The header now gives only the version and date and points here instead of repeating each release. No business rule change. Jira request: SPM-243 (AC1–AC3). Compatibility: no `/safety-reviews` route was built; the Safety Officer's navigation has one Dashboard tab, and backend `ROLE_HOME_PATHS.SAFETY_OFFICER` is `/dashboard`. The backend copy now also describes 1.3 and 1.3.1 (T28 venue photos, `venuePhotoModel.js`, set-once setup/turnaround), whose backend code is still on backend `SPM-181-review-venue-req` and takes effect when that branch is merged. Verified implementation/database version: PostgreSQL head `20261022123827_spm243_safety_review_hardening`; after merging `main` (SPM-173, SPM-72/73/181) into SPM-243: backend unit 986/986, PGlite database 48/48, live integration 397/398 (the failure, `venue.integration` TC-VC-001, expects the venue shape from before T27 and also fails on `main`; `venueMaintenance` cleanup deletes fixture users before their venues); frontend lint with no errors, unit 82/82 and 1/1, browser suite 183/183 |
 | 1.3.1 | 2026-10-21 | Implemented on backend and frontend `SPM-181-review-venue-req`; takes effect when merged | Venue Staff tools, no business-rule change (developer requests of 21 October 2026). My Requests drops the event filter (SPM-181 AC5 now covers status, venue and date; events are found with the search by title or `REQ-` reference); "Last opened" and "Last edited" become one "Last accessed" sort, computed in the browser as the later of the viewer's last opening and `venue_booking.updated_at`; the order select becomes a toggle button on My Requests and My Venues (3.4). The gallery uploads several files at once by file picker or drag and drop, and one Edit photo dialog holds caption, position, image replacement and deletion. Large-icon cards have the status on the photo and fixed padding. Development data: `npm run seed:venue-photos` stores free Unsplash photos (Unsplash License) for the ten non-test venues, tagged `fixture: "spm181-unsplash"`; `npm run seed:venue-photos:cleanup` removes them. Sections changed: header, 3.4. Jira request: SPM-181 (developer follow-up). Compatibility: no API or schema change; the backend still accepts `eventId` and `sort=lastEdited`. Verified implementation/database version: backend unit 950/950; frontend unit 64/64 and venue browser journeys 44/44; 29 seeded photos in `connectsphere_dev` |
 | 1.3 | 2026-10-21 | Implemented on backend and frontend `SPM-181-review-venue-req`; takes effect when merged | T28: venue photo galleries in MongoDB `venue_photos` (6.4, M3). `venuePhotoModel.js` joins the MongoDB access files (2.2, 2.3). Venue Staff routes: `GET /api/venues/:venueId/photos`, `POST /api/venues/:venueId/photos` (raw image body, optional `?caption=`), `GET`, `PUT` (caption, position) and `DELETE /api/venues/:venueId/photos/:photoId`, and `PUT /api/venues/:venueId/photos/:photoId/image` (replace). `GET /api/venues/manage` rows add `coverPhotoId`. The venue page opens with the gallery carousel and the large-icon cards show the cover (3.4); section 11 adds a venue photo row. Sections changed: header, 2.2, 2.3, 3.4, 6.4, 11, 12.1.2 (T28) and 12.1.3 (M3). Jira request: SPM-181 (developer brief of 21 October 2026). Compatibility: MongoDB script `0003_venue_photos` (new collection, validator and `venue_position` index), applied to `connectsphere_dev` on 2026-10-21; no PostgreSQL change. Verified implementation/database version: backend unit tests 948/948; live integration `venuePhotos` 8/8, `venue` 14/14, `venueMaintenance` 18/18, `venueSortSearch` 12/12; frontend venue browser journeys 27/27; live seed Venue Staff upload, cover and delete against Atlas |
 | 1.2.1 | 2026-10-21 | Implemented on backend and frontend `SPM-181-review-venue-req`; takes effect when merged | Venue Staff tools, no business-rule change. The booking reference is `venue_booking.booking_id`: the generated `booking_reference` column is dropped, and `venue_booking.updated_at` (trigger-maintained) records the last edit (6.2). My Requests: pending first by default, search as you type (booking ID, request reference, label, event title, venue name), sorts by date/time, attendance, last opened, last edited and event title; the venue filter reads every non-deleted venue from `GET /api/venues/manage/options` and refreshes on focus (3.4). My Venues: search as you type, sorts by name, capacity, last updated (PostgreSQL) and setup/turnaround time (MongoDB, sorted in memory; falls back to name order when MongoDB is unavailable), list or large-icon layout (3.4). The availability calendar uses the shared calendar component; the availability range limit is 366 days so the year view loads in one request. Venue photos stayed outside the baseline in this version; 1.3 adds them (T28). Jira request: SPM-181 (developer follow-up). Compatibility: PostgreSQL migration `20261021090000_spm181_booking_id_and_updated_at`, applied manually in the SQL editor and recorded in the migration history; API responses drop `bookingReference` and add `updatedAt`, `setupMinutes`/`turnaroundMinutes` on My Venues rows, `detailsAvailable` and `sortNotChecked`; new `q`, `sort`, `order` parameters. Known gap: setup/turnaround first-set writes are serialised on `venue_details.version` but do not yet take the PostgreSQL venue lock of 7.4 step 1 (no transactional PostgreSQL client in the backend). Verified implementation/database version: backend unit tests 908/908, live integration `venueSortSearch.integration.test.js` 12/12; frontend lint, 62 unit tests, venue browser journeys 34/34 |

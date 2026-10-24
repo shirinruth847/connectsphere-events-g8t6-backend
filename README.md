@@ -426,7 +426,6 @@ connectsphere-events-g8t6-backend/
 │   ├── eventController.js
 │   ├── registrationController.js
 │   └── venueController.js
-│   └── registrationController.js
 ├── jobs/                 # Background work started by server.js
 │   └── eventCompletionJob.js  # Completes ended events (SPM-173)
 ├── middleware/           # Request/response middleware functions
