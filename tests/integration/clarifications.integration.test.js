@@ -1,9 +1,10 @@
-// SPM-41 live integration tests for clarification rounds: the real Express routes,
-// Supabase Auth and the shared development database. Needs the
-// spm41_clarification_rounds and spm41_clarification_lifecycle migrations and
-// TEST_DATABASE_URL. The read tests insert rounds through the privileged test
-// connection to check what the table itself guarantees; the action tests write
-// them through POST /clarifications and /resubmit, as the application does.
+// SPM-41 live integration tests for clarification threads: the real Express
+// routes, Supabase Auth and the shared development database. Needs the
+// spm41_clarification_rounds, spm41_clarification_lifecycle and
+// spm41_clarification_threads migrations and TEST_DATABASE_URL. The read tests
+// insert rounds through the privileged test connection to check what the tables
+// themselves guarantee; the action tests write threads, messages and amendments
+// through the API, as the application does.
 const { Client } = require("pg");
 const request = require("supertest");
 const app = require("../../server");
@@ -109,18 +110,18 @@ describe("GET /api/events/:id/clarifications (SPM-41 AC3, TC-04)", () => {
       status: "OPEN",
       message: "Please confirm the stage size.",
       requestedBy: { userId: userId("coordinator"), name: expect.any(String) },
-      response: null,
-      respondedAt: null,
-      respondedBy: null,
+      completedAt: null,
+      completedBy: null,
+      // Inserted directly, so the thread has no messages.
+      messages: [],
     }));
     expect(answered).toEqual(expect.objectContaining({
       round: 1,
-      status: "RESPONDED",
+      status: "COMPLETED",
       message: "What is the expected attendance?",
-      response: null,
-      respondedBy: { userId: userId("organiserA"), name: expect.any(String) },
+      completedBy: { userId: userId("organiserA"), name: expect.any(String) },
     }));
-    expect(Date.parse(answered.respondedAt)).toBe(Date.parse("2026-10-19T02:00:00Z"));
+    expect(Date.parse(answered.completedAt)).toBe(Date.parse("2026-10-19T02:00:00Z"));
   };
 
   test("[SPM-41-AC3] should_return_every_round_newest_first_when_the_owner_opens_them", async () => {
@@ -251,10 +252,57 @@ describe("what the clarifications table guarantees (SPM-41)", () => {
   });
 });
 
-// ---------- request clarification and resubmit (SPM-41 AC1-AC5) ----------
+describe("what the clarification_messages table guarantees (SPM-41 v2)", () => {
+  const messageSql = "INSERT INTO public.clarification_messages (clarification_id, author_id, body) VALUES ($1, $2, $3)";
+  const roundId = async (round) =>
+    (await admin.query("SELECT clarification_id FROM public.clarifications WHERE event_id = $1 AND round_number = $2", [returnedEvent, round])).rows[0].clarification_id;
+
+  test("[SPM-41-TC-05] should_never_let_a_message_be_rewritten", async () => {
+    await admin.query("BEGIN");
+    let error = null;
+    try {
+      const { rows } = await admin.query(`${messageSql} RETURNING message_id`, [await roundId(2), userId("organiserA"), "A 6m stage."]);
+      await admin.query("UPDATE public.clarification_messages SET body = 'Rewritten.' WHERE message_id = $1", [rows[0].message_id]);
+    } catch (caught) {
+      error = caught;
+    } finally {
+      await admin.query("ROLLBACK");
+    }
+
+    expect(error && error.message).toBe("CLARIFICATION_MESSAGE_IMMUTABLE");
+  });
+
+  test("[SPM-41] should_refuse_a_message_in_a_completed_thread", async () => {
+    const error = await attempt(messageSql, [await roundId(1), userId("organiserA"), "Too late."]);
+
+    expect(error && error.message).toBe("CLARIFICATION_CLOSED");
+  });
+
+  test("[SPM-41] should_refuse_a_blank_message_or_one_over_2000_characters", async () => {
+    const id = await roundId(2);
+    for (const body of ["   ", "a".repeat(2001)]) {
+      const error = await attempt(messageSql, [id, userId("organiserA"), body]);
+      expect(error && error.code).toBe("23514");
+    }
+  });
+
+  test("[SPM-41] should_let_the_backend_runtime_read_but_never_write_messages_reads_or_history_views", async () => {
+    for (const table of ["clarification_messages", "clarification_reads", "event_history_views"]) {
+      const read = await supabase.from(table).select("*").limit(1);
+      expect(read.error).toBeNull();
+    }
+    const insert = await supabase.from("clarification_messages").insert({ clarification_id: await roundId(2), author_id: userId("organiserA"), body: "Hi." });
+    const view = await supabase.from("event_history_views").insert({ user_id: userId("organiserA"), event_id: returnedEvent, last_viewed_at: new Date().toISOString() });
+    for (const result of [insert, view]) {
+      expect(result.error && result.error.code).toBe("42501");
+    }
+  });
+});
+
+// ---------- the clarification thread through the API (SPM-41 AC1-AC5, v2) ----------
 // One event goes through the whole loop in order: each test starts from the
 // state the previous one left, so they must run in this file's order.
-describe("request clarification and resubmit through the API (SPM-41)", () => {
+describe("clarification threads through the API (SPM-41)", () => {
   let eventId;
   const key = (name) => `spm41-${runId}-${name}`;
 
@@ -265,7 +313,12 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
   };
   const requestClarification = (account, body, idempotencyKey) =>
     call("post", `/api/events/${eventId}/clarifications`, account, body, idempotencyKey);
-  const resubmit = (account, body, idempotencyKey) => call("post", `/api/events/${eventId}/resubmit`, account, body, idempotencyKey);
+  const postMessage = (account, round, body, idempotencyKey) =>
+    call("post", `/api/events/${eventId}/clarifications/${round}/messages`, account, { body }, idempotencyKey);
+  const markRead = (account, round) => call("post", `/api/events/${eventId}/clarifications/${round}/read`, account);
+  const amend = (account, body, idempotencyKey) => call("post", `/api/events/${eventId}/amendments`, account, body, idempotencyKey);
+  const complete = (account, round, body, idempotencyKey) =>
+    call("post", `/api/events/${eventId}/clarifications/${round}/complete`, account, body, idempotencyKey);
 
   const eventState = async (id = eventId) =>
     (await admin.query(
@@ -274,8 +327,15 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
     )).rows[0];
   const storedRounds = async () =>
     (await admin.query(
-      "SELECT round_number, status, message, response, requested_by, responded_by FROM public.clarifications WHERE event_id = $1 ORDER BY round_number",
+      "SELECT round_number, status, message, requested_by, responded_by FROM public.clarifications WHERE event_id = $1 ORDER BY round_number",
       [eventId]
+    )).rows;
+  const storedMessages = async (round) =>
+    (await admin.query(
+      `SELECT m.author_id, m.body FROM public.clarification_messages AS m
+         JOIN public.clarifications AS c ON c.clarification_id = m.clarification_id
+        WHERE c.event_id = $1 AND c.round_number = $2 ORDER BY m.created_at, m.message_id`,
+      [eventId, round]
     )).rows;
   const notificationsFor = async (account) =>
     (await admin.query(
@@ -289,6 +349,7 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
       "SELECT log_id, user_id, action, details, actor_role, changes, audience, \"timestamp\" FROM public.activity_log WHERE entity_name = 'event' AND entity_id = $1 AND action = $2 ORDER BY log_id",
       [eventId, action]
     )).rows;
+  const openThread = async (account) => (await getRounds(eventId, account)).body.clarifications.find((round) => round.status === "OPEN");
 
   const QUESTION = "Please confirm the stage size and whether you need a lectern.";
 
@@ -331,22 +392,29 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
     expect(await storedRounds()).toEqual([]);
   });
 
-  test("[SPM-41-TC-01] should_return_the_event_store_the_round_and_notify_the_owner", async () => {
+  test("[SPM-41-TC-01] should_open_a_thread_whose_first_message_is_the_question_and_notify_the_owner", async () => {
     const before = await eventState();
 
     const res = await requestClarification("coordinator", { message: QUESTION, version: before.version }, key("request-1"));
 
     expect(res.status).toBe(200);
     expect(res.body.event).toEqual(expect.objectContaining({ status: "AWAITING_CLARIFICATION", version: before.version + 1 }));
-    expect(res.body.event.permissions).toEqual(expect.objectContaining({ canRequestClarification: false, canResubmit: false }));
+    expect(res.body.event.permissions).toEqual(expect.objectContaining({
+      canRequestClarification: false,
+      canPostClarificationMessage: true,
+      canCompleteClarification: true,
+    }));
     expect(res.body.clarification).toEqual(expect.objectContaining({
       round: 1,
       status: "OPEN",
       message: QUESTION,
       requestedBy: { userId: userId("coordinator"), name: expect.any(String) },
+      messages: [expect.objectContaining({ body: QUESTION, author: expect.objectContaining({ userId: userId("coordinator"), role: "COORDINATOR" }) })],
+      unreadCount: 0,
     }));
     expect(await eventState()).toEqual(expect.objectContaining({ status: "AWAITING_CLARIFICATION", coordinator_id: userId("coordinator") }));
     expect(await storedRounds()).toEqual([expect.objectContaining({ round_number: 1, status: "OPEN", message: QUESTION })]);
+    expect(await storedMessages(1)).toEqual([{ author_id: userId("coordinator"), body: QUESTION }]);
     const notes = await notificationsFor("organiserA2");
     expect(notes).toHaveLength(1);
     expect(notes[0].title).toBe("Clarification requested");
@@ -376,7 +444,7 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
     expect(JSON.stringify(history.body)).toContain(QUESTION);
   });
 
-  test("[SPM-41-AC1] should_replay_a_retried_request_without_a_second_round_or_notification", async () => {
+  test("[SPM-41-AC1] should_replay_a_retried_request_without_a_second_thread_or_notification", async () => {
     const res = await requestClarification("coordinator", { message: QUESTION, version: (await eventState()).version - 1 }, key("request-1"));
     const reused = await requestClarification("coordinator", { message: "A different question.", version: 1 }, key("request-1"));
 
@@ -385,6 +453,7 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
     expect(reused.status).toBe(409);
     expect(reused.body.code).toBe("IDEMPOTENCY_KEY_REUSED");
     expect(await storedRounds()).toHaveLength(1);
+    expect(await storedMessages(1)).toHaveLength(1);
     expect(await notificationsFor("organiserA2")).toHaveLength(1);
   });
 
@@ -401,31 +470,71 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
     expect(await eventState()).toEqual(before);
   });
 
-  test("[SPM-41-AC3] should_offer_resubmit_to_the_owner_only", async () => {
+  test("[SPM-41-AC3] should_offer_messages_and_amendments_to_the_owner_only", async () => {
     const owner = await call("get", `/api/events/${eventId}`, "organiserA2");
     const colleague = await call("get", `/api/events/${eventId}`, "organiserA");
 
-    expect(owner.body.event.permissions.canResubmit).toBe(true);
-    expect(colleague.body.event.permissions.canResubmit).toBe(false);
+    expect(owner.body.event.permissions).toEqual(expect.objectContaining({ canPostClarificationMessage: true, canSaveAmendments: true, canCompleteClarification: false }));
+    expect(colleague.body.event.permissions).toEqual(expect.objectContaining({ canPostClarificationMessage: false, canSaveAmendments: false }));
   });
 
-  test("[SPM-41-AC3] should_answer_403_when_a_same_organisation_organiser_resubmits", async () => {
+  test("[SPM-41-AC3] should_answer_403_when_a_same_organisation_organiser_writes_or_amends", async () => {
     const before = await eventState();
 
-    const res = await resubmit("organiserA", { response: "Answering for them.", version: before.version }, key("colleague"));
+    const message = await postMessage("organiserA", 1, "Answering for them.", key("colleague-message"));
+    const amendment = await amend("organiserA", { changes: { title: "Theirs" }, version: before.version }, key("colleague-amend"));
 
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe("EVENT_READ_ONLY");
+    expect(message.status).toBe(403);
+    expect(message.body.code).toBe("EVENT_READ_ONLY");
+    expect(amendment.status).toBe(403);
+    expect(amendment.body.code).toBe("EVENT_READ_ONLY");
+    expect(await storedMessages(1)).toHaveLength(1);
     expect(await eventState()).toEqual(before);
-    expect((await storedRounds())[0].status).toBe("OPEN");
   });
 
-  test("[SPM-41-AC3] should_roll_back_everything_when_the_amended_dates_clash_with_the_coordinators_schedule", async () => {
+  test("[SPM-41-AC3] should_add_the_owners_reply_and_notify_the_coordinator_once_until_they_open_the_thread", async () => {
+    const first = await postMessage("organiserA2", 1, "The stage is 6m wide.", key("reply-1"));
+    const second = await postMessage("organiserA2", 1, "No lectern needed.", key("reply-2"));
+
+    expect(first.status).toBe(201);
+    expect(first.body.clarification.messages.map((message) => message.body)).toEqual([QUESTION, "The stage is 6m wide."]);
+    expect(second.status).toBe(201);
+    const notes = await notificationsFor("coordinator");
+    expect(notes).toEqual([expect.objectContaining({ title: "New clarification message" })]);
+    expect((await openThread("coordinator")).unreadCount).toBe(2);
+    // Same-organisation organisers read the thread, but their reads are not tracked.
+    expect((await openThread("organiserA")).unreadCount).toBeNull();
+  });
+
+  test("[SPM-41-AC3] should_replay_a_retried_message_without_a_second_copy", async () => {
+    const res = await postMessage("organiserA2", 1, "The stage is 6m wide.", key("reply-1"));
+
+    expect(res.status).toBe(201);
+    expect(res.headers["idempotent-replayed"]).toBe("true");
+    expect(await storedMessages(1)).toHaveLength(3);
+  });
+
+  test("[SPM-41-AC3] should_notify_again_after_the_coordinator_opens_the_thread", async () => {
+    const read = await markRead("coordinator", 1);
+    expect(read.status).toBe(204);
+    expect((await openThread("coordinator")).unreadCount).toBe(0);
+
+    const reply = await postMessage("coordinator", 1, "Thanks. Is catering needed?", key("coordinator-reply"));
+    const answer = await postMessage("organiserA2", 1, "Yes, for 80.", key("reply-3"));
+
+    expect(reply.status).toBe(201);
+    expect(answer.status).toBe(201);
+    expect((await notificationsFor("coordinator")).map((note) => note.title)).toEqual(["New clarification message", "New clarification message"]);
+    expect((await notificationsFor("organiserA2")).map((note) => note.title)).toEqual(["Clarification requested", "New clarification message"]);
+  });
+
+  test("[SPM-41-AC3] should_roll_back_amendments_whose_dates_clash_with_the_coordinators_schedule", async () => {
+    await markRead("coordinator", 1);
     const before = await eventState();
+    const notesBefore = await notificationsFor("coordinator");
 
     // "reassignable" holds the same coordinator on 2027-03-10 10:00-12:00.
-    const res = await resubmit("organiserA2", {
-      response: "Moved to the 10th.",
+    const res = await amend("organiserA2", {
       changes: { title: "Should not be saved", startDatetime: "2027-03-10T10:30:00Z", endDatetime: "2027-03-10T11:30:00Z" },
       version: before.version,
     }, key("clash"));
@@ -436,12 +545,11 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
       error: "The new dates clash with your coordinator's schedule. Choose different dates or contact your coordinator.",
     });
     expect(await eventState()).toEqual(before);
-    expect(await storedRounds()).toEqual([expect.objectContaining({ status: "OPEN", response: null })]);
     expect(await historyEntries("CLARIFICATION_AMENDED")).toEqual([]);
-    expect(await notificationsFor("coordinator")).toEqual([]);
+    expect(await notificationsFor("coordinator")).toEqual(notesBefore);
   });
 
-  test("[SPM-41-AC3] should_roll_back_the_amended_fields_when_a_later_step_of_the_resubmit_fails", async () => {
+  test("[SPM-41-AC3] should_roll_back_the_amended_fields_when_a_later_step_fails", async () => {
     const before = await eventState();
 
     // The title update succeeds inside the function; the venue preference write
@@ -449,7 +557,7 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
     let error = null;
     try {
       await admin.query(
-        "SELECT public.resubmit_event_after_clarification($1, $2, $3, 'Answer.', $4::jsonb, '[2147483000]'::jsonb, NULL, NULL, NULL)",
+        "SELECT public.save_clarification_amendments($1, $2, $3, $4::jsonb, '[2147483000]'::jsonb, NULL, NULL, NULL)",
         [eventId, userId("organiserA2"), before.version, JSON.stringify({ title: "Should roll back" })]
       );
     } catch (caught) {
@@ -458,105 +566,146 @@ describe("request clarification and resubmit through the API (SPM-41)", () => {
 
     expect(error && error.code).toBe("23503");
     expect(await eventState()).toEqual(before);
-    expect(await storedRounds()).toEqual([expect.objectContaining({ status: "OPEN", response: null })]);
     expect(await historyEntries("CLARIFICATION_AMENDED")).toEqual([]);
-    expect(await historyEntries("EVENT_RESUBMITTED")).toEqual([]);
   });
 
-  test("[SPM-41-AC3] should_refuse_a_resubmit_that_neither_answers_nor_changes_anything", async () => {
+  test("[SPM-41-AC3] should_refuse_amendments_that_change_nothing", async () => {
     const before = await eventState();
 
-    const res = await resubmit("organiserA2", { changes: { expectedAttendance: before.expected_attendance }, version: before.version }, key("same"));
+    const res = await amend("organiserA2", { changes: { expectedAttendance: before.expected_attendance }, version: before.version }, key("same"));
 
     expect(res.status).toBe(400);
-    expect(res.body.fields.response).toBe("Add a response or change at least one detail before resubmitting.");
+    expect(res.body.fields.changes).toBe("Change at least one detail before saving.");
     expect(await eventState()).toEqual(before);
   });
 
-  test("[SPM-41-TC-04] should_return_the_event_to_review_with_the_same_coordinator_and_keep_the_round_visible", async () => {
+  test("[SPM-41-TC-04] should_save_amendments_keep_the_event_returned_and_notify_the_coordinator", async () => {
     const before = await eventState();
 
-    const res = await resubmit("organiserA2", {
-      response: "The stage is 6m wide; no lectern needed.",
+    const res = await amend("organiserA2", {
       changes: { title: `${before.title} (amended)`, expectedAttendance: 80 },
       version: before.version,
-    }, key("resubmit-1"));
+    }, key("amend-1"));
 
     expect(res.status).toBe(200);
-    expect(res.body.event.permissions.canResubmit).toBe(false);
-    expect(res.body.clarification).toEqual(expect.objectContaining({
-      round: 1,
-      status: "RESPONDED",
-      response: "The stage is 6m wide; no lectern needed.",
-      respondedBy: { userId: userId("organiserA2"), name: expect.any(String) },
-    }));
+    expect(res.body.event.permissions.canSaveAmendments).toBe(true);
     expect(await eventState()).toEqual(expect.objectContaining({
-      status: "UNDER_REVIEW",
+      status: "AWAITING_CLARIFICATION",
+      version: before.version + 1,
       coordinator_id: userId("coordinator"),
       title: `${before.title} (amended)`,
       expected_attendance: 80,
     }));
-
     const [amended] = await historyEntries("CLARIFICATION_AMENDED");
     expect(amended).toEqual(expect.objectContaining({ user_id: userId("organiserA2"), audience: "ORGANISER_SAFE" }));
     expect(amended.changes).toEqual({
       title: { before: before.title, after: `${before.title} (amended)` },
       expectedAttendance: { before: before.expected_attendance, after: 80 },
     });
-    const [resubmitted] = await historyEntries("EVENT_RESUBMITTED");
-    expect(resubmitted.details).toContain("no lectern needed");
-
-    const notes = await notificationsFor("coordinator");
-    expect(notes).toHaveLength(1);
-    expect(notes[0].title).toBe("Event request resubmitted");
-
-    const rounds = await getRounds(eventId, "coordinator");
-    expect(rounds.body.clarifications).toEqual([expect.objectContaining({ round: 1, status: "RESPONDED", message: QUESTION })]);
+    expect((await notificationsFor("coordinator")).at(-1).title).toBe("Event request amended");
   });
 
-  test("[SPM-41-AC3] should_replay_a_retried_resubmit_without_a_second_notification", async () => {
+  test("[SPM-41-AC3] should_replay_retried_amendments_without_a_second_notification", async () => {
     const before = await eventState();
-    const [round] = await storedRounds();
+    const notesBefore = await notificationsFor("coordinator");
 
-    // The same body as the first attempt, made against the version it loaded.
-    const res = await resubmit("organiserA2", {
-      response: round.response,
+    const res = await amend("organiserA2", {
       changes: { title: before.title, expectedAttendance: 80 },
-      version: before.version - 2,
-    }, key("resubmit-1"));
+      version: before.version - 1,
+    }, key("amend-1"));
 
     expect(res.status).toBe(200);
     expect(res.headers["idempotent-replayed"]).toBe("true");
     expect(await eventState()).toEqual(before);
-    expect(await notificationsFor("coordinator")).toHaveLength(1);
+    expect(await notificationsFor("coordinator")).toEqual(notesBefore);
   });
 
-  test("[SPM-41-AC1] should_keep_every_round_when_the_event_is_returned_again", async () => {
-    const question = "Thanks. Can you also confirm catering numbers?";
+  test("[SPM-41-AC3] should_refuse_to_complete_against_a_version_from_before_the_amendments", async () => {
+    const before = await eventState();
+
+    const res = await complete("coordinator", 1, { version: before.version - 1 }, key("complete-stale"));
+
+    expect(res.status).toBe(409);
+    expect(res.body.event).toEqual(expect.objectContaining({ version: before.version, title: before.title }));
+    expect(await eventState()).toEqual(before);
+  });
+
+  test("[SPM-41-AC3] should_answer_403_when_the_owner_completes_the_thread", async () => {
+    const res = await complete("organiserA2", 1, { version: (await eventState()).version }, key("complete-owner"));
+
+    expect(res.status).toBe(403);
+    expect((await storedRounds())[0].status).toBe("OPEN");
+  });
+
+  test("[SPM-41-TC-04] should_complete_the_thread_return_the_event_to_review_and_notify_the_owner", async () => {
+    const before = await eventState();
+
+    const res = await complete("coordinator", 1, { version: before.version }, key("complete-1"));
+
+    expect(res.status).toBe(200);
+    expect(res.body.event).toEqual(expect.objectContaining({ status: "UNDER_REVIEW" }));
+    expect(res.body.clarification).toEqual(expect.objectContaining({
+      round: 1,
+      status: "COMPLETED",
+      completedBy: { userId: userId("coordinator"), name: expect.any(String) },
+    }));
+    expect(res.body.clarification.messages).toHaveLength(5);
+    expect(await eventState()).toEqual(expect.objectContaining({ status: "UNDER_REVIEW", coordinator_id: userId("coordinator") }));
+    expect(await storedRounds()).toEqual([expect.objectContaining({ status: "RESPONDED", responded_by: userId("coordinator") })]);
+    const [completed] = await historyEntries("CLARIFICATION_COMPLETED");
+    expect(completed).toEqual(expect.objectContaining({
+      user_id: userId("coordinator"),
+      changes: { status: { before: "AWAITING_CLARIFICATION", after: "UNDER_REVIEW" } },
+    }));
+    expect((await notificationsFor("organiserA2")).at(-1).title).toBe("Clarification complete");
+  });
+
+  test("[SPM-41-AC3] should_refuse_messages_in_the_completed_thread", async () => {
+    const res = await postMessage("organiserA2", 1, "One more thing.", key("late"));
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("CLARIFICATION_CLOSED");
+    expect(await storedMessages(1)).toHaveLength(5);
+  });
+
+  test("[SPM-41-AC1] should_keep_every_thread_when_the_event_is_returned_again", async () => {
+    const question = "Can you also confirm catering numbers?";
     const asked = await requestClarification("coordinator", { message: question, version: (await eventState()).version }, key("request-2"));
     expect(asked.status).toBe(200);
     expect(asked.body.clarification).toEqual(expect.objectContaining({ round: 2, status: "OPEN" }));
 
-    // Answered with amendments only.
-    const answered = await resubmit("organiserA2", { changes: { expectedAttendance: 90 }, version: (await eventState()).version }, key("resubmit-2"));
-    expect(answered.status).toBe(200);
-    expect(answered.body.clarification).toEqual(expect.objectContaining({ round: 2, status: "RESPONDED", response: null }));
+    const done = await complete("coordinator", 2, { version: (await eventState()).version }, key("complete-2"));
+    expect(done.status).toBe(200);
 
     expect(await storedRounds()).toEqual([
       expect.objectContaining({ round_number: 1, status: "RESPONDED", message: QUESTION }),
-      expect.objectContaining({ round_number: 2, status: "RESPONDED", message: question, response: null, responded_by: userId("organiserA2") }),
+      expect.objectContaining({ round_number: 2, status: "RESPONDED", message: question, responded_by: userId("coordinator") }),
     ]);
     const rounds = await getRounds(eventId, "organiserA");
     expect(rounds.body.clarifications.map(({ round }) => round)).toEqual([2, 1]);
-    expect(await eventState()).toEqual(expect.objectContaining({ status: "UNDER_REVIEW", coordinator_id: userId("coordinator"), expected_attendance: 90 }));
+    expect(await eventState()).toEqual(expect.objectContaining({ status: "UNDER_REVIEW", coordinator_id: userId("coordinator") }));
   });
 
-  test("[SPM-41-AC3] should_answer_409_when_a_returned_event_has_no_open_round", async () => {
+  test("[SPM-41-AC5] should_record_when_each_person_last_viewed_the_history", async () => {
+    const first = await call("get", `/api/events/${eventId}/history`, "organiserA2");
+    const viewed = await call("post", `/api/events/${eventId}/history/viewed`, "organiserA2");
+    const again = await call("get", `/api/events/${eventId}/history`, "organiserA2");
+    const colleague = await call("get", `/api/events/${eventId}/history`, "organiserA");
+    const outsider = await call("post", `/api/events/${eventId}/history/viewed`, "organiserB");
+
+    expect(first.body.lastViewedAt).toBeNull();
+    expect(viewed.status).toBe(200);
+    expect(Date.parse(again.body.lastViewedAt)).toBe(Date.parse(viewed.body.lastViewedAt));
+    expect(colleague.body.lastViewedAt).toBeNull();
+    expect(outsider.status).toBe(404);
+  });
+
+  test("[SPM-41-AC3] should_answer_409_when_a_returned_event_has_no_open_thread", async () => {
     const soloEvent = fixtures.events.soloSubmitted;
     await admin.query("UPDATE public.event SET status = 'AWAITING_CLARIFICATION' WHERE event_id = $1", [soloEvent]);
     const before = await eventState(soloEvent);
 
-    const res = await call("post", `/api/events/${soloEvent}/resubmit`, "organiserSolo", { response: "Answer.", version: before.version }, key("no-round"));
+    const res = await call("post", `/api/events/${soloEvent}/amendments`, "organiserSolo", { changes: { title: "Solo (amended)" }, version: before.version }, key("no-round"));
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("CLARIFICATION_NOT_OPEN");

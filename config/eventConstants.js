@@ -153,14 +153,14 @@ const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "PREPARATION",
 ]);
 
-// SPM-41: the coordinator's question and the organiser's response are each
-// required where sent and at most this long (team decision, 2026-10-20).
+// SPM-41: the coordinator's opening question and every thread message are
+// required and at most this long (team decision, 2026-10-20).
 const CLARIFICATION_TEXT_LIMIT = 2000;
 
-// What the owner may amend while the request is returned for clarification:
-// every submission field except registration settings and the organisation
-// (team decision). These changes skip the change workflow (Master 5.2).
-const RESUBMIT_FIELDS = Object.freeze([...EVENT_FIELD_GROUPS.ORDINARY, ...EVENT_FIELD_GROUPS.SIGNIFICANT]);
+// What the owner may amend while a clarification thread is open: every
+// submission field except registration settings and the organisation (team
+// decision). These changes skip the change workflow (Master 5.2).
+const AMENDMENT_FIELDS = Object.freeze([...EVENT_FIELD_GROUPS.ORDINARY, ...EVENT_FIELD_GROUPS.SIGNIFICANT]);
 
 // Values of the event_type check constraint (SPM-181) and their display labels.
 const EVENT_TYPE_LABELS = Object.freeze({
@@ -203,5 +203,5 @@ module.exports = {
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,
   CLARIFICATION_TEXT_LIMIT,
-  RESUBMIT_FIELDS,
+  AMENDMENT_FIELDS,
 };

@@ -57,6 +57,9 @@ const getEventRelationship = (user, event) => {
 // The SPM-33 field edit matrix for one user and one event row.
 const getEventAccess = (user, event) => {
   const relationship = getEventRelationship(user, event);
+  const isOwner = relationship === EVENT_RELATIONSHIP.OWNER;
+  const isAssignedCoordinator = relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR;
+  const isReturned = event.status === EVENT_STATUS.AWAITING_CLARIFICATION;
   let editableFields = [];
   if (relationship === EVENT_RELATIONSHIP.OWNER && event.status === EVENT_STATUS.DRAFT) {
     editableFields = OWNER_DRAFT_FIELDS;
@@ -70,11 +73,14 @@ const getEventAccess = (user, event) => {
     relationship,
     canEdit: editableFields.length > 0,
     editableFields: [...editableFields],
-    // SPM-41. Every AWAITING_CLARIFICATION event has an open round: the request
-    // function writes one, and the SPM-41 migration backfilled older ones.
-    canRequestClarification:
-      relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR && event.status === EVENT_STATUS.UNDER_REVIEW,
-    canResubmit: relationship === EVENT_RELATIONSHIP.OWNER && event.status === EVENT_STATUS.AWAITING_CLARIFICATION,
+    // SPM-41. Every AWAITING_CLARIFICATION event has an open thread: the request
+    // function opens one, and the SPM-41 migration backfilled older ones. Only
+    // the owner and the assigned coordinator write in it; only the coordinator
+    // completes it, which returns the event to UNDER_REVIEW.
+    canRequestClarification: isAssignedCoordinator && event.status === EVENT_STATUS.UNDER_REVIEW,
+    canPostClarificationMessage: (isOwner || isAssignedCoordinator) && isReturned,
+    canSaveAmendments: isOwner && isReturned,
+    canCompleteClarification: isAssignedCoordinator && isReturned,
     historyAudiences: [...(HISTORY_AUDIENCES[relationship] || [])],
   };
 };

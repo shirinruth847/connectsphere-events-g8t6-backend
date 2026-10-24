@@ -34,8 +34,9 @@ const MESSAGES = Object.freeze({
   venuePreferencesInvalid: "Choose valid venue preferences without duplicates.",
   equipmentRequirementsInvalid: "Choose valid equipment and positive quantities without duplicates.",
   clarificationMessageRequired: "Enter the question for the organiser.",
+  clarificationBodyRequired: "Write a message before sending.",
   clarificationTooLong: `Keep this to ${CLARIFICATION_TEXT_LIMIT} characters or fewer.`,
-  resubmitEmpty: "Add a response or change at least one detail before resubmitting.",
+  amendmentEmpty: "Change at least one detail before saving.",
 });
 
 const TOO_LONG_MESSAGES = Object.freeze({
@@ -242,13 +243,13 @@ const validateOrdinaryFields = (input = {}) => {
   return errors;
 };
 
-// SPM-41: the coordinator's question is required; the organiser's response is
-// optional (they may answer with amendments alone). Both are limited in length.
-const validateClarificationText = (value, { field, required }) => {
-  if (value === undefined || value === null) return required ? { [field]: MESSAGES.clarificationMessageRequired } : {};
+// SPM-41: the coordinator's opening question and every thread message are
+// required and limited in length.
+const validateClarificationText = (value, { field, requiredMessage = MESSAGES.clarificationMessageRequired }) => {
+  if (value === undefined || value === null) return { [field]: requiredMessage };
   if (typeof value !== "string") return { [field]: MESSAGES.textInvalid };
   const text = value.trim();
-  if (!text) return required ? { [field]: MESSAGES.clarificationMessageRequired } : {};
+  if (!text) return { [field]: requiredMessage };
   return text.length > CLARIFICATION_TEXT_LIMIT ? { [field]: MESSAGES.clarificationTooLong } : {};
 };
 

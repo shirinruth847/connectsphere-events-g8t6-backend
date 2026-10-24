@@ -1,4 +1,4 @@
-// Unit tests for SPM-41 clarification rounds: GET /api/events/:id/clarifications
+// Unit tests for SPM-41 clarification threads: GET /api/events/:id/clarifications
 // through the real Express app, routes, middleware and access policy, and the
 // model's query and response shape. Only Supabase-facing functions are mocked.
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
@@ -49,9 +49,17 @@ const rounds = [
     message: "Please confirm the stage size.",
     requestedAt: "2026-10-20T02:00:00+00:00",
     requestedBy: { userId: COORDINATOR_ID, name: "Coordinator C" },
-    response: null,
-    respondedAt: null,
-    respondedBy: null,
+    completedAt: null,
+    completedBy: null,
+    messages: [
+      {
+        messageId: 30,
+        body: "Please confirm the stage size.",
+        createdAt: "2026-10-20T02:00:00+00:00",
+        author: { userId: COORDINATOR_ID, name: "Coordinator C", role: "COORDINATOR" },
+      },
+    ],
+    unreadCount: 1,
   },
 ];
 
@@ -70,7 +78,7 @@ describe("GET /api/events/:id/clarifications (SPM-41 AC3)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ clarifications: rounds });
-    expect(eventModel.findEventClarifications).toHaveBeenCalledWith(42);
+    expect(eventModel.findEventClarifications).toHaveBeenCalledWith(42, { readerId: ORGANISER_ID });
   });
 
   test("[SPM-41-AC3] should_return_the_rounds_read_only_when_a_same_organisation_organiser_opens_them", async () => {
@@ -80,6 +88,8 @@ describe("GET /api/events/:id/clarifications (SPM-41 AC3)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.clarifications).toEqual(rounds);
+    // Not a party to the thread: their reads are not tracked.
+    expect(eventModel.findEventClarifications).toHaveBeenCalledWith(42, { readerId: null });
   });
 
   test("[SPM-41-AC3] should_return_the_rounds_when_the_assigned_coordinator_opens_them", async () => {
@@ -89,12 +99,13 @@ describe("GET /api/events/:id/clarifications (SPM-41 AC3)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.clarifications).toEqual(rounds);
+    expect(eventModel.findEventClarifications).toHaveBeenCalledWith(42, { readerId: COORDINATOR_ID });
   });
 
   test("[SPM-41-TC-04] should_keep_answered_rounds_visible_after_the_event_returns_to_review", async () => {
     signedInAs("ORGANISER", ORGANISER_ID, [ORGANISATION_ID]);
     eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "UNDER_REVIEW" }));
-    const answered = [{ ...rounds[0], status: "RESPONDED", response: "A 6m stage.", respondedAt: "2026-10-21T01:00:00+00:00", respondedBy: { userId: ORGANISER_ID, name: "Owner O" } }];
+    const answered = [{ ...rounds[0], status: "COMPLETED", completedAt: "2026-10-21T01:00:00+00:00", completedBy: { userId: COORDINATOR_ID, name: "Coordinator C" } }];
     eventModel.findEventClarifications.mockResolvedValue(answered);
 
     const res = await getRounds();
@@ -173,62 +184,98 @@ describe("findEventClarifications (SPM-41)", () => {
     return query;
   };
 
-  test("[SPM-41-AC3] should_read_one_events_rounds_newest_first_and_name_both_people", async () => {
-    const query = queryReturning({
-      data: [
-        {
-          clarification_id: 8,
-          round_number: 2,
-          status: "OPEN",
-          message: "Please confirm the stage size.",
-          requested_at: "2026-10-20T02:00:00+00:00",
-          requested_by: COORDINATOR_ID,
-          requester: { name: "Coordinator C" },
-          response: null,
-          responded_at: null,
-          responded_by: null,
-          responder: null,
-        },
-        {
-          clarification_id: 5,
-          round_number: 1,
-          status: "RESPONDED",
-          message: "What is the expected attendance?",
-          requested_at: "2026-10-18T02:00:00+00:00",
-          requested_by: COORDINATOR_ID,
-          requester: { name: "Coordinator C" },
-          response: null,
-          responded_at: "2026-10-19T02:00:00+00:00",
-          responded_by: ORGANISER_ID,
-          responder: { name: "Owner O" },
-        },
-      ],
-      error: null,
-    });
+  const openRow = {
+    clarification_id: 8,
+    round_number: 2,
+    status: "OPEN",
+    message: "Please confirm the stage size.",
+    requested_at: "2026-10-20T02:00:00+00:00",
+    requested_by: COORDINATOR_ID,
+    requester: { name: "Coordinator C" },
+    responded_at: null,
+    responded_by: null,
+    responder: null,
+    // Out of order on purpose: the model sorts oldest first.
+    messages: [
+      { message_id: 32, body: "A 6m stage.", created_at: "2026-10-21T02:00:00.000002+00:00", author_id: ORGANISER_ID, author: { name: "Owner O", role: "ORGANISER" } },
+      { message_id: 30, body: "Please confirm the stage size.", created_at: "2026-10-20T02:00:00+00:00", author_id: COORDINATOR_ID, author: { name: "Coordinator C", role: "COORDINATOR" } },
+      { message_id: 33, body: "And a lectern?", created_at: "2026-10-22T02:00:00+00:00", author_id: COORDINATOR_ID, author: { name: "Coordinator C", role: "COORDINATOR" } },
+    ],
+    reads: [{ user_id: ORGANISER_ID, last_read_at: "2026-10-21T02:00:00.5+00:00" }],
+  };
+
+  // A v1 round closed by the organiser's resubmission, copied into messages by the migration.
+  const legacyRow = {
+    clarification_id: 5,
+    round_number: 1,
+    status: "RESPONDED",
+    message: "What is the expected attendance?",
+    requested_at: "2026-10-18T02:00:00+00:00",
+    requested_by: COORDINATOR_ID,
+    requester: { name: "Coordinator C" },
+    responded_at: "2026-10-19T02:00:00+00:00",
+    responded_by: ORGANISER_ID,
+    responder: { name: "Owner O" },
+    messages: [
+      { message_id: 10, body: "What is the expected attendance?", created_at: "2026-10-18T02:00:00+00:00", author_id: COORDINATOR_ID, author: { name: "Coordinator C", role: "COORDINATOR" } },
+    ],
+    reads: [],
+  };
+
+  test("[SPM-41-AC3] should_read_one_events_threads_newest_first_with_messages_oldest_first", async () => {
+    const query = queryReturning({ data: [openRow, legacyRow], error: null });
     supabase.from.mockReturnValue(query);
 
-    const result = await realFindEventClarifications(42);
+    const result = await realFindEventClarifications(42, { readerId: ORGANISER_ID });
 
     expect(supabase.from).toHaveBeenCalledWith("clarifications");
     expect(query.select).toHaveBeenCalledWith(expect.stringContaining("requester:user!clarifications_requested_by_fkey(name)"));
-    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("responder:user!clarifications_responded_by_fkey(name)"));
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("messages:clarification_messages!clarification_messages_clarification_id_fkey("));
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("author:user!clarification_messages_author_id_fkey(name,role)"));
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("reads:clarification_reads!clarification_reads_clarification_id_fkey(user_id,last_read_at)"));
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
+    expect(query.eq).toHaveBeenCalledWith("reads.user_id", ORGANISER_ID);
     expect(query.order).toHaveBeenCalledWith("round_number", { ascending: false });
-    expect(result).toEqual([
-      rounds[0],
-      {
-        clarificationId: 5,
-        round: 1,
-        status: "RESPONDED",
-        message: "What is the expected attendance?",
-        requestedAt: "2026-10-18T02:00:00+00:00",
-        requestedBy: { userId: COORDINATOR_ID, name: "Coordinator C" },
-        // Answered with amendments only: no written response (team decision 2).
-        response: null,
-        respondedAt: "2026-10-19T02:00:00+00:00",
-        respondedBy: { userId: ORGANISER_ID, name: "Owner O" },
-      },
-    ]);
+
+    const [open, legacy] = result;
+    expect(open).toEqual(expect.objectContaining({
+      clarificationId: 8,
+      round: 2,
+      status: "OPEN",
+      message: "Please confirm the stage size.",
+      requestedBy: { userId: COORDINATOR_ID, name: "Coordinator C" },
+      completedAt: null,
+      completedBy: null,
+    }));
+    expect(open.messages.map((message) => message.messageId)).toEqual([30, 32, 33]);
+    expect(open.messages[1]).toEqual({
+      messageId: 32,
+      body: "A 6m stage.",
+      createdAt: "2026-10-21T02:00:00.000002+00:00",
+      author: { userId: ORGANISER_ID, name: "Owner O", role: "ORGANISER" },
+    });
+    // Only the coordinator's message after the owner last opened the thread.
+    expect(open.unreadCount).toBe(1);
+    expect(legacy).toEqual(expect.objectContaining({
+      round: 1,
+      status: "COMPLETED",
+      completedAt: "2026-10-19T02:00:00+00:00",
+      completedBy: { userId: ORGANISER_ID, name: "Owner O" },
+    }));
+    expect(legacy).not.toHaveProperty("response");
+    // Never opened: every message from the other party is unread.
+    expect(legacy.unreadCount).toBe(1);
+  });
+
+  test("[SPM-41-AC3] should_count_nothing_for_a_reader_whose_reads_are_not_tracked", async () => {
+    const query = queryReturning({ data: [openRow], error: null });
+    supabase.from.mockReturnValue(query);
+
+    const [open] = await realFindEventClarifications(42);
+
+    expect(open.unreadCount).toBeNull();
+    // No reads match user 0, so none of another person's reads are returned.
+    expect(query.eq).toHaveBeenCalledWith("reads.user_id", 0);
   });
 
   test("[SPM-41-AC3] should_throw_instead_of_returning_an_empty_list_when_the_query_fails", async () => {

@@ -14,8 +14,12 @@ const {
   getEventRequest,
   getEventHistory,
   getEventClarifications,
+  markEventHistoryViewed,
   requestClarification,
-  resubmitEvent,
+  postClarificationMessage,
+  saveClarificationAmendments,
+  completeClarification,
+  markClarificationRead,
   listAssignedEvents,
   patchCoordinator,
   assignCoordinatorAsLead,
@@ -70,10 +74,15 @@ router.post("/:id/confirm", assignedCoordinatorOnly, confirmEvent);
 router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation);
 router.post("/:id/complete", assignedCoordinatorOnly, completeEvent);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
+router.post("/:id/history/viewed", anySignedInUser, requireVisibleEvent, markEventHistoryViewed);
+// SPM-41 clarification threads: another coordinator gets 404; same-organisation
+// organisers read every thread but get 403 when they write.
 router.get("/:id/clarifications", anySignedInUser, requireVisibleEvent, getEventClarifications);
-// SPM-41: another coordinator gets 404; same-organisation organisers get 403 (read-only).
 router.post("/:id/clarifications", assignedCoordinatorOnly, requestClarification);
-router.post("/:id/resubmit", organiserOnly, requireVisibleEvent, resubmitEvent);
+router.post("/:id/clarifications/:round/messages", anySignedInUser, requireVisibleEvent, postClarificationMessage);
+router.post("/:id/clarifications/:round/read", anySignedInUser, requireVisibleEvent, markClarificationRead);
+router.post("/:id/clarifications/:round/complete", assignedCoordinatorOnly, completeClarification);
+router.post("/:id/amendments", organiserOnly, requireVisibleEvent, saveClarificationAmendments);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
 router.put("/:id/draft", organiserOnly, requireVisibleEvent, updateDraft);
