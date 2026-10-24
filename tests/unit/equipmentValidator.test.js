@@ -151,6 +151,17 @@ describe("SPM-52 unavailable stock", () => {
     });
     expect(validateUnavailabilityUpdate({ note: "Lens replaced", version: 1 }, current, NOW).fields).toEqual({});
   });
+
+  test("[AC8] should_send_only_the_changed_fields_and_refuse_an_empty_edit", () => {
+    const current = { starts_at: "2026-11-02T01:00:00+00:00", ends_at: "2026-11-02T02:00:00+00:00" };
+
+    expect(validateUnavailabilityUpdate({ note: " Lens replaced ", version: 3 }, current, NOW)).toEqual({
+      values: { note: "Lens replaced" },
+      fields: {},
+      version: 3,
+    });
+    expect(validateUnavailabilityUpdate({ version: 3 }, current, NOW).fields).toEqual({ body: MESSAGES.nothingToUpdate });
+  });
 });
 
 describe("SPM-52 list query and ids", () => {
@@ -167,6 +178,17 @@ describe("SPM-52 list query and ids", () => {
 
   test("[AC5] should_refuse_an_unknown_status_filter", () => {
     expect(validateEquipmentListQuery({ status: "BROKEN" }).fields).toEqual({ status: MESSAGES.statusInvalid });
+  });
+
+  test("[AC5] should_refuse_search_and_category_filters_that_are_too_long_or_not_text", () => {
+    expect(validateEquipmentListQuery({ search: "m".repeat(101), category: "a".repeat(101) })).toEqual({
+      filters: {},
+      fields: { search: MESSAGES.searchTooLong, category: MESSAGES.categoryFilterTooLong },
+    });
+    expect(validateEquipmentListQuery({ search: ["mic"], category: { name: "Audio" } }).fields).toEqual({
+      search: MESSAGES.textInvalid,
+      category: MESSAGES.textInvalid,
+    });
   });
 
   test("[AC5] should_treat_impossible_ids_as_not_found", () => {
