@@ -17,7 +17,6 @@ const venue = (extra = {}) => ({ operatingHours: "08:00-22:00", setupMinutes: 30
 
 const booking = (bookingId, start, end, status = "APPROVED") => ({
   bookingId,
-  bookingReference: `VB-${String(bookingId).padStart(6, "0")}`,
   status,
   start: at(start),
   end: at(end),
@@ -94,7 +93,7 @@ describe("buildVenueCalendar (SPM-74)", () => {
       type: "BOOKING",
       label: "Confirmed booking",
       blocking: true,
-      bookingReference: "VB-000110",
+      bookingId: 110,
       requestId: "REQ-000442",
     });
     expect(result.summary).toBe(AVAILABILITY.UNAVAILABLE_BOOKING);

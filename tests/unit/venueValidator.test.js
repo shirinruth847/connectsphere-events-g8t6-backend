@@ -215,13 +215,13 @@ describe("validateVenueStatusChange", () => {
 describe("validateVenueListQuery", () => {
   test("[SPM-73-TC11] should_pass_trimmed_search_location_and_status_filters", () => {
     expect(validateVenueListQuery({ search: " marina ", location: "Bayfront", status: "INACTIVE" })).toEqual({
-      filters: { search: "marina", location: "Bayfront", status: "INACTIVE" },
+      filters: { search: "marina", location: "Bayfront", status: "INACTIVE", sort: "name", order: "asc" },
       fields: {},
     });
   });
 
   test("[SPM-73-TC11] should_return_no_filters_when_they_are_cleared", () => {
-    expect(validateVenueListQuery({ search: "", location: "  ", status: "" })).toEqual({ filters: {}, fields: {} });
+    expect(validateVenueListQuery({ search: "", location: "  ", status: "" })).toEqual({ filters: { sort: "name", order: "asc" }, fields: {} });
   });
 
   test("should_reject_an_unknown_status_and_repeated_parameters", () => {

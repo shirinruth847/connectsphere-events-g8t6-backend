@@ -2,6 +2,7 @@ const supabase = require("../config/supabase");
 const venueDetailModel = require("./venueDetailModel");
 const venueCalendarModel = require("./venueCalendarModel");
 const venueConflictModel = require("./venueConflictModel");
+const venuePhotoModel = require("./venuePhotoModel");
 const activityModel = require("./activityModel");
 const { VENUE_STATUS } = require("../config/venueConstants");
 const { MESSAGES } = require("../validators/venueValidator");
@@ -46,11 +47,9 @@ const mapVenue = (row, details, detailStatus) => ({
 // A PostgREST or() value matching text literally inside ilike: % and _ are
 // escaped for LIKE, then the value is double-quoted so commas and brackets in
 // the search cannot change the filter.
-const orIlike = (columns, text) => {
-  const pattern = `%${text.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
-  const quoted = `"${pattern.replace(/["\\]/g, (character) => `\\${character}`)}"`;
-  return columns.map((column) => `${column}.ilike.${quoted}`).join(",");
-};
+const likePattern = (text) => `%${text.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
+const quotedLike = (text) => `"${likePattern(text).replace(/["\\]/g, (character) => `\\${character}`)}"`;
+const orIlike = (columns, text) => columns.map((column) => `${column}.ilike.${quotedLike(text)}`).join(",");
 
 const includesText = (list, text) => (list || []).some((item) => String(item).toLowerCase().includes(text.toLowerCase()));
 
@@ -140,7 +139,7 @@ const toVenueError = (error) => {
 
 const toPerson = (userId, names) => (userId ? { userId, name: names.get(userId) ?? null } : null);
 
-const toManagedVenue = (row, names = new Map()) => ({
+const toManagedVenue = (row, names = new Map(), details = undefined) => ({
   venueId: row.venue_id,
   name: row.name,
   address: row.address,
@@ -155,6 +154,11 @@ const toManagedVenue = (row, names = new Map()) => ({
   updatedAt: row.updated_at,
   createdBy: toPerson(row.created_by, names),
   updatedBy: toPerson(row.updated_by, names),
+  // MongoDB-owned minutes (T27), added to list rows; null when not recorded or not checked.
+  ...(details === undefined ? {} : {
+    setupMinutes: details?.setupMinutes ?? null,
+    turnaroundMinutes: details?.turnaroundMinutes ?? null,
+  }),
 });
 
 const findUserNames = async (rows) => {
@@ -168,26 +172,100 @@ const findUserNames = async (rows) => {
 // LIKE treats % and _ as wildcards; escape them so a search matches literally.
 const escapeLike = (text) => text.replace(/[\\%_]/g, (character) => `\\${character}`);
 
+// My Venues sorts (SPM-181). PostgreSQL columns sort in the database; the
+// MongoDB minutes sort in memory over the filtered list (at most
+// MANAGED_SORT_SCAN_LIMIT venues), with unrecorded minutes last.
+const MANAGED_SORT_COLUMNS = Object.freeze({ name: "name", capacity: "max_capacity", updatedAt: "updated_at" });
+const DETAIL_SORT_FIELDS = Object.freeze(["setupMinutes", "turnaroundMinutes"]);
+const MANAGED_SORT_SCAN_LIMIT = 1000;
+
+const readDetailsOrNull = async (rows) => {
+  try {
+    return await venueDetailModel.getVenueDetailsByIds(rows.map((row) => row.venue_id));
+  } catch (error) {
+    console.warn("[venue-manage] MongoDB detail read unavailable", { code: error.code });
+    return null;
+  }
+};
+
+// First gallery photo per venue (T28); an empty Map when MongoDB is unavailable,
+// so the cards fall back to the placeholder.
+const readCoversOrEmpty = async (rows) => {
+  try {
+    return await venuePhotoModel.findCoverPhotoIds(rows.map((row) => row.venue_id));
+  } catch (error) {
+    console.warn("[venue-manage] MongoDB photo read unavailable", { code: error.code });
+    return new Map();
+  }
+};
+
+const withCover = (venue, covers) => ({ ...venue, coverPhotoId: covers.get(String(venue.venueId)) ?? null });
+
+const compareMinutes = (field, ascending, details) => (a, b) => {
+  const left = details.get(String(a.venue_id))?.[field];
+  const right = details.get(String(b.venue_id))?.[field];
+  if (left == null && right == null) return a.name.localeCompare(b.name) || a.venue_id - b.venue_id;
+  if (left == null) return 1;
+  if (right == null) return -1;
+  return (ascending ? left - right : right - left) || a.name.localeCompare(b.name) || a.venue_id - b.venue_id;
+};
+
 // Venue Staff list: every venue not deleted as unusable, whatever its status,
 // filtered by name, location (address) and status, case-insensitively.
-const listManagedVenues = async ({ search, location, status }, { limit, offset }) => {
+const listManagedVenues = async ({ search, location, status, sort = "name", order = "asc" }, { limit, offset }) => {
   let query = supabase.from("venue").select(MANAGED_VENUE_SELECT).eq("is_active", true);
   if (search) query = query.ilike("name", `%${escapeLike(search)}%`);
   if (location) query = query.ilike("address", `%${escapeLike(location)}%`);
   if (status) query = query.eq("status", status);
+  const ascending = order !== "desc";
+
+  if (DETAIL_SORT_FIELDS.includes(sort)) {
+    const { data, error } = await query
+      .order("name", { ascending: true })
+      .order("venue_id", { ascending: true })
+      .range(0, MANAGED_SORT_SCAN_LIMIT - 1);
+    if (error) throw error;
+    const details = await readDetailsOrNull(data);
+    // Without MongoDB the minutes are unknown: keep name order and say so.
+    const sorted = details ? [...data].sort(compareMinutes(sort, ascending, details)) : data;
+    const rows = sorted.slice(offset, offset + limit);
+    const [names, covers] = await Promise.all([findUserNames(rows), readCoversOrEmpty(rows)]);
+    return {
+      venues: rows.map((row) => withCover(toManagedVenue(row, names, details ? details.get(String(row.venue_id)) ?? null : null), covers)),
+      nextOffset: sorted.length > offset + limit ? offset + limit : null,
+      detailsAvailable: Boolean(details),
+      sortNotChecked: !details,
+    };
+  }
+
   // One extra row tells whether another page exists.
   const { data, error } = await query
-    .order("name", { ascending: true })
+    .order(MANAGED_SORT_COLUMNS[sort] || "name", { ascending })
     .order("venue_id", { ascending: true })
     .range(offset, offset + limit);
   if (error) throw error;
 
   const rows = data.slice(0, limit);
-  const names = await findUserNames(rows);
+  const [names, details, covers] = await Promise.all([findUserNames(rows), readDetailsOrNull(rows), readCoversOrEmpty(rows)]);
   return {
-    venues: rows.map((row) => toManagedVenue(row, names)),
+    venues: rows.map((row) => withCover(toManagedVenue(row, names, details ? details.get(String(row.venue_id)) ?? null : null), covers)),
     nextOffset: data.length > limit ? offset + limit : null,
+    detailsAvailable: Boolean(details),
+    sortNotChecked: false,
   };
+};
+
+// Every venue not deleted as unusable, for filter and picker options. Read on
+// demand, so a venue added, renamed or deleted appears in the next read.
+const listVenueOptions = async () => {
+  const { data, error } = await supabase
+    .from("venue")
+    .select("venue_id,name,status")
+    .eq("is_active", true)
+    .order("name", { ascending: true })
+    .order("venue_id", { ascending: true });
+  if (error) throw error;
+  return { venues: (data || []).map((row) => ({ venueId: row.venue_id, name: row.name, status: row.status })) };
 };
 
 const findManagedVenueRow = async (venueId) => {
@@ -264,29 +342,17 @@ const getManagedVenueDetails = async (venueId) => {
 };
 
 const ACTIVE_BOOKING_STATUSES = ["PENDING", "APPROVED"];
-
-// Bookings (PostgreSQL) that still occupy the venue after now.
-const findFutureActiveBookings = async (venueId) => {
-  const { data, error } = await supabase
-    .from("venue_booking")
-    .select("booking_id,booking_reference,event_id,status,start_datetime,end_datetime,room:room!inner(venue_id)")
-    .eq("room.venue_id", venueId)
-    .in("status", ACTIVE_BOOKING_STATUSES)
-    .gt("end_datetime", new Date().toISOString())
-    .order("start_datetime", { ascending: true });
-  if (error) throw error;
-  return data || [];
-};
+const BUFFER_FIELDS = ["setupMinutes", "turnaroundMinutes"];
 
 const mongoUnavailable = (error) => {
   console.warn("[venue-details] MongoDB unavailable", { code: error.code, name: error.name });
   return venueError("VENUE_DETAILS_UNAVAILABLE");
 };
 
-// Saves the MongoDB details Venue Staff edit. Setup/turnaround changes are
-// refused while a booking or hold still occupies the venue in the future, and
-// the response lists them (Master 5.4.1, T16). The audit entry is appended to
-// PostgreSQL after the MongoDB write (Master 7.4 step 3).
+// Saves the MongoDB details Venue Staff edit. Setup and turnaround minutes are
+// set once each: a value already recorded can never change (Master 5.4.1,
+// T16). The audit entry is appended to PostgreSQL after the MongoDB write
+// (Master 7.4 step 3).
 const updateVenueDetails = async (actorId, venueId, version, values) => {
   const row = await findManagedVenueRow(venueId);
   if (!row) throw venueError("VENUE_NOT_FOUND");
@@ -306,37 +372,8 @@ const updateVenueDetails = async (actorId, venueId, version, values) => {
   }
   if (!Object.keys(changes).length) return { details: toVenueDetails(current), changed: false };
 
-  if (changes.setupMinutes || changes.turnaroundMinutes) {
-    const now = new Date();
-    let holds;
-    try {
-      holds = await venueCalendarModel.findFutureActiveHolds(venueId, now);
-    } catch (error) {
-      throw mongoUnavailable(error);
-    }
-    const bookings = await findFutureActiveBookings(venueId);
-    if (bookings.length || holds.length) {
-      throw venueError("VENUE_HAS_FUTURE_COMMITMENTS", {
-        commitments: [
-          ...bookings.map((booking) => ({
-            type: "BOOKING",
-            bookingReference: booking.booking_reference,
-            requestId: formatRequestId(booking.event_id),
-            status: booking.status,
-            start: booking.start_datetime,
-            end: booking.end_datetime,
-          })),
-          ...holds.map((hold) => ({
-            type: "HOLD",
-            requestId: hold.eventId ? formatRequestId(hold.eventId) : null,
-            status: "ACTIVE",
-            start: new Date(hold.start).toISOString(),
-            end: new Date(hold.end).toISOString(),
-          })),
-        ],
-      });
-    }
-  }
+  const locked = BUFFER_FIELDS.filter((field) => changes[field] && current?.[field] != null);
+  if (locked.length) throw venueError("VENUE_BUFFERS_LOCKED", { fields: locked });
 
   const changedValues = Object.fromEntries(Object.keys(changes).map((field) => [field, values[field]]));
   let saved;
@@ -349,6 +386,8 @@ const updateVenueDetails = async (actorId, venueId, version, values) => {
       location: row.address,
       pgVersion: row.version,
       actorId,
+      // The write re-checks that these are still unset (a concurrent first set loses).
+      unsetFields: BUFFER_FIELDS.filter((field) => changes[field]),
     });
   } catch (error) {
     if (error.name === "VenueError") throw error;
@@ -370,6 +409,95 @@ const updateVenueDetails = async (actorId, venueId, version, values) => {
     console.error("[venue-details] audit entry not written", { venueId, code: error.code });
   }
   return { details: toVenueDetails(saved), changed: true };
+};
+
+// ---------- photo gallery (T28, SPM-181) ----------
+
+const PHOTO_ERRORS = new Set(["PHOTO_NOT_FOUND", "PHOTO_LIMIT_REACHED"]);
+
+// Every gallery call checks the venue in PostgreSQL first, so a deleted venue's
+// photos are never served or changed.
+const requireVenueRow = async (venueId) => {
+  const row = await findManagedVenueRow(venueId);
+  if (!row) throw venueError("VENUE_NOT_FOUND");
+  return row;
+};
+
+const callPhotos = async (work) => {
+  try {
+    return await work();
+  } catch (error) {
+    if (error.name === "VenueError" && PHOTO_ERRORS.has(error.code)) throw error;
+    console.warn("[venue-photos] MongoDB unavailable", { code: error.code, name: error.name });
+    throw venueError("VENUE_PHOTOS_UNAVAILABLE");
+  }
+};
+
+// The MongoDB change stands when the audit append fails (Master 7.4 step 3).
+const auditPhoto = async (actorId, venueId, action, details, changes) => {
+  try {
+    await activityModel.appendActivity({
+      userId: actorId,
+      entityName: "venue",
+      entityId: venueId,
+      action,
+      details,
+      changes,
+      audience: "STAFF_ONLY",
+    });
+  } catch (error) {
+    console.error("[venue-photos] audit entry not written", { venueId, action, code: error.code });
+  }
+};
+
+const listVenuePhotos = async (venueId) => {
+  await requireVenueRow(venueId);
+  return { photos: await callPhotos(() => venuePhotoModel.listPhotos(venueId)) };
+};
+
+const getVenuePhotoImage = async (venueId, photoId) => {
+  await requireVenueRow(venueId);
+  const image = await callPhotos(() => venuePhotoModel.getPhotoImage(venueId, photoId));
+  if (!image) throw venueError("PHOTO_NOT_FOUND");
+  return image;
+};
+
+const addVenuePhoto = async (actorId, venueId, upload) => {
+  await requireVenueRow(venueId);
+  const photo = await callPhotos(() => venuePhotoModel.addPhoto({ venueId, ...upload, actorId }));
+  await auditPhoto(actorId, venueId, "VENUE_PHOTO_ADDED", `Venue photo added at position ${photo.position + 1}`, {
+    photoId: { before: null, after: photo.photoId },
+  });
+  return photo;
+};
+
+const updateVenuePhoto = async (actorId, venueId, photoId, changes) => {
+  await requireVenueRow(venueId);
+  const photo = await callPhotos(() => venuePhotoModel.updatePhoto({ venueId, photoId, changes, actorId }));
+  await auditPhoto(actorId, venueId, "VENUE_PHOTO_UPDATED", `Venue photo updated: ${Object.keys(changes).sort().join(", ")}`, {
+    photoId: { before: photoId, after: photoId },
+    ...Object.fromEntries(Object.entries(changes).map(([field, value]) => [field, { after: value }])),
+  });
+  return photo;
+};
+
+const replaceVenuePhotoImage = async (actorId, venueId, photoId, upload) => {
+  await requireVenueRow(venueId);
+  const photo = await callPhotos(() =>
+    venuePhotoModel.replacePhotoImage({ venueId, photoId, contentType: upload.contentType, data: upload.data, size: upload.size, actorId }));
+  await auditPhoto(actorId, venueId, "VENUE_PHOTO_REPLACED", "Venue photo image replaced", {
+    photoId: { before: photoId, after: photoId },
+  });
+  return photo;
+};
+
+const deleteVenuePhoto = async (actorId, venueId, photoId) => {
+  await requireVenueRow(venueId);
+  const photo = await callPhotos(() => venuePhotoModel.deletePhoto({ venueId, photoId }));
+  await auditPhoto(actorId, venueId, "VENUE_PHOTO_DELETED", "Venue photo deleted", {
+    photoId: { before: photoId, after: null },
+  });
+  return photo;
 };
 
 // ---------- availability calendar (SPM-74, Master 5.4.5) ----------
@@ -397,7 +525,7 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null }, v
 
   const { data: bookingRows, error: bookingError } = await supabase
     .from("venue_booking")
-    .select("booking_id,booking_reference,status,start_datetime,end_datetime,event_id,room:room!inner(venue_id),event:event!inner(event_id,title,coordinator_id)")
+    .select("booking_id,status,start_datetime,end_datetime,event_id,room:room!inner(venue_id),event:event!inner(event_id,title,coordinator_id)")
     .in("room.venue_id", ids)
     .in("status", ACTIVE_BOOKING_STATUSES)
     .lt("start_datetime", new Date(to.getTime() + BUFFER_MARGIN_MS).toISOString())
@@ -446,7 +574,6 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null }, v
         .filter((booking) => booking.room.venue_id === row.venue_id)
         .map((booking) => ({
           bookingId: booking.booking_id,
-          bookingReference: booking.booking_reference,
           status: booking.status,
           start: booking.start_datetime,
           end: booking.end_datetime,
@@ -483,7 +610,7 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null }, v
 const BOOKING_VENUE_SELECT =
   "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours,setup_turnaround_min))";
 const BOOKING_FIELDS =
-  "booking_id,booking_reference,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,created_at,event_id";
+  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,created_at,updated_at,event_id";
 const BOOKING_LIST_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT},event:event!inner(event_id,title,event_type,status)`;
 const BOOKING_DETAIL_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT}`;
 // Venue Staff see the event's venue-relevant details and the coordinator's
@@ -510,8 +637,8 @@ const toBookingVenue = (room) => ({
 });
 
 const toBookingSummary = (row) => ({
+  // The booking reference is venue_booking.booking_id itself.
   bookingId: row.booking_id,
-  bookingReference: row.booking_reference,
   label: row.label,
   status: row.status,
   statusLabel: VENUE_BOOKING_STATUS_LABELS[row.status] || row.status,
@@ -521,6 +648,7 @@ const toBookingSummary = (row) => ({
   endDatetime: row.end_datetime,
   expectedAttendance: row.expected_attendance,
   submittedAt: row.created_at,
+  updatedAt: row.updated_at,
 });
 
 const toBookingListItem = (row) => ({
@@ -565,17 +693,62 @@ const toBookingEvent = (row) => {
   };
 };
 
-const findVenueBookings = async ({ status, venueId, eventId, from, to, limit }) => {
+const REQUEST_ID_SEARCH = /^REQ-?0*([1-9]\d{0,9})$/i;
+const BOOKING_ID_SEARCH = /^#?0*([1-9]\d{0,9})$/;
+const SEARCH_MATCH_LIMIT = 500;
+const MAX_ID = 2147483647;
+
+// The or() filter for a My Requests search: booking ID ("110" or "#110"),
+// request reference ("REQ-000442"), booking label, event title or venue name.
+// Titles and venue names live in other tables, so they are matched first and
+// added as ID lists. Returns null when nothing can match.
+const bookingSearchFilter = async (text) => {
+  const parts = [`label.ilike.${quotedLike(text)}`];
+  const bookingId = Number(BOOKING_ID_SEARCH.exec(text)?.[1]);
+  if (bookingId && bookingId <= MAX_ID) parts.push(`booking_id.eq.${bookingId}`);
+  const requestEventId = Number(REQUEST_ID_SEARCH.exec(text)?.[1]);
+  if (requestEventId && requestEventId <= MAX_ID) parts.push(`event_id.eq.${requestEventId}`);
+
+  const [events, venues] = await Promise.all([
+    supabase.from("event").select("event_id").ilike("title", likePattern(text)).limit(SEARCH_MATCH_LIMIT),
+    supabase.from("venue").select("venue_id,rooms:room(room_id)").ilike("name", likePattern(text)).limit(SEARCH_MATCH_LIMIT),
+  ]);
+  if (events.error) throw events.error;
+  if (venues.error) throw venues.error;
+  const eventIds = (events.data || []).map((event) => event.event_id);
+  const roomIds = (venues.data || []).flatMap((venue) => (venue.rooms || []).map((room) => room.room_id));
+  if (eventIds.length) parts.push(`event_id.in.(${eventIds.join(",")})`);
+  if (roomIds.length) parts.push(`room_id.in.(${roomIds.join(",")})`);
+  return parts.join(",");
+};
+
+// My Requests sorts (SPM-181). booking_status is an enum declared PENDING,
+// APPROVED, REJECTED, CANCELLED, so ordering by status puts pending requests
+// first. Ties fall back to the booking time, then the booking ID.
+const BOOKING_SORT_COLUMNS = Object.freeze({
+  date: "start_datetime",
+  attendance: "expected_attendance",
+  lastEdited: "updated_at",
+  alphabetical: "event(title)",
+});
+
+const applyBookingSort = (query, sort, order) => {
+  const ascending = order !== "desc";
+  const sorted = sort === "default" || !BOOKING_SORT_COLUMNS[sort]
+    ? query.order("status", { ascending: true }).order("start_datetime", { ascending })
+    : query.order(BOOKING_SORT_COLUMNS[sort], { ascending, nullsFirst: false }).order("start_datetime", { ascending: true });
+  return sorted.order("booking_id", { ascending: true });
+};
+
+const findVenueBookings = async ({ status, venueId, eventId, from, to, limit, q = null, sort = "default", order = "asc" }) => {
   let query = supabase.from("venue_booking").select(BOOKING_LIST_SELECT);
   if (status) query = query.eq("status", status);
   if (venueId) query = query.eq("room.venue_id", venueId);
   if (eventId) query = query.eq("event_id", eventId);
   // Half-open overlap with the requested day(s) (Master section 5.4).
   if (from && to) query = query.lt("start_datetime", to).gt("end_datetime", from);
-  query = query
-    .order("start_datetime", { ascending: true })
-    .order("booking_id", { ascending: true })
-    .limit(limit + 1);
+  if (q) query = query.or(await bookingSearchFilter(q));
+  query = applyBookingSort(query, sort, order).limit(limit + 1);
 
   const [list, pending] = await Promise.all([
     query,
@@ -633,9 +806,8 @@ const findVenueBooking = async (bookingId) => {
     event: context.event,
     otherBookings: context.bookings
       .filter((item) => item.bookingId !== bookingId)
-      .map(({ bookingId: id, bookingReference, label, status, statusLabel, venueId, venueName, startDatetime, endDatetime }) => ({
+      .map(({ bookingId: id, label, status, statusLabel, venueId, venueName, startDatetime, endDatetime }) => ({
         bookingId: id,
-        bookingReference,
         label,
         status,
         statusLabel,
@@ -650,6 +822,7 @@ const findVenueBooking = async (bookingId) => {
 module.exports = {
   getVenueCatalogue,
   listManagedVenues,
+  listVenueOptions,
   findManagedVenueRow,
   getManagedVenue,
   createVenue,
@@ -657,6 +830,12 @@ module.exports = {
   setVenueStatus,
   getManagedVenueDetails,
   updateVenueDetails,
+  listVenuePhotos,
+  getVenuePhotoImage,
+  addVenuePhoto,
+  updateVenuePhoto,
+  replaceVenuePhotoImage,
+  deleteVenuePhoto,
   getVenueAvailability,
   findVenueBookings,
   findEventBookings,

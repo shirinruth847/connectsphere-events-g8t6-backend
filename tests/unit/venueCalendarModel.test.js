@@ -101,22 +101,6 @@ describe("findCalendarEntries", () => {
   });
 });
 
-describe("findFutureActiveHolds", () => {
-  test("[Master 5.4.3] should_ignore_overdue_released_and_past_holds", async () => {
-    await db.collection("venue_calendar").insertMany([
-      entry({ label: "active" }),
-      entry({ label: "overdue", holdExpiresAt: at("07:00", "2026-11-01") }),
-      entry({ label: "released", status: "RELEASED" }),
-      entry({ label: "past", occupiedEnd: at("07:00", "2026-11-01") }),
-      entry({ label: "block", type: "BLOCK", holdExpiresAt: null, reason: "SAFETY" }),
-    ]);
-
-    const result = await calendarModel.findFutureActiveHolds(45, NOW);
-
-    expect(result.map((hold) => hold.label)).toEqual(["active"]);
-  });
-});
-
 describe("saveVenueDetails (Master 7.4)", () => {
   const save = (expectedVersion, fields) =>
     detailModel.saveVenueDetails({
@@ -143,6 +127,16 @@ describe("saveVenueDetails (Master 7.4)", () => {
     await expect(save(0, { setupMinutes: 15 })).rejects.toMatchObject({ code: "VENUE_DETAILS_VERSION_CONFLICT" });
     await expect(save(5, { setupMinutes: 15 })).rejects.toMatchObject({ code: "VENUE_DETAILS_VERSION_CONFLICT" });
     await expect(detailModel.getVenueDetail(7)).resolves.toMatchObject({ setupMinutes: 30, version: 1 });
+  });
+
+  test("[Master 5.4.1] should_refuse_to_overwrite_minutes_already_set_even_at_the_right_version", async () => {
+    await save(0, { setupMinutes: 30 });
+    const guarded = (fields) => detailModel.saveVenueDetails({
+      venueId: 7, expectedVersion: 1, fields, name: "Hall", location: "1 Road", pgVersion: 1, actorId: 3, unsetFields: Object.keys(fields),
+    });
+
+    await expect(guarded({ setupMinutes: 45 })).rejects.toMatchObject({ code: "VENUE_DETAILS_VERSION_CONFLICT" });
+    await expect(guarded({ turnaroundMinutes: 45 })).resolves.toMatchObject({ setupMinutes: 30, turnaroundMinutes: 45, version: 2 });
   });
 
   test("should_let_the_validator_reject_minutes_outside_the_schema", async () => {

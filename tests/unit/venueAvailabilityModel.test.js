@@ -5,7 +5,7 @@ jest.mock("../../model/venueDetailModel", () => ({
   saveVenueDetails: jest.fn(),
   EDITABLE_DETAIL_FIELDS: ["description", "facilities", "accessibilityFeatures", "supportedLayouts", "emergencyAccess", "knownRestrictions", "setupMinutes", "turnaroundMinutes"],
 }));
-jest.mock("../../model/venueCalendarModel", () => ({ findCalendarEntries: jest.fn(), findFutureActiveHolds: jest.fn() }));
+jest.mock("../../model/venueCalendarModel", () => ({ findCalendarEntries: jest.fn() }));
 jest.mock("../../model/activityModel", () => ({ appendActivity: jest.fn() }));
 
 const supabase = require("../../config/supabase");
@@ -50,7 +50,6 @@ describe("updateVenueDetails (SPM-73, Master 5.4.1, 7.4)", () => {
     expect(venueDetailModel.saveVenueDetails).toHaveBeenCalledWith(expect.objectContaining({
       venueId: 45, expectedVersion: 2, fields: { facilities: ["Stage", "PA"] }, name: "Grand Hall", pgVersion: 4, actorId: 3,
     }));
-    expect(venueCalendarModel.findFutureActiveHolds).not.toHaveBeenCalled();
     expect(activityModel.appendActivity).toHaveBeenCalledWith(expect.objectContaining({
       userId: 3, entityId: 45, action: "VENUE_DETAILS_UPDATED", audience: "STAFF_ONLY",
       changes: { facilities: { before: ["Stage"], after: ["Stage", "PA"] } },
@@ -68,35 +67,34 @@ describe("updateVenueDetails (SPM-73, Master 5.4.1, 7.4)", () => {
     expect(activityModel.appendActivity).not.toHaveBeenCalled();
   });
 
-  test("[T16] should_refuse_a_buffer_change_while_future_bookings_or_holds_exist_and_list_them", async () => {
+  test("[T16] should_refuse_to_change_a_setup_or_turnaround_time_once_set", async () => {
     mockVenueRow();
-    venueDetailModel.getVenueDetail.mockResolvedValue({ version: 2, setupMinutes: 30 });
-    venueCalendarModel.findFutureActiveHolds.mockResolvedValue([
-      { eventId: 500, start: at("10:00"), end: at("12:00") },
-    ]);
-    supabase.from.mockReturnValueOnce(queryReturning({
-      data: [{ booking_reference: "VB-000110", event_id: 442, status: "APPROVED", start_datetime: "2026-11-04T01:00:00Z", end_datetime: "2026-11-04T04:00:00Z" }],
-      error: null,
-    }));
+    venueDetailModel.getVenueDetail.mockResolvedValue({ version: 2, setupMinutes: 30, turnaroundMinutes: 0 });
 
-    await expect(venueModel.updateVenueDetails(3, 45, 2, { setupMinutes: 60 })).rejects.toMatchObject({
-      code: "VENUE_HAS_FUTURE_COMMITMENTS",
-      commitments: [
-        expect.objectContaining({ type: "BOOKING", bookingReference: "VB-000110", requestId: "REQ-000442" }),
-        expect.objectContaining({ type: "HOLD", requestId: "REQ-000500" }),
-      ],
+    await expect(venueModel.updateVenueDetails(3, 45, 2, { setupMinutes: 60, turnaroundMinutes: 15 })).rejects.toMatchObject({
+      code: "VENUE_BUFFERS_LOCKED",
+      fields: ["setupMinutes", "turnaroundMinutes"],
     });
     expect(venueDetailModel.saveVenueDetails).not.toHaveBeenCalled();
   });
 
-  test("[T16] should_allow_a_buffer_change_without_future_commitments", async () => {
+  test("[T16] should_set_each_time_once_and_guard_the_write", async () => {
     mockVenueRow();
     venueDetailModel.getVenueDetail.mockResolvedValue({ version: 2, setupMinutes: 30 });
-    venueCalendarModel.findFutureActiveHolds.mockResolvedValue([]);
-    supabase.from.mockReturnValueOnce(queryReturning({ data: [], error: null }));
-    venueDetailModel.saveVenueDetails.mockResolvedValue({ version: 3, setupMinutes: 60 });
+    venueDetailModel.saveVenueDetails.mockResolvedValue({ version: 3, setupMinutes: 30, turnaroundMinutes: 45 });
 
-    await expect(venueModel.updateVenueDetails(3, 45, 2, { setupMinutes: 60 })).resolves.toMatchObject({ changed: true });
+    await expect(venueModel.updateVenueDetails(3, 45, 2, { setupMinutes: 30, turnaroundMinutes: 45 })).resolves.toMatchObject({ changed: true });
+    expect(venueDetailModel.saveVenueDetails).toHaveBeenCalledWith(expect.objectContaining({
+      fields: { turnaroundMinutes: 45 },
+      unsetFields: ["turnaroundMinutes"],
+    }));
+  });
+
+  test("[T16] should_allow_zero_as_a_first_value_and_then_lock_it", async () => {
+    mockVenueRow();
+    venueDetailModel.getVenueDetail.mockResolvedValue({ version: 1, setupMinutes: 0, turnaroundMinutes: 0 });
+
+    await expect(venueModel.updateVenueDetails(3, 45, 1, { setupMinutes: 5 })).rejects.toMatchObject({ code: "VENUE_BUFFERS_LOCKED", fields: ["setupMinutes"] });
   });
 
   test("should_refuse_a_stale_version_before_any_write", async () => {
@@ -135,7 +133,6 @@ describe("getVenueAvailability (SPM-74)", () => {
   const range = { from: at("00:00"), to: at("00:00", "2026-11-05") };
   const bookingRow = (coordinatorId) => ({
     booking_id: 110,
-    booking_reference: "VB-000110",
     status: "APPROVED",
     start_datetime: at("10:00").toISOString(),
     end_datetime: at("12:00").toISOString(),
@@ -160,7 +157,7 @@ describe("getVenueAvailability (SPM-74)", () => {
     const [venue] = result.venues;
     expect(venue).toMatchObject({ venueId: 45, setupMinutes: 30, turnaroundMinutes: 45, buffersRecorded: true, summary: "UNAVAILABLE_BOOKING" });
     expect(venue.entries[0]).toMatchObject({
-      bookingReference: "VB-000110",
+      bookingId: 110,
       occupiedStart: at("09:30").toISOString(),
       occupiedEnd: at("12:45").toISOString(),
       eventTitle: "Private planning forum",

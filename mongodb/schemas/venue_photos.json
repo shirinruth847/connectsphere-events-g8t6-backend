@@ -1,0 +1,23 @@
+{
+  "$jsonSchema": {
+    "bsonType": "object",
+    "description": "Venue photo gallery (T28, SPM-181): one document per photo. venueId is the PostgreSQL venue_id as a string; position orders the gallery from 0, and position 0 is the cover photo. The bytes are stored inline (at most 2 MB, enforced by the backend before writing).",
+    "required": ["_id", "venueId", "position", "contentType", "size", "data", "uploadedAt", "version"],
+    "additionalProperties": false,
+    "properties": {
+      "_id": { "bsonType": "objectId" },
+      "venueId": { "bsonType": "string", "maxLength": 64 },
+      "position": { "bsonType": "int", "minimum": 0, "maximum": 19 },
+      "caption": { "bsonType": ["string", "null"], "maxLength": 200 },
+      "contentType": { "enum": ["image/jpeg", "image/png", "image/webp"] },
+      "size": { "bsonType": "int", "minimum": 1, "maximum": 2097152 },
+      "data": { "bsonType": "binData" },
+      "uploadedBy": { "bsonType": ["int", "null"] },
+      "uploadedAt": { "bsonType": "date" },
+      "updatedBy": { "bsonType": ["int", "null"] },
+      "updatedAt": { "bsonType": ["date", "null"] },
+      "version": { "bsonType": "int", "minimum": 1 },
+      "fixture": { "bsonType": "string", "maxLength": 64 }
+    }
+  }
+}

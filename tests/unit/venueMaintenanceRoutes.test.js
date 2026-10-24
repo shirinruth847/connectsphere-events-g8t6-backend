@@ -276,7 +276,7 @@ describe("GET /api/venues/manage and /api/venues/:venueId", () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ venues: [savedVenue], nextOffset: null });
     expect(venueModel.listManagedVenues).toHaveBeenCalledWith(
-      { search: "marina", location: "Bayfront", status: "ACTIVE" },
+      { search: "marina", location: "Bayfront", status: "ACTIVE", sort: "name", order: "asc" },
       { limit: 20, offset: 40 },
     );
   });
@@ -286,7 +286,7 @@ describe("GET /api/venues/manage and /api/venues/:venueId", () => {
 
     await as("get", "/api/venues/manage");
 
-    expect(venueModel.listManagedVenues).toHaveBeenCalledWith({}, { limit: 50, offset: 0 });
+    expect(venueModel.listManagedVenues).toHaveBeenCalledWith({ sort: "name", order: "asc" }, { limit: 50, offset: 0 });
   });
 
   test("should_reject_an_unknown_status_filter_or_bad_paging", async () => {
