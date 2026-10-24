@@ -102,6 +102,22 @@ const rejectUnknown = (body, allowed, fields) => {
   }
 };
 
+const hasErrors = (fields) => Object.keys(fields).length > 0;
+
+// Runs each field's check and keys the result as the database function expects.
+// An update checks only the fields that were sent.
+const collectValues = (checks, keys, body, fields, { sentOnly = false } = {}) => {
+  const values = {};
+  for (const [key, check] of Object.entries(checks)) {
+    if (!sentOnly || has(body, key)) values[keys[key]] = check(body, fields);
+  }
+  return values;
+};
+
+const requireSomeChange = (values, fields) => {
+  if (!Object.keys(values).length && !hasErrors(fields)) fields.body = MESSAGES.nothingToUpdate;
+};
+
 const checkText = (body, key, { required, tooLong, limit }, fields) => {
   const text = readText(body[key]);
   if (text === undefined) fields[key] = MESSAGES.textInvalid;
@@ -154,10 +170,7 @@ const validateEquipmentCreate = (body) => {
   if (!isPlainObject(body)) return { values: {}, fields: { body: MESSAGES.bodyInvalid } };
   const fields = {};
   rejectUnknown(body, CREATE_FIELDS, fields);
-  const values = {};
-  for (const [key, check] of Object.entries(EQUIPMENT_CHECKS)) {
-    values[EQUIPMENT_KEYS[key]] = check(body, fields);
-  }
+  const values = collectValues(EQUIPMENT_CHECKS, EQUIPMENT_KEYS, body, fields);
   return { values, fields };
 };
 
@@ -168,11 +181,8 @@ const validateEquipmentUpdate = (body) => {
   const fields = {};
   rejectUnknown(body, UPDATE_FIELDS, fields);
   const version = checkVersion(body.version, fields);
-  const values = {};
-  for (const [key, check] of Object.entries(EQUIPMENT_CHECKS)) {
-    if (has(body, key)) values[EQUIPMENT_KEYS[key]] = check(body, fields);
-  }
-  if (!Object.keys(values).length && !Object.keys(fields).length) fields.body = MESSAGES.nothingToUpdate;
+  const values = collectValues(EQUIPMENT_CHECKS, EQUIPMENT_KEYS, body, fields, { sentOnly: true });
+  requireSomeChange(values, fields);
   return { values, fields, version };
 };
 
@@ -247,10 +257,7 @@ const validateUnavailabilityCreate = (body, now = new Date()) => {
   if (!isPlainObject(body)) return { values: {}, fields: { body: MESSAGES.bodyInvalid } };
   const fields = {};
   rejectUnknown(body, UNAVAILABILITY_CREATE_FIELDS, fields);
-  const values = {};
-  for (const [key, check] of Object.entries(UNAVAILABILITY_CHECKS)) {
-    values[UNAVAILABILITY_KEYS[key]] = check(body, fields);
-  }
+  const values = collectValues(UNAVAILABILITY_CHECKS, UNAVAILABILITY_KEYS, body, fields);
   checkPeriod(values.starts_at, values.ends_at, now, fields);
   return { values, fields };
 };
@@ -262,11 +269,8 @@ const validateUnavailabilityUpdate = (body, current, now = new Date()) => {
   const fields = {};
   rejectUnknown(body, UNAVAILABILITY_UPDATE_FIELDS, fields);
   const version = checkVersion(body.version, fields);
-  const values = {};
-  for (const [key, check] of Object.entries(UNAVAILABILITY_CHECKS)) {
-    if (has(body, key)) values[UNAVAILABILITY_KEYS[key]] = check(body, fields);
-  }
-  if (!Object.keys(values).length && !Object.keys(fields).length) fields.body = MESSAGES.nothingToUpdate;
+  const values = collectValues(UNAVAILABILITY_CHECKS, UNAVAILABILITY_KEYS, body, fields, { sentOnly: true });
+  requireSomeChange(values, fields);
   const toIso = (value) => (value ? new Date(value).toISOString() : null);
   checkPeriod(values.starts_at ?? toIso(current?.starts_at), values.ends_at ?? toIso(current?.ends_at), now, fields);
   return { values, fields, version };
@@ -279,18 +283,20 @@ const validateVersionOnly = (body) => {
   return { version: checkVersion(body.version, fields), fields };
 };
 
+// A blank filter is left out; text over the limit is refused.
+const checkTextFilter = (query, key, { limit, tooLong }, filters, fields) => {
+  const text = readText(query[key]);
+  if (text === undefined) fields[key] = MESSAGES.textInvalid;
+  else if (text && text.length > limit) fields[key] = tooLong;
+  else if (text) filters[key] = text;
+};
+
 // GET /api/equipment filters (SPM-52 AC5).
 const validateEquipmentListQuery = (query) => {
   const fields = {};
   const filters = {};
-  const search = readText(query.search);
-  const category = readText(query.category);
-  if (search === undefined) fields.search = MESSAGES.textInvalid;
-  else if (search && search.length > LIMITS.search) fields.search = MESSAGES.searchTooLong;
-  else if (search) filters.search = search;
-  if (category === undefined) fields.category = MESSAGES.textInvalid;
-  else if (category && category.length > LIMITS.category) fields.category = MESSAGES.categoryFilterTooLong;
-  else if (category) filters.category = category;
+  checkTextFilter(query, "search", { limit: LIMITS.search, tooLong: MESSAGES.searchTooLong }, filters, fields);
+  checkTextFilter(query, "category", { limit: LIMITS.category, tooLong: MESSAGES.categoryFilterTooLong }, filters, fields);
   if (query.status !== undefined && query.status !== "") {
     if (STATUSES.includes(query.status)) filters.status = query.status;
     else fields.status = MESSAGES.statusInvalid;
@@ -301,8 +307,6 @@ const validateEquipmentListQuery = (query) => {
 // IDs that cannot exist are "not found".
 const parseId = (value) =>
   typeof value === "string" && /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_INTEGER ? Number(value) : null;
-
-const hasErrors = (fields) => Object.keys(fields).length > 0;
 
 module.exports = {
   validateEquipmentCreate,
