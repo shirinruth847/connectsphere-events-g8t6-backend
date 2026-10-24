@@ -31,7 +31,6 @@ const room = (venueId, name) => ({
 
 const bookingRow = (bookingId, status, venueId, name) => ({
   booking_id: bookingId,
-  booking_reference: `VB-${String(bookingId).padStart(6, "0")}`,
   label: null,
   status,
   start_datetime: "2026-11-04T01:00:00+00:00",
@@ -43,6 +42,7 @@ const bookingRow = (bookingId, status, venueId, name) => ({
   special_requirements: null,
   rejection_reason: null,
   created_at: "2026-10-07T13:32:08+00:00",
+  updated_at: "2026-10-08T02:00:00+00:00",
   event_id: 442,
   room: room(venueId, name),
 });
@@ -83,7 +83,6 @@ describe("findVenueBookings", () => {
     expect(result.bookings).toHaveLength(2);
     expect(result.bookings[0]).toEqual({
       bookingId: 1,
-      bookingReference: "VB-000001",
       label: null,
       status: "PENDING",
       statusLabel: "Pending",
@@ -93,6 +92,7 @@ describe("findVenueBookings", () => {
       endDatetime: "2026-11-04T04:00:00+00:00",
       expectedAttendance: 120,
       submittedAt: "2026-10-07T13:32:08+00:00",
+      updatedAt: "2026-10-08T02:00:00+00:00",
       event: { eventId: 442, requestId: "REQ-000442", title: "Planning", status: "PLANNING", eventType: null, eventTypeLabel: null },
     });
     expect(list.calls).toEqual(expect.arrayContaining([
