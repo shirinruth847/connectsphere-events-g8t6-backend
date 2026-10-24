@@ -59,10 +59,18 @@ const toChangeList = (changes) => {
     }));
 };
 
+// Entries written by background jobs have no user (SPM-173 AC4).
+const SYSTEM_ACTOR_ROLE = "SYSTEM";
+
+const toActorName = (row) => {
+  if (row.actor_role === SYSTEM_ACTOR_ROLE) return "System";
+  return row.actor ? row.actor.name : null;
+};
+
 const toHistoryEntry = (row) => ({
   historyId: row.log_id,
   action: row.action,
-  actor: { userId: row.user_id, name: row.actor ? row.actor.name : null, role: row.actor_role },
+  actor: { userId: row.user_id, name: toActorName(row), role: row.actor_role },
   occurredAt: row.timestamp,
   summary: row.details,
   changes: toChangeList(row.changes),
@@ -95,7 +103,23 @@ const findEventHistory = async (eventId, { limit, cursor = null, audiences = [] 
   };
 };
 
+// Appends an audit entry for a change committed outside PostgreSQL (a MongoDB
+// detail edit, Master 7.4 step 3). The runtime may only insert (append-only).
+const appendActivity = async ({ userId, entityName, entityId, action, details, changes = null, audience }) => {
+  const { error } = await supabase.from("activity_log").insert({
+    user_id: userId,
+    entity_name: entityName,
+    entity_id: entityId,
+    action,
+    details,
+    changes,
+    audience,
+  });
+  if (error) throw error;
+};
+
 module.exports = {
+  appendActivity,
   findEventHistory,
   toHistoryEntry,
   toChangeList,
