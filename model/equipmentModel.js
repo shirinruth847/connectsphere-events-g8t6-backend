@@ -14,6 +14,8 @@ const {
   DETAIL_STATUS,
   DETAILS_OUT_OF_DATE_NOTICE,
   UNAVAILABILITY_REASON_LABELS,
+  UNAVAILABILITY_STATUS,
+  OUTBOX_STATE,
 } = require("../config/equipmentConstants");
 
 const EQUIPMENT_SELECT =
@@ -97,10 +99,10 @@ const toStatus = (row) => {
   return row.details_pending ? EQUIPMENT_STATUS.DETAILS_PENDING : EQUIPMENT_STATUS.ACTIVE;
 };
 
-// unappliedState is "PENDING" or "FAILED" when the item's newest outbox entry
+// unappliedState is OUTBOX_STATE.PENDING or FAILED when the item's newest outbox entry
 // has not reached MongoDB yet.
 const toDetailStatus = (row, unappliedState) => {
-  if (unappliedState === "FAILED") return DETAIL_STATUS.FAILED;
+  if (unappliedState === OUTBOX_STATE.FAILED) return DETAIL_STATUS.FAILED;
   if (row.details_pending) return DETAIL_STATUS.PENDING;
   return unappliedState ? DETAIL_STATUS.OUT_OF_DATE : DETAIL_STATUS.CURRENT;
 };
@@ -153,7 +155,7 @@ const findUnavailableNow = async (equipmentIds) => {
     .from("equipment_unavailability")
     .select("equipment_id,quantity")
     .in("equipment_id", equipmentIds)
-    .eq("status", "ACTIVE")
+    .eq("status", UNAVAILABILITY_STATUS.ACTIVE)
     .lte("starts_at", now)
     .gt("ends_at", now);
   if (error) throw new Error(`[Supabase Error] ${error.message}`);
@@ -238,7 +240,7 @@ const findOpenUnavailability = async (equipmentId) => {
     .from("equipment_unavailability")
     .select(UNAVAILABILITY_SELECT)
     .eq("equipment_id", equipmentId)
-    .eq("status", "ACTIVE")
+    .eq("status", UNAVAILABILITY_STATUS.ACTIVE)
     .gt("ends_at", new Date().toISOString())
     .order("starts_at", { ascending: true })
     .order("unavailability_id", { ascending: true })

@@ -35,7 +35,21 @@ const UNAVAILABILITY_REASON_LABELS = Object.freeze({
   OTHER: "Other",
 });
 
+// equipment_unavailability.status: an ended record keeps ACTIVE with an earlier
+// end; a record cancelled before it started is CANCELLED.
+const UNAVAILABILITY_STATUS = Object.freeze({
+  ACTIVE: "ACTIVE",
+  CANCELLED: "CANCELLED",
+});
+
 const MAX_EQUIPMENT_QUANTITY = 1000000;
+
+// outbox_entries.state (Master 7.3).
+const OUTBOX_STATE = Object.freeze({
+  PENDING: "PENDING",
+  APPLIED: "APPLIED",
+  FAILED: "FAILED",
+});
 
 // MongoDB sync (Master 7.3): batch size, lease and attempts before FAILED.
 const OUTBOX = Object.freeze({
@@ -53,6 +67,8 @@ module.exports = {
   DETAILS_OUT_OF_DATE_NOTICE,
   UNAVAILABILITY_REASONS,
   UNAVAILABILITY_REASON_LABELS,
+  UNAVAILABILITY_STATUS,
   MAX_EQUIPMENT_QUANTITY,
+  OUTBOX_STATE,
   OUTBOX,
 };

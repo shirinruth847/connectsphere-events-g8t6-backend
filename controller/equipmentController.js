@@ -11,6 +11,7 @@ const {
   hasErrors,
   MESSAGES,
 } = require("../validators/equipmentValidator");
+const { UNAVAILABILITY_STATUS } = require("../config/equipmentConstants");
 
 const DOMAIN_ERRORS = Object.freeze({
   // Same response as requireRole: the database re-checks the role in the write.
@@ -189,7 +190,7 @@ const endUnavailability = async (req, res, next) => {
   if (hasErrors(fields)) return validationFailed(res, fields);
   try {
     const result = await equipmentModel.endUnavailability(req.user.user_id, equipmentId, unavailabilityId, version);
-    const message = result.unavailability.status === "CANCELLED" ? "Unavailable stock cancelled." : "Unavailable stock ended.";
+    const message = result.unavailability.status === UNAVAILABILITY_STATUS.CANCELLED ? "Unavailable stock cancelled." : "Unavailable stock ended.";
     return res.status(200).json({ message, ...result });
   } catch (err) {
     return handleError(err, res, next, equipmentId);

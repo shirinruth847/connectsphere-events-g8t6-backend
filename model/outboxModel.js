@@ -4,7 +4,7 @@
 // records the result. Entries are never deleted.
 const supabase = require("../config/supabase");
 const equipmentDetailModel = require("./equipmentDetailModel");
-const { OUTBOX } = require("../config/equipmentConstants");
+const { OUTBOX, OUTBOX_STATE } = require("../config/equipmentConstants");
 
 const APPLIERS = Object.freeze({
   equipment_details: (entry) => equipmentDetailModel.applyEquipmentDetail({
@@ -24,8 +24,8 @@ const callRpc = async (name, args) => {
 // hosts, never credentials, and the column is bounded anyway.
 const describeFailure = (error) => `${error.name || "Error"}: ${String(error.message || "").slice(0, 300)}`;
 
-// Applies one claimed entry and records the outcome. Returns "APPLIED",
-// "PENDING" (will be retried) or "FAILED" (gave up after the attempt limit).
+// Applies one claimed entry and records the outcome. Returns APPLIED, PENDING
+// (will be retried) or FAILED (gave up after the attempt limit).
 const applyEntry = async (entry, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
   const apply = APPLIERS[entry.target_collection];
   try {
@@ -36,10 +36,10 @@ const applyEntry = async (entry, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
       p_entry_id: entry.entry_id,
       p_error: describeFailure(error),
       p_max_attempts: maxAttempts,
-    })) || "PENDING";
+    })) || OUTBOX_STATE.PENDING;
   }
   await callRpc("complete_outbox_entry", { p_entry_id: entry.entry_id });
-  return "APPLIED";
+  return OUTBOX_STATE.APPLIED;
 };
 
 // The request handler's one attempt right after commit (Master 7.3 step 2).
@@ -82,15 +82,15 @@ const newestByDocument = (rows) => {
 };
 
 // Documents whose newest entry has not been applied yet, as a Map of document
-// ID -> "PENDING" or "FAILED". A stale entry older than an applied one does not
+// ID -> PENDING or FAILED. A stale entry older than an applied one does not
 // count: the document already holds newer data. Only unapplied entries and the
 // applied ones of those documents are read, so the result stays small.
 const findUnappliedDocuments = async (targetCollection, documentIds) => {
   const ids = documentIds.map(String);
   if (!ids.length) return new Map();
-  const unapplied = newestByDocument(await selectEntries(targetCollection, ids, ["PENDING", "FAILED"]));
+  const unapplied = newestByDocument(await selectEntries(targetCollection, ids, [OUTBOX_STATE.PENDING, OUTBOX_STATE.FAILED]));
   if (!unapplied.size) return new Map();
-  const applied = newestByDocument(await selectEntries(targetCollection, [...unapplied.keys()], ["APPLIED"]));
+  const applied = newestByDocument(await selectEntries(targetCollection, [...unapplied.keys()], [OUTBOX_STATE.APPLIED]));
   const behind = new Map();
   for (const [documentId, entry] of unapplied) {
     const newestApplied = applied.get(documentId);
