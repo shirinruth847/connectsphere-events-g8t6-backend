@@ -234,7 +234,7 @@ Same-organisation viewing relies on `event.organisation_id`. The database fills 
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
-| `GET /api/events/:id` | — | `200 { event }`. Adds `version`, `viewerRelationship` (`OWNER`, `ORGANISATION_MEMBER`, `ASSIGNED_COORDINATOR`) and `permissions: { canEdit, editableFields, canViewDraftHistory, canViewStaffHistory }`. The assigned coordinator also gets `coordinatorId` and `organiser: { userId, name }` | `401`, `404` |
+| `GET /api/events/:id` | — | `200 { event }`. Adds `version`, `viewerRelationship` (`OWNER`, `ORGANISATION_MEMBER`, `ASSIGNED_COORDINATOR`) and `permissions: { canEdit, editableFields, canViewDraftHistory, canViewStaffHistory }`. The assigned coordinator also gets `coordinatorId` and `organiser: { userId, name, email }`; email is `null` when no profile email is available | `401`, `404` |
 | `PUT /api/events/:id` | Changed fields, `version` (the one loaded) and an `Idempotency-Key` header | `200 { message, event }`, plus `savedAt` for a draft | See below |
 | `GET /api/events/:id/history` | `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { history: [{ historyId, action, actor: { userId, name, role }, occurredAt, summary, changes: [{ field, before, after }], audience }], nextCursor }`, newest first | `400`, `401`, `404` |
 

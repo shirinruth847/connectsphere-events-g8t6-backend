@@ -933,3 +933,46 @@ describe("An attendee's own registered event (SPM-155 AC4, AC5)", () => {
     await expect(eventModel.findRegisteredAttendeeEvent(7, 21)).resolves.toBeNull();
   });
 });
+
+describe("[SPM-38 AC1] assigned coordinator organiser contact", () => {
+  const row = {
+    event_id: 42,
+    title: "Review event",
+    organiser_id: 11,
+    coordinator_id: 20,
+    status: "UNDER_REVIEW",
+    organiser: { user_id: 11, name: "Synthetic Organiser", email: "organiser@example.test" },
+  };
+
+  test("includes the organiser email only in an assigned coordinator's scoped event view", async () => {
+    const query = queryReturning({ data: row, error: null });
+    supabase.from.mockReturnValue(query);
+    const user = { user_id: 20, role: "COORDINATOR" };
+
+    const result = await eventModel.findVisibleEvent(42, user);
+
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("organiser:user!event_organiser_id_fkey(user_id,name,email)"));
+    expect(query.eq).toHaveBeenCalledWith("coordinator_id", 20);
+    expect(eventModel.toEventView(row, user, {
+      relationship: "ASSIGNED_COORDINATOR",
+      canEdit: true,
+      editableFields: ["title"],
+      historyAudiences: ["STAFF_ONLY"],
+    }).organiser).toEqual({
+      userId: 11,
+      name: "Synthetic Organiser",
+      email: "organiser@example.test",
+    });
+  });
+
+  test("does not expose organiser contact data to other relationships", () => {
+    const user = { user_id: 11, role: "ORGANISER" };
+    const view = eventModel.toEventView(row, user, {
+      relationship: "OWNER",
+      canEdit: false,
+      editableFields: [],
+      historyAudiences: [],
+    });
+    expect(view).not.toHaveProperty("organiser");
+  });
+});

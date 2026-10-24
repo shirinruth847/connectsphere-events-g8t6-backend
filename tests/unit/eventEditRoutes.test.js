@@ -119,7 +119,7 @@ describe("GET /api/events/:id (AC1)", () => {
   });
 
   test("[SPM-33-TC-05] should_return_the_coordination_view_when_the_assigned_coordinator_opens_the_event", async () => {
-    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ organiser: { user_id: ORGANISER_ID, name: "Organiser A" } }));
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ organiser: { user_id: ORGANISER_ID, name: "Organiser A", email: null } }));
 
     const res = await send("get", "/api/events/42");
 
@@ -128,7 +128,7 @@ describe("GET /api/events/:id (AC1)", () => {
       expect.objectContaining({
         viewerRelationship: "ASSIGNED_COORDINATOR",
         coordinatorId: COORDINATOR_ID,
-        organiser: { userId: ORGANISER_ID, name: "Organiser A" },
+        organiser: { userId: ORGANISER_ID, name: "Organiser A", email: null },
         permissions: {
           canEdit: true,
           editableFields: ["title", "purpose", "description"],

@@ -38,7 +38,7 @@ const EVENT_SELECT =
   "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
-const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
+const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name,email)`;
 const LIST_SELECT =
   "event_id,title,status,previously_confirmed,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 const UNASSIGNED_QUEUE_SELECT =
@@ -187,7 +187,9 @@ const toEventView = (row, user, access) => ({
   ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
     ? {
         coordinatorId: row.coordinator_id,
-        organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
+        organiser: row.organiser
+          ? { userId: row.organiser.user_id, name: row.organiser.name, email: row.organiser.email ?? null }
+          : null,
         ...(row.arrangement_version === undefined ? {} : { arrangementVersion: row.arrangement_version }),
       }
     : {}),
