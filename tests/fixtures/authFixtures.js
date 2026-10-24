@@ -159,7 +159,7 @@ const createAuthFixtures = async (runId, { extraAccounts = [] } = {}) => {
   ));
 
   const events = {};
-  for (const [key, spec] of Object.entries(EVENT_SPECS)) {
+  for (const [eventIndex, [key, spec]] of Object.entries(EVENT_SPECS).entries()) {
     const isDraft = spec.status === "DRAFT";
     const coordinatorKey = spec.coordinator || "coordinator";
     const coordinatorId = isDraft || spec.unassigned ? null : accounts[coordinatorKey].userId;
@@ -176,8 +176,8 @@ const createAuthFixtures = async (runId, { extraAccounts = [] } = {}) => {
         status: spec.status,
         expected_attendance: 50,
         // event_submitted_fields_check requires these once a request leaves DRAFT.
-        start_datetime: isDraft ? null : spec.start || "2027-03-01T01:00:00Z",
-        end_datetime: isDraft ? null : spec.end || "2027-03-01T03:00:00Z",
+        start_datetime: isDraft ? null : spec.start || new Date(Date.UTC(2027, 2, 1 + eventIndex, 1)).toISOString(),
+        end_datetime: isDraft ? null : spec.end || new Date(Date.UTC(2027, 2, 1 + eventIndex, 3)).toISOString(),
         preferred_layout_type: isDraft ? null : "THEATRE",
         is_published: Boolean(spec.published),
       },

@@ -2,6 +2,7 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
+const { VENUE_STATUS } = require("../config/venueConstants");
 const {
   EVENT_STATUS,
   NO_LAYOUT_PREFERENCE,
@@ -11,6 +12,7 @@ const {
   HISTORY_AUDIENCE,
   EVENT_FIELD_GROUPS,
   COORDINATOR_EDITABLE_STATUSES,
+  LIFECYCLE_ACTIONS,
 } = require("../config/eventConstants");
 const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
 
@@ -33,12 +35,14 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
 const LIST_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,created_at,updated_at,organisation(organisation_id,name)";
+  "event_id,title,status,previously_confirmed,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
+const UNASSIGNED_QUEUE_SELECT =
+  "event_id,title,purpose,status,start_datetime,end_datetime,expected_attendance,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
 
 // Calendar events include richer details for coordinators' schedule view.
 const CALENDAR_SELECT =
@@ -111,6 +115,10 @@ const formatRequestId = (eventId) => `REQ-${String(eventId).padStart(6, "0")}`;
 const toStatusNote = (row) => {
   if (row.status === EVENT_STATUS.SUBMITTED && row.coordinator_id == null) return STATUS_NOTES.WAITING_FOR_COORDINATOR;
   if (row.status === EVENT_STATUS.AWAITING_CLARIFICATION) return STATUS_NOTES.RETURNED_FOR_ACTION;
+  // A confirmed event sent back to planning (for example, an accepted change).
+  if ([EVENT_STATUS.PLANNING, EVENT_STATUS.SAFETY_REVIEW].includes(row.status) && row.previously_confirmed === true) {
+    return STATUS_NOTES.RECONFIRMATION_PENDING;
+  }
   return null;
 };
 
@@ -126,14 +134,14 @@ const parseAccessibility = (value) => {
 const toOrganisation = (organisation) =>
   organisation ? { organisationId: organisation.organisation_id, name: organisation.name } : null;
 
-const toApi = (row, viewerUserId) => {
+const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
   const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
   return {
     eventId: row.event_id,
     requestId: formatRequestId(row.event_id),
-    status: row.status,
-    statusLabel: STATUS_LABELS[row.status] || row.status,
+    ...(includeStoredStatus ? { status: row.status } : {}),
+    statusLabel: STATUS_LABELS[row.status] || "Unknown status",
     statusNote: toStatusNote(row),
     title: row.title,
     purpose: row.purpose,
@@ -159,6 +167,8 @@ const toApi = (row, viewerUserId) => {
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    submittedAt: row.submitted_at ?? null,
+    coordinatorName: row.coordinator?.name ?? null,
     // Sent back as "version" when saving, to detect a save over someone else's change.
     ...(row.version === undefined ? {} : { version: row.version }),
     ...(row.organisation === undefined ? {} : { organisation: toOrganisation(row.organisation) }),
@@ -171,11 +181,14 @@ const toApi = (row, viewerUserId) => {
 // getEventAccess; permissions tell the interface which controls to offer and are
 // enforced again on every save.
 const toEventView = (row, user, access) => ({
-  ...toApi(row, user.user_id),
+  ...toApi(row, user.user_id, {
+    includeStoredStatus: access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR,
+  }),
   ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
     ? {
         coordinatorId: row.coordinator_id,
         organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
+        ...(row.arrangement_version === undefined ? {} : { arrangementVersion: row.arrangement_version }),
       }
     : {}),
   viewerRelationship: access.relationship,
@@ -187,11 +200,11 @@ const toEventView = (row, user, access) => ({
   },
 });
 
-const toListItem = (row, viewerUserId) => ({
+const toListItem = (row, viewerUserId, { includeStoredStatus = false } = {}) => ({
   eventId: row.event_id,
   requestId: formatRequestId(row.event_id),
-  status: row.status,
-  statusLabel: STATUS_LABELS[row.status] || row.status,
+  ...(includeStoredStatus ? { status: row.status } : {}),
+  statusLabel: STATUS_LABELS[row.status] || "Unknown status",
   statusNote: toStatusNote(row),
   title: row.title,
   startDatetime: row.start_datetime,
@@ -202,7 +215,105 @@ const toListItem = (row, viewerUserId) => ({
   isOwner: row.organiser_id === viewerUserId,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  submittedAt: row.submitted_at ?? null,
 });
+
+// Leads need the stated purpose and resource needs to decide who should take
+// an unassigned request. Keep this richer representation scoped to that queue.
+const toUnassignedQueueItem = (row) => ({
+  ...toListItem(row, undefined, { includeStoredStatus: true }),
+  purpose: row.purpose,
+  venuePreferences: Array.isArray(row.event_venue_preference)
+    ? row.event_venue_preference
+        .slice()
+        .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
+        .map((item) => item.venue_id)
+    : [],
+  equipmentRequirements: Array.isArray(row.event_equipment_requirement)
+    ? row.event_equipment_requirement.map((item) => ({
+        equipmentId: item.equipment_id,
+        quantity: item.quantity_requested,
+      }))
+    : [],
+});
+
+const computeRegistrationAvailability = ({
+  status,
+  is_registration_enabled,
+  registration_capacity,
+  registration_open_at,
+  registration_close_at,
+  registeredCount = 0,
+  now = new Date(),
+}) => {
+  if (!is_registration_enabled) return "NOT_ENABLED";
+  if (!["CONFIRMED", "PREPARATION"].includes(status)) return "CLOSED";
+
+  const currentTime = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const openAt = registration_open_at ? new Date(registration_open_at).getTime() : null;
+  const closeAt = registration_close_at ? new Date(registration_close_at).getTime() : null;
+
+  // The window is half-open, [open, close): it closes at registration_close_at itself.
+  if (openAt !== null && currentTime < openAt) return "CLOSED";
+  if (closeAt !== null && currentTime >= closeAt) return "CLOSED";
+
+  if (registration_capacity == null) return "OPEN";
+  if (registeredCount >= registration_capacity) return "FULL_WAITLIST";
+  return "OPEN";
+};
+
+// registration(count) is narrowed to REGISTERED seats by REGISTERED_SEATS_FILTER, so the
+// list and the detail read capacity from the same embedded count.
+const LIST_ATTENDEE_DISCOVERY_SELECT =
+  "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name),registration(count),venue_booking(status,room(venue(venue_id,name,address)))";
+const REGISTERED_SEATS_FILTER = ["registration.registration_status", "REGISTERED"];
+
+const ATTENDEE_DISCOVERY_STATUSES = ["CONFIRMED", "PREPARATION"];
+
+const attendeeLocation = (bookings = []) => {
+  // The legacy schema has no primary-venue flag. Publish only an unambiguous
+  // approved venue; never choose an arbitrary booking or reveal pending ones.
+  const venues = new Map();
+  for (const booking of bookings ?? []) {
+    const venue = booking.room?.venue;
+    if (booking.status === "APPROVED" && venue) venues.set(venue.venue_id, venue);
+  }
+  if (venues.size !== 1) return null;
+  const venue = venues.values().next().value;
+  return [venue.name, venue.address].filter(Boolean).join(", ") || null;
+};
+
+const toAttendeeDiscoveryItem = (row) => {
+  const location = attendeeLocation(row.venue_booking);
+  const availability = computeRegistrationAvailability({
+    status: row.status,
+    is_registration_enabled: row.is_registration_enabled,
+    registration_capacity: row.registration_capacity,
+    registration_open_at: row.registration_open_at,
+    registration_close_at: row.registration_close_at,
+    registeredCount: row.registration?.[0]?.count ?? 0,
+  });
+
+  return {
+    eventId: row.event_id,
+    title: row.title,
+    description: row.description,
+    startDatetime: row.start_datetime,
+    endDatetime: row.end_datetime,
+    organisationName: row.organisation ? row.organisation.name : null,
+    location,
+    registrationAvailability: availability,
+  };
+};
+
+const toAttendeeDetail = (row) => {
+  const item = toAttendeeDiscoveryItem(row);
+  return {
+    ...item,
+    registrationOpenAt: row.registration_open_at,
+    registrationCloseAt: row.registration_close_at,
+  };
+};
 
 // ---------- errors ----------
 
@@ -216,16 +327,38 @@ const eventRequestError = (code, fields) => {
 };
 
 const DOMAIN_CODES = new Set([
+  "FORBIDDEN",
   "EVENT_NOT_FOUND",
   "EVENT_NOT_DRAFT",
   "NO_ELIGIBLE_COORDINATOR",
   "IDEMPOTENCY_KEY_REQUIRED",
   "IDEMPOTENCY_KEY_REUSED",
   "IDEMPOTENCY_IN_PROGRESS",
+  "COORDINATOR_CONFLICT",
+  "INVALID_COORDINATOR",
   "EVENT_VERSION_CONFLICT",
   "EVENT_NOT_EDITABLE_IN_STATUS",
   "FIELD_NOT_EDITABLE",
+  "FORBIDDEN",
+  "TRANSITION_NOT_ALLOWED",
+  "READINESS_BLOCKED",
+  "SAFETY_APPROVAL_REQUIRED",
+  "EVENT_NOT_ENDED",
+  "COORDINATOR_INVARIANT",
 ]);
+
+// The lifecycle functions report the event's current status (a refused or stale
+// action) or the failing readiness codes in the error detail (SPM-173 AC3, AC9).
+const withLifecycleDetail = (domainError, details) => {
+  const detail = String(details || "");
+  if (["TRANSITION_NOT_ALLOWED", "EVENT_VERSION_CONFLICT"].includes(domainError.code) && detail) {
+    domainError.currentStatus = detail;
+  }
+  if (domainError.code === "READINESS_BLOCKED") {
+    domainError.failures = detail.split(",").filter(Boolean);
+  }
+  return domainError;
+};
 
 // submit_event_request reports "<field>:<reason>" pairs in the error detail.
 const SUBMISSION_FAILURES = Object.freeze({
@@ -283,11 +416,12 @@ const CONSTRAINT_FIELD_ERRORS = Object.freeze({
   event_equipment_requirement_equipment_id_fkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
 });
 
-const toEventRequestError = (error) => {
+const toEventRequestError = (error, fields) => {
+  if (typeof error === "string") return eventRequestError(error, fields);
   const message = error.message || "";
   const code = error.code || "";
 
-  if (DOMAIN_CODES.has(message)) return eventRequestError(message);
+  if (DOMAIN_CODES.has(message)) return withLifecycleDetail(eventRequestError(message, error.fields), error.details);
   if (message === "INVALID_EVENT_SUBMISSION") {
     return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, SUBMISSION_FAILURES));
   }
@@ -303,6 +437,7 @@ const toEventRequestError = (error) => {
   if (code === "23502" && /column "title"/.test(message)) {
     return eventRequestError("VALIDATION_FAILED", { title: MESSAGES.titleRequired });
   }
+  if (code === "23P01") return eventRequestError("COORDINATOR_CONFLICT");
   // Data exceptions (bad casts, out-of-range values) are client input the validator missed.
   if (code.startsWith("22") || message === "INVALID_EVENT_PATCH") {
     return eventRequestError("VALIDATION_FAILED", {});
@@ -420,6 +555,8 @@ const findVisibleEvent = async (eventId, user) => {
   }
   const { data, error } = await query.maybeSingle();
   if (error) throw dbError(error);
+  // Authorization middleware needs the relationship identifiers on the row.
+  // Do not reduce this to a public list item before it derives access.
   return data;
 };
 
@@ -449,30 +586,15 @@ const findCoordinatorEvents = async (coordinatorId) => {
 const findUnassignedSubmittedEvents = async () => {
   const { data, error } = await supabase
     .from("event")
-    .select(LIST_SELECT)
+    .select(UNASSIGNED_QUEUE_SELECT)
     .eq("status", "SUBMITTED")
     .is("coordinator_id", null)
+    .order("submitted_at", { ascending: true, nullsFirst: false })
     .order("created_at", { ascending: true })
     .order("event_id", { ascending: true });
   if (error) throw dbError(error);
   return data;
 };
-
-const mapLeadAssignment = (row, coordinatorNames) => ({
-  eventId: row.event_id,
-  requestId: formatRequestId(row.event_id),
-  status: row.status,
-  statusLabel: STATUS_LABELS[row.status] || row.status,
-  title: row.title,
-  startDatetime: row.start_datetime,
-  endDatetime: row.end_datetime,
-  expectedAttendance: row.expected_attendance,
-  organisation: toOrganisation(row.organisation),
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-  coordinatorId: row.coordinator_id,
-  coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
-});
 
 const mapCalendarEvent = (row, coordinatorNames) => ({
   eventId: row.event_id,
@@ -508,21 +630,11 @@ const mapCalendarEvent = (row, coordinatorNames) => ({
   coordinatorName: coordinatorNames.get(row.coordinator_id) || "Inactive Coordinator",
 });
 
-const findLeadAssignments = async () => {
-  const [{ data: events, error: eventsError }, { data: users, error: usersError }] = await Promise.all([
-    supabase
-      .from("event")
-      .select(LIST_SELECT)
-      .not("coordinator_id", "is", null)
-      .not("status", "in", '("COMPLETED","REJECTED","CANCELLED")')
-      .order("start_datetime", { ascending: true })
-      .order("event_id", { ascending: true }),
-    supabase.from("user").select("user_id,name").eq("role", "COORDINATOR"),
-  ]);
-  if (eventsError) throw dbError(eventsError);
-  if (usersError) throw dbError(usersError);
-  const coordinatorNames = new Map(users.map(({ user_id, name }) => [user_id, name]));
-  return events.map((event) => mapLeadAssignment(event, coordinatorNames));
+const findLeadAssignments = async (leadId) => {
+  const { data, error } = await supabase.rpc("list_lead_event_assignments", { p_lead_id: leadId });
+  if (error) throw toEventRequestError(error);
+  if (!Array.isArray(data)) throw new Error("list_lead_event_assignments returned no assignments.");
+  return data;
 };
 
 const findCoordinatorAvailability = async () => {
@@ -561,10 +673,10 @@ const assignCoordinator = async ({ eventId, coordinatorId, leadId }) => {
   });
   if (error) {
     const code = error.message;
-    if (["EVENT_NOT_FOUND", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT"].includes(code)) {
+    if (["FORBIDDEN", "EVENT_NOT_FOUND", "INVALID_COORDINATOR", "COORDINATOR_CONFLICT"].includes(code)) {
       throw eventRequestError(code);
     }
-    throw dbError(error);
+    throw toEventRequestError(error);
   }
   if (!data || !data.event) throw new Error("assign_event_coordinator returned no event.");
   return data.event;
@@ -587,7 +699,7 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
       "ASSIGNMENT_CHANGED",
     ]);
     if (known.has(code)) throw eventRequestError(code);
-    throw dbError(error);
+    throw toEventRequestError(error);
   }
   if (!data || !data.event || !data.coordinator) {
     throw new Error("reassign_event_coordinator returned an incomplete result.");
@@ -605,6 +717,45 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
       name: data.coordinator.name,
     },
   };
+};
+
+// SPM-173: one coordinator lifecycle action (LIFECYCLE_ACTIONS). The database
+// function locks the event and rechecks role, assignment, version, state and,
+// where the action needs it, readiness and safety approval, then writes the
+// state, history and notifications in one transaction.
+const runLifecycleAction = async ({ action, eventId, actorId, expectedVersion, idempotencyKey = null }) => {
+  const { rpc } = LIFECYCLE_ACTIONS[action];
+  const { data, error } = await supabase.rpc(rpc, {
+    p_event_id: eventId,
+    p_actor_id: actorId,
+    p_expected_version: expectedVersion,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: idempotencyKey ? hashRequest({ action }, {}, [eventId, expectedVersion]) : null,
+  });
+  if (error) throw toEventRequestError(error);
+  if (!data || !data.event) throw new Error(`${rpc} returned no event.`);
+  return { event: data.event, replayed: data.replayed === true };
+};
+
+// SPM-173 AC8: readiness for the assigned coordinator, with each failing condition.
+const getEventReadiness = async ({ eventId, actorId }) => {
+  const { data, error } = await supabase.rpc("get_event_readiness", { p_event_id: eventId, p_actor_id: actorId });
+  if (error) throw toEventRequestError(error);
+  if (!data) throw new Error("get_event_readiness returned no result.");
+  return {
+    ready: data.ready === true,
+    failures: Array.isArray(data.failures) ? data.failures : [],
+    status: data.status,
+    version: data.version,
+    arrangementVersion: data.arrangement_version,
+  };
+};
+
+// SPM-173 AC12: completes up to "limit" ended events; returns how many.
+const completeDueEvents = async (limit) => {
+  const { data, error } = await supabase.rpc("complete_due_events", { p_limit: limit });
+  if (error) throw dbError(error);
+  return Number(data) || 0;
 };
 
 // Submitting is owner-only, so a colleague's visible request is "not found" here.
@@ -654,10 +805,21 @@ const findEventClarifications = async (eventId) => {
 // exact text: converting through Date would drop microseconds and skip or repeat rows.
 const CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::\d{2})?)$/;
 
-const encodeCursor = (row) =>
-  Buffer.from(JSON.stringify({ updatedAt: row.updated_at, eventId: row.event_id })).toString("base64url");
+const encodeKeysetCursor = (timestampKey, timestamp, eventId) =>
+  Buffer.from(JSON.stringify({ [timestampKey]: timestamp, eventId })).toString("base64url");
 
-const decodeCursor = (value) => {
+const isValidCursorTimestamp = (value) => {
+  if (typeof value !== "string" || !CURSOR_TIMESTAMP.test(value)) return false;
+  // Date.parse normalizes dates such as February 31; PostgreSQL rejects them.
+  // Check the local calendar date without changing the original microseconds.
+  const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return year > 0 && month >= 1 && month <= 12 && day >= 1 &&
+    day <= days[month - 1] && !Number.isNaN(Date.parse(value));
+};
+
+const decodeKeysetCursor = (value, timestampKey) => {
   if (value === undefined || value === null) return null;
   let decoded = null;
   try {
@@ -667,23 +829,29 @@ const decodeCursor = (value) => {
   }
   if (
     !decoded ||
-    typeof decoded.updatedAt !== "string" ||
-    !CURSOR_TIMESTAMP.test(decoded.updatedAt) ||
-    Number.isNaN(Date.parse(decoded.updatedAt)) ||
+    !isValidCursorTimestamp(decoded[timestampKey]) ||
     !Number.isSafeInteger(decoded.eventId) ||
     decoded.eventId < 1
   ) {
     throw eventRequestError("INVALID_CURSOR");
   }
-  return { updatedAt: decoded.updatedAt, eventId: decoded.eventId };
+  return { [timestampKey]: decoded[timestampKey], eventId: decoded.eventId };
 };
 
+const encodeCursor = (row) => encodeKeysetCursor("updatedAt", row.updated_at, row.event_id);
+const decodeCursor = (value) => decodeKeysetCursor(value, "updatedAt");
+
+const encodeDiscoveryCursor = (row) => encodeKeysetCursor("startDatetime", row.start_datetime, row.event_id);
+const decodeDiscoveryCursor = (value) => decodeKeysetCursor(value, "startDatetime");
+
 // Newest edit first (SPM-37). Keyset paging stays stable while auto-save keeps
-// moving updated_at; event_id breaks ties between equal timestamps.
-const findOrganiserEventRequests = async (user, { limit, cursor = null, status = null }) => {
+// moving updated_at; event_id breaks ties between equal timestamps. "statuses"
+// is an organiser label already expanded to its statuses (SPM-173 AC6).
+const findOrganiserEventRequests = async (user, { limit, cursor = null, status = null, statuses = null }) => {
   const after = decodeCursor(cursor);
   let query = supabase.from("event").select(LIST_SELECT).or(buildOrganiserVisibilityFilter(user));
   if (status) query = query.eq("status", status);
+  if (statuses) query = query.in("status", statuses);
   if (after) {
     query = query.or(
       `updated_at.lt."${after.updatedAt}",and(updated_at.eq."${after.updatedAt}",event_id.lt.${after.eventId})`
@@ -700,6 +868,44 @@ const findOrganiserEventRequests = async (user, { limit, cursor = null, status =
     events: page.map((row) => toListItem(row, user.user_id)),
     nextCursor: data.length > limit ? encodeCursor(page[page.length - 1]) : null,
   };
+};
+
+// The list and the detail share this query, so visibility and availability cannot drift apart.
+const attendeeDiscoveryQuery = () =>
+  supabase
+    .from("event")
+    .select(LIST_ATTENDEE_DISCOVERY_SELECT)
+    .eq(...REGISTERED_SEATS_FILTER)
+    .eq("is_published", true)
+    .in("status", ATTENDEE_DISCOVERY_STATUSES)
+    .gt("end_datetime", new Date().toISOString());
+
+// Soonest start first; event_id breaks ties between equal start times.
+const findPublishedAttendeeEvents = async ({ limit, cursor = null }) => {
+  const after = decodeDiscoveryCursor(cursor);
+  let query = attendeeDiscoveryQuery();
+  if (after) {
+    query = query.or(
+      `start_datetime.gt."${after.startDatetime}",and(start_datetime.eq."${after.startDatetime}",event_id.gt.${after.eventId})`
+    );
+  }
+  const { data, error } = await query
+    .order("start_datetime", { ascending: true })
+    .order("event_id", { ascending: true })
+    .limit(limit + 1);
+  if (error) throw dbError(error);
+
+  const page = data.slice(0, limit);
+  return {
+    events: page.map((row) => toAttendeeDiscoveryItem(row)),
+    nextCursor: data.length > limit ? encodeDiscoveryCursor(page[page.length - 1]) : null,
+  };
+};
+
+const findPublishedAttendeeEvent = async (eventId) => {
+  const { data, error } = await attendeeDiscoveryQuery().eq("event_id", eventId).maybeSingle();
+  if (error) throw dbError(error);
+  return data ? toAttendeeDetail(data) : null;
 };
 
 const toLookupIds = (values) =>
@@ -726,7 +932,11 @@ const findValidationContext = async (input) => {
     layout && layout !== NO_LAYOUT_PREFERENCE
       ? supabase.from("room").select("layout_type").eq("layout_type", layout).limit(1)
       : NO_ROWS,
-    venueIds.length ? supabase.from("venue").select("venue_id").in("venue_id", venueIds) : NO_ROWS,
+    // Only available venues can be chosen (SPM-73: inactive or unavailable
+    // venues cannot be selected for new bookings).
+    venueIds.length
+      ? supabase.from("venue").select("venue_id").in("venue_id", venueIds).eq("is_active", true).eq("status", VENUE_STATUS.ACTIVE)
+      : NO_ROWS,
     equipmentIds.length
       ? supabase.from("equipment").select("equipment_id").in("equipment_id", equipmentIds)
       : NO_ROWS,
@@ -746,7 +956,12 @@ const findValidationContext = async (input) => {
 // This read does not reserve a venue or expose internal venue planning data.
 const findRequestOptions = async () => {
   const [venues, rooms] = await Promise.all([
-    supabase.from("venue").select("venue_id,name").order("name", { ascending: true }),
+    supabase
+      .from("venue")
+      .select("venue_id,name")
+      .eq("is_active", true)
+      .eq("status", VENUE_STATUS.ACTIVE)
+      .order("name", { ascending: true }),
     supabase.from("room").select("layout_type"),
   ]);
   for (const result of [venues, rooms]) if (result.error) throw dbError(result.error);
@@ -764,6 +979,7 @@ module.exports = {
   toApi,
   toEventView,
   toListItem,
+  toUnassignedQueueItem,
   formatRequestId,
   toStatusNote,
   parseAccessibility,
@@ -782,11 +998,19 @@ module.exports = {
   findLeadAssignments,
   assignCoordinator,
   reassignCoordinator,
+  runLifecycleAction,
+  getEventReadiness,
+  completeDueEvents,
   findOwnEvent,
   findEventClarifications,
   toClarification,
   findOrganiserEventRequests,
+  findPublishedAttendeeEvents,
+  findPublishedAttendeeEvent,
+  computeRegistrationAvailability,
   encodeCursor,
   decodeCursor,
+  encodeDiscoveryCursor,
+  decodeDiscoveryCursor,
   findValidationContext,
 };

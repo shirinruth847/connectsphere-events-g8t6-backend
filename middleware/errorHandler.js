@@ -27,6 +27,7 @@ const errorHandler = (error, req, res, next) => {
     name: error.name,
     code: error.code,
     message: String(error.message || "").slice(0, LOGGED_MESSAGE_LENGTH),
+    stack: error.stack,
   });
 
   if (status >= 500) {

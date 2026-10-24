@@ -1,0 +1,26 @@
+{
+  "$jsonSchema": {
+    "bsonType": "object",
+    "description": "Venue detail (Master section 6.4). _id is the PostgreSQL venue_id as a string. Owns descriptive detail and the venue's setup/turnaround minutes (T27); capacity and operating hours stay in PostgreSQL. version serialises detail and calendar writes for the venue (Master 7.4).",
+    "required": ["_id", "pg_version", "name", "location"],
+    "additionalProperties": false,
+    "properties": {
+      "_id": { "bsonType": "string", "maxLength": 64 },
+      "pg_version": { "bsonType": "int", "minimum": 1 },
+      "name": { "bsonType": "string", "maxLength": 200 },
+      "location": { "bsonType": "string", "maxLength": 500 },
+      "description": { "bsonType": ["string", "null"], "maxLength": 2000 },
+      "facilities": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 100 }, "maxItems": 50 },
+      "accessibilityFeatures": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 100 }, "maxItems": 50 },
+      "supportedLayouts": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 100 }, "maxItems": 20 },
+      "emergencyAccess": { "bsonType": ["string", "null"], "maxLength": 1000 },
+      "knownRestrictions": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 200 }, "maxItems": 50 },
+      "setupMinutes": { "bsonType": "int", "minimum": 0, "maximum": 1440 },
+      "turnaroundMinutes": { "bsonType": "int", "minimum": 0, "maximum": 1440 },
+      "version": { "bsonType": "int", "minimum": 0 },
+      "updatedAt": { "bsonType": "date" },
+      "updatedBy": { "bsonType": ["int", "null"] },
+      "fixture": { "bsonType": "string", "maxLength": 64 }
+    }
+  }
+}
