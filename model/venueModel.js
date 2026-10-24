@@ -17,7 +17,7 @@ const MANAGED_VENUE_SELECT = `venue_id,name,address,max_capacity,status,status_r
 // detailStatus is the only signal for the MongoDB fields: CURRENT (document
 // read), NOT_AVAILABLE (MongoDB read, no document) or NOT_CHECKED (MongoDB
 // unavailable, Master M4). Fields without a value are null in every case.
-const mapVenue = (row, details, detailStatus) => ({
+const mapVenue = (row, details, detailStatus, relatedNames = new Map()) => ({
   venueId: row.venue_id,
   name: row.name,
   address: row.address,
@@ -42,7 +42,30 @@ const mapVenue = (row, details, detailStatus) => ({
   supportedLayouts: details?.supportedLayouts ?? null,
   emergencyAccess: details?.emergencyAccess ?? null,
   knownRestrictions: details?.knownRestrictions ?? null,
+  // Linked venues that can still be chosen, by name; null when MongoDB was not read.
+  relatedVenues: details === null && detailStatus === "NOT_CHECKED"
+    ? null
+    : (details?.relatedVenueIds || [])
+      .filter((id) => relatedNames.has(String(id)))
+      .map((id) => ({ venueId: Number(id), name: relatedNames.get(String(id)) })),
 });
+
+// Names of the related venues that are still available (active and in
+// service), so a link never leads to a venue that cannot be chosen.
+const getRelatedVenueNames = async (details) => {
+  const ids = [...new Set([...details.values()].flatMap((document) => document.relatedVenueIds || []))]
+    .map(Number)
+    .filter(Number.isInteger);
+  if (!ids.length) return new Map();
+  const { data, error } = await supabase
+    .from("venue")
+    .select("venue_id,name")
+    .in("venue_id", ids)
+    .eq("is_active", true)
+    .eq("status", VENUE_STATUS.ACTIVE);
+  if (error) throw error;
+  return new Map((data || []).map((row) => [String(row.venue_id), row.name]));
+};
 
 // A PostgREST or() value matching text literally inside ilike: % and _ are
 // escaped for LIKE, then the value is double-quoted so commas and brackets in
@@ -91,12 +114,13 @@ const getVenueCatalogue = async (filters = {}) => {
     console.warn("[venue-catalogue] MongoDB detail read unavailable", { code: mongoError.code });
   }
 
+  const relatedNames = details ? await getRelatedVenueNames(details) : new Map();
   const venues = rows
     .filter((row) => matchesDetailFilters(row, details?.get(String(row.venue_id)), filters, Boolean(details)))
     .map((row) => {
       if (!details) return mapVenue(row, null, "NOT_CHECKED");
       const document = details.get(String(row.venue_id));
-      return mapVenue(row, document, document ? "CURRENT" : "NOT_AVAILABLE");
+      return mapVenue(row, document, document ? "CURRENT" : "NOT_AVAILABLE", relatedNames);
     });
   return {
     venues,

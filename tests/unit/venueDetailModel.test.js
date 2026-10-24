@@ -47,12 +47,18 @@ describe("mongodb/migrate", () => {
   test("[M8] should_record_each_script_once_and_skip_it_on_the_next_run", async () => {
     const history = await db.collection("_schema_migrations").find().toArray();
 
-    expect(history.map(({ _id }) => _id)).toEqual(["0001_venue_details", "0002_venue_calendar", "0003_venue_photos"]);
+    expect(history.map(({ _id }) => _id)).toEqual(["0001_venue_details", "0002_venue_calendar", "0003_venue_photos", "0004_venue_related_venues"]);
     await expect(applyMigrations(db)).resolves.toEqual([]);
   });
 
   test("[6.4] should_reject_rule_bearing_or_unknown_fields_in_venue_details", async () => {
     await expect(db.collection("venue_details").insertOne(detail(900, { max_capacity: 500 })))
+      .rejects.toMatchObject({ code: 121 });
+  });
+
+  test("[SPM-72] should_accept_related_venue_ids_and_reject_non_string_ones", async () => {
+    await expect(db.collection("venue_details").insertOne(detail(902, { relatedVenueIds: ["903", "904"] }))).resolves.toBeTruthy();
+    await expect(db.collection("venue_details").insertOne(detail(905, { relatedVenueIds: [903] })))
       .rejects.toMatchObject({ code: 121 });
   });
 
