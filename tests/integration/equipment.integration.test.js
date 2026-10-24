@@ -406,6 +406,11 @@ describe("SPM-52 selection by event requests", () => {
     }
     const item = created.body.equipment;
     expect(item).toMatchObject({ status: "DETAILS_PENDING", statusLabel: "Details pending" });
+    // [TC-16] the status filter follows the item from Details pending to Active.
+    const listedAs = async (status) => (await call("techSupport", "get", `/api/equipment?search=${encodeURIComponent(`${prefix} Pending Lapel`)}&status=${status}`))
+      .body.equipment.map((listed) => listed.equipmentId);
+    expect(await listedAs("DETAILS_PENDING")).toEqual([item.equipmentId]);
+    expect(await listedAs("ACTIVE")).toEqual([]);
 
     const refused = await newDraft("pending lapel", [{ equipmentId: item.equipmentId, quantity: 1 }]);
     recordDraft(refused);
@@ -413,6 +418,8 @@ describe("SPM-52 selection by event requests", () => {
 
     const [entry] = await entriesFor(item.equipmentId);
     await expect(outboxModel.applyEntryNow(entry.entry_id)).resolves.toBe("APPLIED");
+    expect(await listedAs("ACTIVE")).toEqual([item.equipmentId]);
+    expect(await listedAs("DETAILS_PENDING")).toEqual([]);
     const accepted = await newDraft("applied lapel", [{ equipmentId: item.equipmentId, quantity: 1 }]);
     recordDraft(accepted);
     expect(accepted.status).toBe(201);
