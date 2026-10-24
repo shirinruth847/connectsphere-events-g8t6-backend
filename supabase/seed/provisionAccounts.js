@@ -25,6 +25,7 @@ const ACCOUNTS = [
   { key: "coordinator", name: "Seed Coordinator", role: "COORDINATOR" },
   { key: "venue-staff", name: "Seed Venue Staff", role: "VENUE_STAFF" },
   { key: "tech-support", name: "Seed Tech Support", role: "TECH_SUPPORT" },
+  { key: "safety-officer", name: "Seed Safety Officer", role: "SAFETY_OFFICER" },
   { key: "attendee", name: "Seed Attendee", role: "ATTENDEE" },
 ];
 

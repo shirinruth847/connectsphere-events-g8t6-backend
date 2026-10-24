@@ -59,21 +59,34 @@ const toChangeList = (changes) => {
     }));
 };
 
+// Entries written by background jobs have no user (SPM-173 AC4).
+const SYSTEM_ACTOR_ROLE = "SYSTEM";
+
+const toActorName = (row) => {
+  if (row.actor_role === SYSTEM_ACTOR_ROLE) return "System";
+  return row.actor ? row.actor.name : null;
+};
+
 const toHistoryEntry = (row) => ({
   historyId: row.log_id,
   action: row.action,
-  actor: { userId: row.user_id, name: row.actor ? row.actor.name : null, role: row.actor_role },
+  actor: { userId: row.user_id, name: toActorName(row), role: row.actor_role },
   occurredAt: row.timestamp,
   summary: row.details,
   changes: toChangeList(row.changes),
   audience: row.audience,
 });
 
+// Only safety review entries and entries that changed one of "fields" (SPM-243 AC2).
+const relevantHistoryFilter = (fields) =>
+  ["action.like.SAFETY_*", ...fields.map((field) => `changes->${field}.not.is.null`)].join(",");
+
 // Newest first. "audiences" lists what this reader may see (getEventAccess decides).
 // The filter is part of the query, so entries for another audience (staff-only
 // assignment records, or the owner's draft history) never leave the database for
 // someone who may not read them (SPM-33 AC8). No audience means no entries.
-const findEventHistory = async (eventId, { limit, cursor = null, audiences = [] }) => {
+// "fields", when given, narrows the history to the portion relevant to the reader.
+const findEventHistory = async (eventId, { limit, cursor = null, audiences = [], fields = null }) => {
   const beforeLogId = decodeHistoryCursor(cursor);
   if (audiences.length === 0) return { history: [], nextCursor: null };
 
@@ -83,6 +96,7 @@ const findEventHistory = async (eventId, { limit, cursor = null, audiences = [] 
     .eq("entity_name", "event")
     .eq("entity_id", eventId)
     .in("audience", audiences);
+  if (fields) query = query.or(relevantHistoryFilter(fields));
   if (beforeLogId) query = query.lt("log_id", beforeLogId);
 
   const { data, error } = await query.order("log_id", { ascending: false }).limit(limit + 1);
@@ -95,7 +109,23 @@ const findEventHistory = async (eventId, { limit, cursor = null, audiences = [] 
   };
 };
 
+// Appends an audit entry for a change committed outside PostgreSQL (a MongoDB
+// detail edit, Master 7.4 step 3). The runtime may only insert (append-only).
+const appendActivity = async ({ userId, entityName, entityId, action, details, changes = null, audience }) => {
+  const { error } = await supabase.from("activity_log").insert({
+    user_id: userId,
+    entity_name: entityName,
+    entity_id: entityId,
+    action,
+    details,
+    changes,
+    audience,
+  });
+  if (error) throw error;
+};
+
 module.exports = {
+  appendActivity,
   findEventHistory,
   toHistoryEntry,
   toChangeList,

@@ -5,9 +5,15 @@ const ATTENDEE_REGISTRATION_COLUMNS =
 
 // Attendees see a display status instead of the lifecycle state, so internal
 // review and planning progress never reaches them. PENDING_CONFIRMATION is a
-// display value only, never an event state.
-const ATTENDEE_VISIBLE_STATUSES = ["CONFIRMED", "COMPLETED", "CANCELLED"];
-const VENUE_VISIBLE_STATUSES = ["CONFIRMED", "COMPLETED"];
+// display value only, never an event state. PREPARATION is a staff stage of a
+// confirmed event, so attendees see it as CONFIRMED (SPM-173).
+const ATTENDEE_STATUSES = Object.freeze({
+  CONFIRMED: "CONFIRMED",
+  PREPARATION: "CONFIRMED",
+  COMPLETED: "COMPLETED",
+  CANCELLED: "CANCELLED",
+});
+const VENUE_VISIBLE_STATUSES = ["CONFIRMED", "PREPARATION", "COMPLETED"];
 
 const toAttendeeEvent = (event) => {
   const approvedBooking = VENUE_VISIBLE_STATUSES.includes(event.status)
@@ -21,7 +27,7 @@ const toAttendeeEvent = (event) => {
     description: event.description,
     start_datetime: event.start_datetime,
     end_datetime: event.end_datetime,
-    attendee_status: ATTENDEE_VISIBLE_STATUSES.includes(event.status) ? event.status : "PENDING_CONFIRMATION",
+    attendee_status: Object.hasOwn(ATTENDEE_STATUSES, event.status) ? ATTENDEE_STATUSES[event.status] : "PENDING_CONFIRMATION",
     venue: venue ? { name: venue.name, address: venue.address } : null,
   };
 };

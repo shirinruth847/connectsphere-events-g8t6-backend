@@ -1,0 +1,30 @@
+{
+  "$jsonSchema": {
+    "bsonType": "object",
+    "description": "Venue calendar entries owned by MongoDB (Master 5.4.3, 5.4.4, 6.4, T27): tentative holds and operational blocks. Bookings stay in PostgreSQL. Ranges are half-open [start, end).",
+    "required": ["_id", "venueId", "type", "start", "end", "occupiedStart", "occupiedEnd", "status", "createdAt", "version"],
+    "additionalProperties": false,
+    "properties": {
+      "_id": { "bsonType": "objectId" },
+      "venueId": { "bsonType": "string", "maxLength": 64 },
+      "type": { "enum": ["HOLD", "BLOCK"] },
+      "start": { "bsonType": "date" },
+      "end": { "bsonType": "date" },
+      "occupiedStart": { "bsonType": "date" },
+      "occupiedEnd": { "bsonType": "date" },
+      "status": { "enum": ["ACTIVE", "CONVERTED", "EXPIRED", "RELEASED", "LIFTED"] },
+      "eventId": { "bsonType": ["int", "null"] },
+      "label": { "bsonType": ["string", "null"], "maxLength": 100 },
+      "holdExpiresAt": { "bsonType": ["date", "null"] },
+      "extendedAt": { "bsonType": ["date", "null"] },
+      "convertedBookingId": { "bsonType": ["int", "null"] },
+      "reason": { "enum": ["MAINTENANCE", "EQUIPMENT_FAILURE", "RENOVATION", "SAFETY", "OTHER", null] },
+      "note": { "bsonType": ["string", "null"], "maxLength": 1000 },
+      "createdBy": { "bsonType": ["int", "null"] },
+      "createdAt": { "bsonType": "date" },
+      "updatedAt": { "bsonType": ["date", "null"] },
+      "version": { "bsonType": "int", "minimum": 1 },
+      "fixture": { "bsonType": "string", "maxLength": 64 }
+    }
+  }
+}

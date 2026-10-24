@@ -60,7 +60,7 @@ const tamperPayload = (accessToken) => {
 };
 
 beforeAll(async () => {
-  fixtures = await createAuthFixtures(runId);
+  fixtures = await createAuthFixtures(runId, { extraAccounts: [{ key: "safetyOfficer", role: "SAFETY_OFFICER" }] });
 });
 
 // Runs even when setup fails part-way, using the manifest written so far.
@@ -75,6 +75,7 @@ describe("Sign-in with Supabase Auth, then GET /api/auth/me", () => {
     ["TC-LOGIN-003", "techSupport", "TECH_SUPPORT", "/dashboard"],
     ["TC-LOGIN-004", "attendee", "ATTENDEE", "/my-registrations"],
     ["TC-LOGIN-005", "organiserA", "ORGANISER", "/dashboard"],
+    ["SPM-243-TC-01", "safetyOfficer", "SAFETY_OFFICER", "/dashboard"],
   ])("[%s] should_return_database_role_and_home_path_when_%s_signs_in_with_valid_credentials", async (_id, key, role, homePath) => {
     const account = fixtures.accounts[key];
     const session = await signIn(key);
@@ -269,11 +270,12 @@ describe("GET /api/events/mine (organiser data scoping)", () => {
     expect(res.status).toBe(200);
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(byId.get(fixtures.events.ownSubmitted)).toEqual(expect.objectContaining({
-      status: "SUBMITTED",
       statusLabel: "Submitted",
       isOwner: true,
     }));
-    expect(byId.get(fixtures.events.ownDraft)).toEqual(expect.objectContaining({ status: "DRAFT", statusLabel: "Draft", isOwner: true }));
+    expect(byId.get(fixtures.events.ownSubmitted)).not.toHaveProperty("status");
+    expect(byId.get(fixtures.events.ownDraft)).toEqual(expect.objectContaining({ statusLabel: "Draft", isOwner: true }));
+    expect(byId.get(fixtures.events.ownDraft)).not.toHaveProperty("status");
   });
 
   test("[TC-LOGIN-005] should_list_submitted_same_organisation_requests_when_organiser_belongs_to_the_organisation", async () => {
