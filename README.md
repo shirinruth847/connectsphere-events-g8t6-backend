@@ -266,6 +266,23 @@ All four also answer `403 TRANSITION_NOT_ALLOWED` with `currentStatus` when the 
 - **Completion job:** `jobs/eventCompletionJob.js` starts with the server and calls `complete_due_events` every `EVENT_COMPLETION_INTERVAL_MS` (default one minute, `0` turns it off). It completes ended `CONFIRMED` and `PREPARATION` events in batches of 50, using database time and `SKIP LOCKED`, and records them as `System` in the history (`activity_log.user_id` is null, `actor_role` is `SYSTEM`). Registration closes with the state, because it is open only in `CONFIRMED` and `PREPARATION`.
 - **Assignment uses the shared function:** migration `20261022100000_spm173_assignment_shared_transition.sql` routes Lead assignment through `_check_event_transition` and `_apply_event_transition`, retaining the assignment conflict guard, assignment row and notifications. Other lifecycle writers must use the shared helpers before a database trigger can safely refuse direct status writes.
 
+### Clarification Rounds (SPM-41)
+
+Built on the SPM-173 transition table (migration `20261024025349_spm41_clarification_lifecycle.sql`). Each action locks the event, runs `_check_event_transition`, then writes the round, any amendments, the status with its history entry, and the notification in one transaction; any failure rolls all of it back. Both `POST` routes need `version` and an `Idempotency-Key`, and return `200 { message, event, clarification }`.
+
+| Route | Who | Body | Result and refusals |
+| --- | --- | --- | --- |
+| `GET /api/events/:id/clarifications` | Owner, same-organisation organisers, assigned coordinator | — | `{ clarifications }`, newest round first |
+| `POST /api/events/:id/clarifications` | Assigned coordinator (another coordinator `404`) | `{ message, version }`, message required, at most 2,000 characters | `UNDER_REVIEW` → `AWAITING_CLARIFICATION`; new `OPEN` round; owner notified with the question; history keeps the full question |
+| `POST /api/events/:id/resubmit` | Owner (same-organisation organisers `403 EVENT_READ_ONLY`) | `{ response?, changes?, version }`, a response (at most 2,000 characters), at least one changed field, or both | Round `RESPONDED`; `AWAITING_CLARIFICATION` → `UNDER_REVIEW` with the same coordinator; amendments recorded as `CLARIFICATION_AMENDED`; coordinator notified. `403 FIELD_NOT_EDITABLE` for registration settings, organisation or system fields; `409 CLARIFICATION_NOT_OPEN`; `409 COORDINATOR_CONFLICT` when amended dates clash with the coordinator's schedule |
+
+Both also answer `403 TRANSITION_NOT_ALLOWED` with `currentStatus` and `409 EVENT_VERSION_CONFLICT` with the current `event`.
+
+- **Amendable fields:** every submission field except registration settings and the organisation (`RESUBMIT_FIELDS`). They skip the change workflow (Master 5.2). The amended request must still be complete; the 48-hour lead time applies only when `startDatetime` is amended.
+- **Permission flags:** event responses carry `permissions.canRequestClarification` (assigned coordinator, `UNDER_REVIEW`) and `permissions.canResubmit` (owner, `AWAITING_CLARIFICATION`); the frontend shows the actions only when they are granted.
+- **Events returned before rounds existed:** the migration gave each `AWAITING_CLARIFICATION` event without an open round one `OPEN` round, requested by its coordinator, whose message says the original question was not recorded (seed event 441).
+- **Notifications** use SPM-173's `_notify_event_users`; `TODO(SPM-155)` marks the switch to the keyed helper.
+
 ### Authentication (SPM-32)
 
 The browser signs in **directly with Supabase Auth** (`supabase.auth.signInWithPassword`), so Supabase's per-IP sign-in limit applies to each user's own IP. It then calls `GET /api/auth/me` with the access token. On `200` it redirects to `user.home_path`; on `401` (no active ConnectSphere profile) it signs out again. The backend never receives passwords.

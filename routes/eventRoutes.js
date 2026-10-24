@@ -14,6 +14,8 @@ const {
   getEventRequest,
   getEventHistory,
   getEventClarifications,
+  requestClarification,
+  resubmitEvent,
   listAssignedEvents,
   patchCoordinator,
   assignCoordinatorAsLead,
@@ -69,6 +71,9 @@ router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation)
 router.post("/:id/complete", assignedCoordinatorOnly, completeEvent);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.get("/:id/clarifications", anySignedInUser, requireVisibleEvent, getEventClarifications);
+// SPM-41: another coordinator gets 404; same-organisation organisers get 403 (read-only).
+router.post("/:id/clarifications", assignedCoordinatorOnly, requestClarification);
+router.post("/:id/resubmit", organiserOnly, requireVisibleEvent, resubmitEvent);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
 router.put("/:id/draft", organiserOnly, requireVisibleEvent, updateDraft);

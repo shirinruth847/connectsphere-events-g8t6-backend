@@ -7,9 +7,11 @@ const {
   validateSubmission,
   validateRequirements,
   validateOrdinaryFields,
+  validateClarificationText,
   hasErrors,
   toWholeNumber,
   MAX_INTEGER,
+  MESSAGES,
 } = require("../validators/eventValidator");
 const { USER_ROLES } = require("../config/roles");
 const {
@@ -19,6 +21,7 @@ const {
   LABEL_STATUSES,
   LIFECYCLE_ACTIONS,
   READINESS_MESSAGES,
+  RESUBMIT_FIELDS,
 } = require("../config/eventConstants");
 
 
@@ -54,6 +57,7 @@ const DOMAIN_ERRORS = Object.freeze({
   SAFETY_APPROVAL_REQUIRED: [409, "The event needs a safety approval for its current arrangements before it can be confirmed."],
   EVENT_NOT_ENDED: [409, "The event can be completed only after it has ended."],
   COORDINATOR_INVARIANT: [409, "The event's coordinator assignment does not allow this action. Refresh and try again."],
+  CLARIFICATION_NOT_OPEN: [409, "This request has no open clarification to respond to. Refresh to see its current status."],
 });
 
 // ---------- helpers ----------
@@ -696,6 +700,135 @@ const getEventReadiness = async (req, res, next) => {
   }
 };
 
+// ---------- SPM-41 clarification ----------
+
+const KNOWN_RESUBMIT_FIELDS = new Set(RESUBMIT_FIELDS);
+const RESUBMIT_COORDINATOR_CONFLICT =
+  "The new dates clash with your coordinator's schedule. Choose different dates or contact your coordinator.";
+
+// The body holds the version the user loaded and the named fields only; the
+// Idempotency-Key header is required because both actions notify someone.
+const readClarificationRequest = (req, allowed) => {
+  const body = req.body ?? {};
+  if (!isPlainObject(body)) return { body: {}, errors: { body: "Send the request as a JSON object." } };
+  const errors = toUnsupportedFieldErrors(Object.keys(body).filter((key) => key !== "version" && !allowed.includes(key)));
+  const expectedVersion = readVersion(body, true, errors);
+  const idempotencyKey = readRequestIdempotencyKey(req, true, errors);
+  return { body, errors, expectedVersion, idempotencyKey };
+};
+
+// The event and the round just written, as the actor now sees them.
+const sendClarificationResult = async (req, res, result, message) => {
+  const { eventId } = req.visibleEvent;
+  markReplay(res, result);
+  const [current, rounds] = await Promise.all([
+    loadEventForViewer(eventId, req.user),
+    eventModel.findEventClarifications(eventId),
+  ]);
+  if (!current) return eventNotFound(res);
+  return res.status(200).json({
+    message,
+    event: eventModel.toEventView(current.event, req.user, current.access),
+    clarification: rounds.find((round) => round.clarificationId === result.clarificationId) ?? null,
+  });
+};
+
+// The database refuses like the SPM-173 actions: 403 naming the status, 409 with
+// the current event for a stale version.
+const sendClarificationError = (req, res, next, error, overrides = {}) => {
+  if (error.name === "EventRequestError") {
+    if (error.code === "EVENT_VERSION_CONFLICT") return sendVersionConflict(req, res, req.visibleEvent.eventId).catch(next);
+    if (overrides[error.code]) return overrides[error.code](res);
+    if (LIFECYCLE_REFUSALS[error.code]) return LIFECYCLE_REFUSALS[error.code](res, error);
+  }
+  return handleError(error, res, next);
+};
+
+// POST /api/events/:id/clarifications — SPM-41 AC1/AC2: the assigned coordinator
+// returns an UNDER_REVIEW event with a question. Another coordinator gets 404
+// (requireVisibleEvent); then 400 for the request; then the database decides
+// under the event lock: 403 in another status, 409 for a stale version.
+const requestClarification = async (req, res, next) => {
+  try {
+    const { body, errors, expectedVersion, idempotencyKey } = readClarificationRequest(req, ["message"]);
+    if (!errors.body) Object.assign(errors, validateClarificationText(body.message, { field: "message", required: true }));
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const result = await eventModel.requestClarification({
+      eventId: req.visibleEvent.eventId,
+      actorId: req.user.user_id,
+      message: body.message.trim(),
+      expectedVersion,
+      idempotencyKey,
+    });
+    return await sendClarificationResult(req, res, result, "Clarification requested. The organiser has been notified.");
+  } catch (error) {
+    return sendClarificationError(req, res, next, error);
+  }
+};
+
+// Field errors for the owner's amendments, judged against the saved request:
+// the merged result must still be a complete submission. Registration settings,
+// the organisation and system fields are refused (403), unknown keys are 400.
+const checkResubmitChanges = async (existing, changes) => {
+  if (changes === undefined) return { input: {}, errors: {} };
+  if (!isPlainObject(changes)) return { errors: { changes: "Send the changed details as a JSON object." } };
+
+  const denied = {};
+  const unknown = [];
+  for (const key of Object.keys(changes)) {
+    if (KNOWN_RESUBMIT_FIELDS.has(key)) continue;
+    if (KNOWN_EVENT_FIELDS.has(key)) denied[key] = "This field cannot be changed when responding to a clarification.";
+    else unknown.push(key);
+  }
+  if (hasErrors(denied)) return { denied };
+  if (unknown.length) return { errors: toUnsupportedFieldErrors(unknown) };
+
+  const input = eventModel.pickEventInput(changes);
+  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input));
+  // The 48-hour lead time applies only to a newly chosen start (team decision, 2026-10-24).
+  if (input.startDatetime === undefined && errors.startDatetime === MESSAGES.leadTime) delete errors.startDatetime;
+  return { input, errors };
+};
+
+// POST /api/events/:id/resubmit — SPM-41 AC3/AC4: the owner answers the open
+// round with a response, amendments, or both, and the event returns to
+// UNDER_REVIEW with the same coordinator. Same-organisation organisers can read
+// the rounds but not answer them (403).
+const resubmitEvent = async (req, res, next) => {
+  const { eventId, event: existing, access } = req.visibleEvent;
+  try {
+    if (access.relationship !== EVENT_RELATIONSHIP.OWNER) return sendDomainError(res, "EVENT_READ_ONLY");
+
+    const { body, errors, expectedVersion, idempotencyKey } = readClarificationRequest(req, ["response", "changes"]);
+    if (hasErrors(errors)) return validationFailed(res, errors);
+
+    const { input, errors: fieldErrors, denied } = await checkResubmitChanges(existing, body.changes);
+    if (denied) return sendDomainError(res, "FIELD_NOT_EDITABLE", denied);
+    Object.assign(fieldErrors, validateClarificationText(body.response, { field: "response", required: false }));
+    const response = typeof body.response === "string" && body.response.trim() ? body.response.trim() : null;
+    if (!hasErrors(fieldErrors) && response === null && Object.keys(input).length === 0) {
+      fieldErrors.response = MESSAGES.resubmitEmpty;
+    }
+    if (hasErrors(fieldErrors)) return validationFailed(res, fieldErrors);
+
+    const result = await eventModel.resubmitEvent({
+      eventId,
+      actorId: req.user.user_id,
+      response,
+      input,
+      expectedVersion,
+      idempotencyKey,
+    });
+    return await sendClarificationResult(req, res, result, "Your event request has been resubmitted for review.");
+  } catch (error) {
+    return sendClarificationError(req, res, next, error, {
+      COORDINATOR_CONFLICT: (response) =>
+        sendError(response, DOMAIN_ERRORS.COORDINATOR_CONFLICT[0], "COORDINATOR_CONFLICT", RESUBMIT_COORDINATOR_CONFLICT),
+    });
+  }
+};
+
 const getRequestOptions = async (req, res, next) => {
   try { res.status(200).json(await eventModel.findRequestOptions()); }
   catch (error) { return next(error); }
@@ -717,6 +850,8 @@ module.exports = {
   getEventRequest,
   getEventHistory,
   getEventClarifications,
+  requestClarification,
+  resubmitEvent,
   listAssignedEvents,
   listLeadAssignments,
   listUnassignedEvents,

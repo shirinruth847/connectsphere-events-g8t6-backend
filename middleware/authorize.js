@@ -70,6 +70,11 @@ const getEventAccess = (user, event) => {
     relationship,
     canEdit: editableFields.length > 0,
     editableFields: [...editableFields],
+    // SPM-41. Every AWAITING_CLARIFICATION event has an open round: the request
+    // function writes one, and the SPM-41 migration backfilled older ones.
+    canRequestClarification:
+      relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR && event.status === EVENT_STATUS.UNDER_REVIEW,
+    canResubmit: relationship === EVENT_RELATIONSHIP.OWNER && event.status === EVENT_STATUS.AWAITING_CLARIFICATION,
     historyAudiences: [...(HISTORY_AUDIENCES[relationship] || [])],
   };
 };

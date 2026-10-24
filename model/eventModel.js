@@ -197,6 +197,8 @@ const toEventView = (row, user, access) => ({
     editableFields: access.editableFields,
     canViewDraftHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.OWNER_ONLY),
     canViewStaffHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.STAFF_ONLY),
+    canRequestClarification: access.canRequestClarification === true,
+    canResubmit: access.canResubmit === true,
   },
 });
 
@@ -345,6 +347,7 @@ const DOMAIN_CODES = new Set([
   "SAFETY_APPROVAL_REQUIRED",
   "EVENT_NOT_ENDED",
   "COORDINATOR_INVARIANT",
+  "CLARIFICATION_NOT_OPEN",
 ]);
 
 // The lifecycle functions report the event's current status (a refused or stale
@@ -402,6 +405,14 @@ const RPC_FIELD_ERRORS = Object.freeze({
   DRAFT_TITLE_REQUIRED: { title: MESSAGES.titleRequired },
   INVALID_VENUE_PREFERENCES: { venuePreferences: MESSAGES.venuePreferencesInvalid },
   INVALID_EQUIPMENT_REQUIREMENTS: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
+  RESUBMIT_EMPTY: { response: MESSAGES.resubmitEmpty },
+});
+
+// SPM-41 database checks, reported as "field:FAILURE" in the error detail.
+const CLARIFICATION_FAILURES = Object.freeze({
+  "message:REQUIRED": MESSAGES.clarificationMessageRequired,
+  "message:TOO_LONG": MESSAGES.clarificationTooLong,
+  "response:TOO_LONG": MESSAGES.clarificationTooLong,
 });
 
 // Constraints are the final check (e.g. a stale draft merge); report them against the field.
@@ -427,6 +438,9 @@ const toEventRequestError = (error, fields) => {
   }
   if (message === "INVALID_EVENT_DETAILS") {
     return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, DETAILS_FAILURES));
+  }
+  if (message === "INVALID_CLARIFICATION") {
+    return eventRequestError("VALIDATION_FAILED", toFieldErrors(error.details, CLARIFICATION_FAILURES));
   }
   if (RPC_FIELD_ERRORS[message]) return eventRequestError("VALIDATION_FAILED", RPC_FIELD_ERRORS[message]);
 
@@ -751,6 +765,47 @@ const getEventReadiness = async ({ eventId, actorId }) => {
   };
 };
 
+// SPM-41: both clarification functions return the event and the round they wrote.
+const callClarificationRpc = async (name, args) => {
+  const { data, error } = await supabase.rpc(name, args);
+  if (error) throw toEventRequestError(error);
+  if (!data || !data.event || !data.clarification) throw new Error(`${name} returned an incomplete result.`);
+  return { clarificationId: data.clarification.clarification_id, replayed: data.replayed === true };
+};
+
+// SPM-41 AC1: the assigned coordinator returns an UNDER_REVIEW event with a
+// question. The database rechecks role, assignment, version and state under the
+// event lock (SPM-173 transition table), then writes the round, the status, its
+// history and the owner's notification in one transaction.
+const requestClarification = async ({ eventId, actorId, message, expectedVersion, idempotencyKey }) =>
+  callClarificationRpc("request_event_clarification", {
+    p_event_id: eventId,
+    p_actor_id: actorId,
+    p_expected_version: expectedVersion,
+    p_message: message,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({ message }, {}, [eventId, expectedVersion]),
+  });
+
+// SPM-41 AC3: the owner answers the open round with a response, amendments to the
+// submission fields, or both, and the event returns to UNDER_REVIEW with the same
+// coordinator. Any failure leaves the event, its requirements and the round as they were.
+const resubmitEvent = async ({ eventId, actorId, response, input, expectedVersion, idempotencyKey }) => {
+  const row = toRow(input);
+  const requirements = toRequirementPayload(input);
+  return callClarificationRpc("resubmit_event_after_clarification", {
+    p_event_id: eventId,
+    p_actor_id: actorId,
+    p_expected_version: expectedVersion,
+    p_response: response,
+    p_changes: row,
+    p_venue_preferences: requirements.venuePreferences ?? null,
+    p_equipment_requirements: requirements.equipmentRequirements ?? null,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest(row, requirements, [eventId, expectedVersion, response]),
+  });
+};
+
 // SPM-173 AC12: completes up to "limit" ended events; returns how many.
 const completeDueEvents = async (limit) => {
   const { data, error } = await supabase.rpc("complete_due_events", { p_limit: limit });
@@ -1000,6 +1055,8 @@ module.exports = {
   reassignCoordinator,
   runLifecycleAction,
   getEventReadiness,
+  requestClarification,
+  resubmitEvent,
   completeDueEvents,
   findOwnEvent,
   findEventClarifications,

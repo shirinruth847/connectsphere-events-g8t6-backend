@@ -1,7 +1,7 @@
 // Pure validation functions (no database access) so they are easy to unit test.
 // Each function returns an object of { fieldName: errorMessage }. Empty object = valid.
 // Every value accepted here must also be storable, so bad input becomes a 400, never a 500.
-const { MIN_LEAD_TIME_HOURS } = require("../config/eventConstants");
+const { MIN_LEAD_TIME_HOURS, CLARIFICATION_TEXT_LIMIT } = require("../config/eventConstants");
 
 const MAX_INTEGER = 2147483647; // PostgreSQL integer columns
 const TEXT_LIMITS = Object.freeze({ title: 200, purpose: 2000, description: 5000 });
@@ -33,6 +33,9 @@ const MESSAGES = Object.freeze({
   registrationCapacityInvalid: "Registration capacity must be a positive whole number.",
   venuePreferencesInvalid: "Choose valid venue preferences without duplicates.",
   equipmentRequirementsInvalid: "Choose valid equipment and positive quantities without duplicates.",
+  clarificationMessageRequired: "Enter the question for the organiser.",
+  clarificationTooLong: `Keep this to ${CLARIFICATION_TEXT_LIMIT} characters or fewer.`,
+  resubmitEmpty: "Add a response or change at least one detail before resubmitting.",
 });
 
 const TOO_LONG_MESSAGES = Object.freeze({
@@ -239,6 +242,16 @@ const validateOrdinaryFields = (input = {}) => {
   return errors;
 };
 
+// SPM-41: the coordinator's question is required; the organiser's response is
+// optional (they may answer with amendments alone). Both are limited in length.
+const validateClarificationText = (value, { field, required }) => {
+  if (value === undefined || value === null) return required ? { [field]: MESSAGES.clarificationMessageRequired } : {};
+  if (typeof value !== "string") return { [field]: MESSAGES.textInvalid };
+  const text = value.trim();
+  if (!text) return required ? { [field]: MESSAGES.clarificationMessageRequired } : {};
+  return text.length > CLARIFICATION_TEXT_LIMIT ? { [field]: MESSAGES.clarificationTooLong } : {};
+};
+
 const hasErrors = (errors) => Object.keys(errors).length > 0;
 
 module.exports = {
@@ -246,6 +259,7 @@ module.exports = {
   validateSubmission,
   validateRequirements,
   validateOrdinaryFields,
+  validateClarificationText,
   hasErrors,
   toWholeNumber,
   parseDate,
