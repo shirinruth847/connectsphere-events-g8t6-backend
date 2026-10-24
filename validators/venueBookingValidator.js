@@ -92,8 +92,49 @@ const parseBookingFilters = (query) => {
   return Object.keys(fields).length ? { fields } : { filters };
 };
 
+// Venue Staff decisions (SPM-186, SPM-189). The status the user saw is sent
+// back so a decision made from a stale screen is refused (SPM-186 AC5).
+const MAX_REJECTION_REASON_LENGTH = 1000;
+const DECISION_MESSAGES = Object.freeze({
+  reasonRequired: "Enter a reason for rejecting this booking.",
+  reasonTooLong: `The reason must be ${MAX_REJECTION_REASON_LENGTH} characters or fewer.`,
+  expectedStatusInvalid: "Reload the booking, then try again.",
+  unknownField: "This field is not supported.",
+  bodyInvalid: "Send the decision as a JSON object.",
+});
+const DECIDABLE_STATUSES = Object.freeze({ approve: ["PENDING"], reject: ["PENDING", "APPROVED"] });
+
+const parseBookingDecision = (body, decision) => {
+  const input = body === undefined || body === null ? {} : body;
+  if (typeof input !== "object" || Array.isArray(input)) return { fields: { body: DECISION_MESSAGES.bodyInvalid } };
+
+  const allowed = decision === "reject" ? ["reason", "expectedStatus"] : ["expectedStatus"];
+  const fields = {};
+  for (const key of Object.keys(input)) {
+    if (!allowed.includes(key)) fields[key] = DECISION_MESSAGES.unknownField;
+  }
+
+  const values = { expectedStatus: null, reason: null };
+  if (input.expectedStatus !== undefined || decision === "reject") {
+    if (DECIDABLE_STATUSES[decision].includes(input.expectedStatus)) values.expectedStatus = input.expectedStatus;
+    else fields.expectedStatus = DECISION_MESSAGES.expectedStatusInvalid;
+  }
+
+  if (decision === "reject") {
+    const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+    if (!reason) fields.reason = DECISION_MESSAGES.reasonRequired;
+    else if (reason.length > MAX_REJECTION_REASON_LENGTH) fields.reason = DECISION_MESSAGES.reasonTooLong;
+    else values.reason = reason;
+  }
+
+  return Object.keys(fields).length ? { fields } : { values };
+};
+
 module.exports = {
   parseBookingFilters,
+  parseBookingDecision,
+  DECISION_MESSAGES,
+  MAX_REJECTION_REASON_LENGTH,
   parseId,
   VENUE_BOOKING_STATUSES,
   BOOKING_SORTS,

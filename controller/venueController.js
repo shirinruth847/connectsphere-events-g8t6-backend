@@ -1,5 +1,5 @@
 const venueModel = require("../model/venueModel");
-const { parseBookingFilters, parseId } = require("../validators/venueBookingValidator");
+const { parseBookingFilters, parseBookingDecision, parseId } = require("../validators/venueBookingValidator");
 const { validateAvailabilityQuery } = require("../validators/venueAvailabilityValidator");
 const {
   validateVenueCreate,
@@ -36,6 +36,15 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_CAPACITY_TOO_SMALL: [409, "This venue cannot hold the event's expected attendance."],
   VENUE_SUGGESTION_VERSION_CONFLICT: [409, "The suggested venue was changed after you loaded it. Reload the event, then try again."],
   IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
+  // Booking decisions (SPM-186, SPM-189): business conflicts the user can act on.
+  EVENT_NOT_IN_PLANNING: [409, "Bookings can be approved only while the event is in planning."],
+  EVENT_NOT_ACTIVE: [409, "This event is closed, so its bookings can no longer be changed."],
+  VENUE_NOT_AVAILABLE: [409, "This venue is not available for bookings. Reject the request or make the venue active first."],
+  VENUE_CAPACITY_EXCEEDED: [409, "The expected attendance is more than this venue's capacity."],
+  VENUE_BUFFERS_NOT_SET: [409, "Set this venue's setup and turnaround times before approving bookings."],
+  VENUE_BOOKING_CONFLICT: [409, "Another approved booking already occupies this venue at that time."],
+  VENUE_BLOCKED: [409, "The venue is blocked for part of this booking's time."],
+  BOOKING_ALREADY_STARTED: [409, "This booking has already started, so it can no longer be rejected here. Coordinate changes on the day directly."],
   // Never answer with partial availability (SPM-74 TC13, Master 7.4 step 5).
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],
 });
@@ -52,7 +61,7 @@ const validationFailed = (res, fields) =>
 
 const upcomingBookingsWarning = (count) =>
   `This venue has ${count ?? "one or more"} upcoming booking${count === 1 ? "" : "s"}. `
-  + "Confirm to continue; existing bookings are kept.";
+  + "Confirm to continue; existing bookings and events are kept, and their coordinators and organisers are notified.";
 
 const handleError = (error, res, next) => {
   if (error.name !== "VenueError") return next(error);
@@ -64,6 +73,13 @@ const handleError = (error, res, next) => {
     return sendError(res, 409, error.code, upcomingBookingsWarning(error.upcomingBookings), {
       upcomingBookings: error.upcomingBookings,
       firstStart: error.firstStart,
+      affectedEvents: error.affectedEvents || [],
+    });
+  }
+  if (error.code === "BOOKING_NOT_FOUND") return res.status(404).json(BOOKING_NOT_FOUND);
+  if (error.code === "BOOKING_ALREADY_DECIDED") {
+    return sendError(res, 409, error.code, "This booking has already been actioned by another staff member. Reload it to see the decision.", {
+      currentStatus: error.currentStatus,
     });
   }
   if (error.code === "VENUE_BUFFERS_LOCKED") {
@@ -222,17 +238,41 @@ const changeVenueStatus = async (req, res, next) => {
   const { values, fields } = validateVenueStatusChange(req.body);
   if (hasErrors(fields)) return validationFailed(res, fields);
   try {
-    const { venue, changed, upcomingBookings } = await venueModel.setVenueStatus(req.user.user_id, venueId, values);
+    const { venue, changed, upcomingBookings, affectedEvents } = await venueModel.setVenueStatus(req.user.user_id, venueId, values);
     return res.status(200).json({
       message: changed ? "Venue status updated." : "No changes to save.",
       venue,
       changed,
       upcomingBookings,
+      affectedEvents,
     });
   } catch (err) {
     return handleError(err, res, next);
   }
 };
+
+// ---------- booking decisions (SPM-186, SPM-189, Venue Staff) ----------
+
+const decideBooking = (decision) => async (req, res, next) => {
+  const bookingId = parseId(req.params.bookingId);
+  if (!bookingId) return res.status(404).json(BOOKING_NOT_FOUND);
+  const { values, fields } = parseBookingDecision(req.body, decision);
+  if (fields) return validationFailed(res, fields);
+  try {
+    const result = decision === "approve"
+      ? await venueModel.approveVenueBooking(req.user.user_id, bookingId, values)
+      : await venueModel.rejectVenueBooking(req.user.user_id, bookingId, values);
+    return res.status(200).json({
+      message: decision === "approve" ? "Venue booking approved." : "Venue booking rejected.",
+      ...result,
+    });
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const approveVenueBooking = decideBooking("approve");
+const rejectVenueBooking = decideBooking("reject");
 
 // ---------- photo gallery (T28, SPM-181, Venue Staff) ----------
 
@@ -443,6 +483,8 @@ module.exports = {
   createVenue,
   updateVenue,
   changeVenueStatus,
+  approveVenueBooking,
+  rejectVenueBooking,
   updateVenueDetails,
   getVenueAvailability,
   listVenueBookings,

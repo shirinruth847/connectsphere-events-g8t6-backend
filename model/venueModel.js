@@ -6,6 +6,7 @@ const venuePhotoModel = require("./venuePhotoModel");
 const activityModel = require("./activityModel");
 const { VENUE_STATUS } = require("../config/venueConstants");
 const { MESSAGES } = require("../validators/venueValidator");
+const { DECISION_MESSAGES } = require("../validators/venueBookingValidator");
 const { formatRequestId, parseAccessibility, hashRequest } = require("./eventModel");
 const { EVENT_STATUS, EVENT_TYPE_LABELS, VENUE_BOOKING_STATUS_LABELS } = require("../config/eventConstants");
 
@@ -138,30 +139,64 @@ const getVenueCatalogue = async (filters = {}) => {
 
 const venueError = (code, extra = {}) => Object.assign(new Error(code), { name: "VenueError", code, ...extra });
 
+// Events with bookings still ahead at a venue being taken out of service
+// (Master 5.4.4): what Venue Staff confirm, never participant data.
+const toAffectedEvents = (items) =>
+  (Array.isArray(items) ? items : []).map((item) => ({
+    eventId: item.eventId,
+    requestId: item.requestId,
+    title: item.title,
+    status: item.status,
+    firstStart: item.firstStart,
+    bookings: item.bookings,
+  }));
+
 // Database failures that are the client's fault become VenueErrors; anything
 // else is rethrown and answered with a safe 500.
-const RPC_ERRORS = new Set(["FORBIDDEN", "VENUE_NOT_FOUND", "VENUE_VERSION_CONFLICT", "VENUE_NAME_TAKEN"]);
+const RPC_ERRORS = new Set([
+  "FORBIDDEN",
+  "VENUE_NOT_FOUND",
+  "VENUE_VERSION_CONFLICT",
+  "VENUE_NAME_TAKEN",
+  "BOOKING_NOT_FOUND",
+  "EVENT_NOT_IN_PLANNING",
+  "EVENT_NOT_ACTIVE",
+  "VENUE_NOT_AVAILABLE",
+  "VENUE_CAPACITY_EXCEEDED",
+  "VENUE_BUFFERS_NOT_SET",
+  "VENUE_BOOKING_CONFLICT",
+  "BOOKING_ALREADY_STARTED",
+]);
 const CONSTRAINT_FIELDS = Object.freeze({
   venue_max_capacity_positive_check: { maxCapacity: MESSAGES.capacityInvalid },
   venue_maintenance_reason_check: { reason: MESSAGES.reasonRequired },
 });
+
+const readErrorDetails = (error) => {
+  try {
+    return JSON.parse(error.details || "{}");
+  } catch {
+    // Keep the error even if the detail cannot be read.
+    return {};
+  }
+};
 
 const toVenueError = (error) => {
   const message = error.message || "";
   const code = error.code || "";
   if (RPC_ERRORS.has(message)) return venueError(message);
   if (message === "VENUE_HAS_UPCOMING_BOOKINGS") {
-    let details = {};
-    try {
-      details = JSON.parse(error.details || "{}");
-    } catch {
-      // Keep the warning even if the detail cannot be read.
-    }
+    const details = readErrorDetails(error);
     return venueError("VENUE_HAS_UPCOMING_BOOKINGS", {
       upcomingBookings: details.upcomingBookings ?? null,
       firstStart: details.firstStart ?? null,
+      affectedEvents: toAffectedEvents(details.affectedEvents),
     });
   }
+  if (message === "BOOKING_ALREADY_DECIDED") {
+    return venueError("BOOKING_ALREADY_DECIDED", { currentStatus: readErrorDetails(error).status ?? null });
+  }
+  if (message === "REJECTION_REASON_INVALID") return venueError("VALIDATION_FAILED", { fields: { reason: DECISION_MESSAGES.reasonRequired } });
   const constraint = /constraint "([^"]+)"/.exec(message);
   if (constraint && CONSTRAINT_FIELDS[constraint[1]]) return venueError("VALIDATION_FAILED", { fields: CONSTRAINT_FIELDS[constraint[1]] });
   if (code.startsWith("22")) return venueError("VALIDATION_FAILED", { fields: {} });
@@ -316,14 +351,24 @@ const getManagedVenue = async (venueId) => {
   return toManagedVenue(row, await findUserNames([row]));
 };
 
+// A serialization failure (40001) re-runs the whole operation, every check
+// included (Master 7); anything else is answered at once.
+const SERIALIZATION_RETRIES = 3;
+
 const callVenueRpc = async (name, args) => {
-  const { data, error } = await supabase.rpc(name, args);
+  let result;
+  for (let attempt = 1; ; attempt += 1) {
+    result = await supabase.rpc(name, args);
+    if (!result.error || result.error.code !== "40001" || attempt >= SERIALIZATION_RETRIES) break;
+  }
+  const { data, error } = result;
   if (error) throw toVenueError(error);
   if (!data || !data.venue) throw new Error(`${name} returned no venue.`);
   return {
     venue: toManagedVenue(data.venue, await findUserNames([data.venue])),
     changed: data.changed === true,
     upcomingBookings: data.upcoming_bookings ?? 0,
+    affectedEvents: toAffectedEvents(data.affected_events),
   };
 };
 
@@ -943,7 +988,7 @@ const getSelectableVenuePhotoImage = async (venueId, photoId) => {
 const BOOKING_VENUE_SELECT =
   "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours,setup_turnaround_min))";
 const BOOKING_FIELDS =
-  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,created_at,updated_at,event_id";
+  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,reviewer:user!venue_booking_reviewed_by_fkey(name)";
 const BOOKING_LIST_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT},event:event!inner(event_id,title,event_type,status)`;
 const BOOKING_DETAIL_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT}`;
 // Venue Staff see the event's venue-relevant details and the coordinator's
@@ -995,7 +1040,21 @@ const toBookingListItem = (row) => ({
   },
 });
 
-const toBookingDetail = (row) => ({
+const DECISION_CLOSED_EVENT_STATUSES = new Set([EVENT_STATUS.COMPLETED, EVENT_STATUS.CANCELLED, EVENT_STATUS.REJECTED]);
+
+// Which decisions Venue Staff may take now (SPM-186 AC4, SPM-189 AC6, T31):
+// the database re-checks every rule when the decision is submitted.
+const toDecisionActions = (row, eventStatus, now) => {
+  const eventOpen = !DECISION_CLOSED_EVENT_STATUSES.has(eventStatus);
+  return {
+    canApprove: row.status === "PENDING" && eventStatus === EVENT_STATUS.PLANNING,
+    canReject:
+      eventOpen
+      && (row.status === "PENDING" || (row.status === "APPROVED" && new Date(row.start_datetime).getTime() > now)),
+  };
+};
+
+const toBookingDetail = (row, eventStatus, now = Date.now()) => ({
   ...toBookingSummary(row),
   venue: toBookingVenue(row.room),
   layoutType: row.layout_type,
@@ -1003,6 +1062,9 @@ const toBookingDetail = (row) => ({
   accessibilityRequirements: row.accessibility_requirements || [],
   specialRequirements: row.special_requirements,
   rejectionReason: row.rejection_reason,
+  reviewedAt: row.reviewed_at ?? null,
+  reviewedByName: row.reviewer?.name ?? null,
+  actions: toDecisionActions(row, eventStatus, now),
 });
 
 const toBookingEvent = (row) => {
@@ -1118,7 +1180,8 @@ const findEventBookings = async (eventId) => {
   const bookings = bookingResult.data || [];
   if (!event || event.status === EVENT_STATUS.DRAFT || !bookings.length) return null;
 
-  return { event: toBookingEvent(event), bookings: bookings.map(toBookingDetail) };
+  const now = Date.now();
+  return { event: toBookingEvent(event), bookings: bookings.map((row) => toBookingDetail(row, event.status, now)) };
 };
 
 const findVenueBooking = async (bookingId) => {
@@ -1152,6 +1215,69 @@ const findVenueBooking = async (bookingId) => {
   };
 };
 
+// ---------- venue booking decisions (SPM-186, SPM-189, T31) ----------
+
+const findBookingForDecision = async (bookingId) => {
+  const { data, error } = await supabase
+    .from("venue_booking")
+    .select("booking_id,status,start_datetime,end_datetime,room:room!inner(venue_id)")
+    .eq("booking_id", bookingId)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+};
+
+// The venue's setup/turnaround minutes and any active block over the booking's
+// occupied range (Master 5.4.1, 5.4.4). Minutes are set once, so reading them
+// before the database locks the booking cannot race with a change. Without
+// MongoDB no approval is made (Master 7.3).
+const readApprovalCalendar = async (booking) => {
+  const venueId = booking.room.venue_id;
+  try {
+    const detail = await venueDetailModel.getVenueDetail(venueId);
+    const setupMinutes = Number.isInteger(detail?.setupMinutes) ? detail.setupMinutes : null;
+    const turnaroundMinutes = Number.isInteger(detail?.turnaroundMinutes) ? detail.turnaroundMinutes : null;
+    if (setupMinutes === null || turnaroundMinutes === null) return { setupMinutes, turnaroundMinutes, blocked: false };
+
+    const range = venueConflictModel.occupiedRange(booking.start_datetime, booking.end_datetime, setupMinutes, turnaroundMinutes);
+    const entries = await venueCalendarModel.findCalendarEntries([venueId], range.start, range.end);
+    const blocked = entries.some((entry) => entry.type === "BLOCK" && entry.status === "ACTIVE");
+    return { setupMinutes, turnaroundMinutes, blocked };
+  } catch (error) {
+    throw mongoUnavailable(error);
+  }
+};
+
+const decideVenueBooking = async (actorId, bookingId, decision, { expectedStatus = null, reason = null } = {}) => {
+  const booking = await findBookingForDecision(bookingId);
+  if (!booking) throw venueError("BOOKING_NOT_FOUND");
+
+  let calendar = { setupMinutes: null, turnaroundMinutes: null, blocked: false };
+  if (decision === "APPROVE" && booking.status === "PENDING") {
+    calendar = await readApprovalCalendar(booking);
+    if (calendar.blocked) throw venueError("VENUE_BLOCKED");
+  }
+
+  const { error } = await supabase.rpc("decide_venue_booking", {
+    p_actor_id: actorId,
+    p_booking_id: bookingId,
+    p_decision: decision,
+    p_expected_status: expectedStatus,
+    p_reason: reason,
+    p_setup_minutes: calendar.setupMinutes,
+    p_turnaround_minutes: calendar.turnaroundMinutes,
+  });
+  if (error) throw toVenueError(error);
+
+  const result = await findVenueBooking(bookingId);
+  if (!result) throw new Error("decide_venue_booking left no readable booking.");
+  return result;
+};
+
+const approveVenueBooking = (actorId, bookingId, values) => decideVenueBooking(actorId, bookingId, "APPROVE", values);
+
+const rejectVenueBooking = (actorId, bookingId, values) => decideVenueBooking(actorId, bookingId, "REJECT", values);
+
 module.exports = {
   getVenueCatalogue,
   listManagedVenues,
@@ -1180,4 +1306,6 @@ module.exports = {
   findVenueBookings,
   findEventBookings,
   findVenueBooking,
+  approveVenueBooking,
+  rejectVenueBooking,
 };

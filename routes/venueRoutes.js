@@ -19,6 +19,8 @@ const {
   listVenueBookings,
   getVenueBooking,
   getEventVenueBookings,
+  approveVenueBooking,
+  rejectVenueBooking,
   listVenuePhotos,
   getVenuePhotoImage,
   addVenuePhoto,
@@ -51,6 +53,9 @@ router.get("/availability", requireAuth, requireRole("COORDINATOR", "VENUE_STAFF
 router.get("/bookings", ...venueStaffOnly, listVenueBookings);
 router.get("/bookings/events/:eventId", ...venueStaffOnly, getEventVenueBookings);
 router.get("/bookings/:bookingId", ...venueStaffOnly, getVenueBooking);
+// One booking per decision; there is no bulk decision (SPM-186 AC6).
+router.post("/bookings/:bookingId/approve", ...venueStaffOnly, approveVenueBooking);
+router.post("/bookings/:bookingId/reject", ...venueStaffOnly, rejectVenueBooking);
 
 // Venue maintenance (SPM-73). /manage is declared before /:venueId.
 router.get("/manage", ...venueStaffOnly, validatePagination, listManagedVenues);
