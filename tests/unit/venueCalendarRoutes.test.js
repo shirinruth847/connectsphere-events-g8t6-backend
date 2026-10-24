@@ -177,10 +177,24 @@ describe("GET /api/venues search and filters (SPM-72 catalogue)", () => {
     expect(venueModel.getVenueCatalogue).toHaveBeenCalledWith({
       search: "Hall",
       minCapacity: 100,
-      layout: "Theater",
-      facility: "Stage",
-      accessibility: "Lift",
+      layout: ["Theater"],
+      facility: ["Stage"],
+      accessibility: ["Lift"],
     });
+  });
+
+  test("should_pass_several_values_of_a_filter_as_a_list_without_duplicates", async () => {
+    const response = await get("layout=Theater&layout=Banquet&facility=Stage&facility=stage&facility=Projector");
+
+    expect(response.status).toBe(200);
+    expect(venueModel.getVenueCatalogue).toHaveBeenCalledWith({ layout: ["Theater", "Banquet"], facility: ["Stage", "Projector"] });
+  });
+
+  test("should_refuse_more_than_ten_values_of_a_filter", async () => {
+    const response = await get(Array.from({ length: 11 }, (_, index) => `facility=F${index}`).join("&"));
+
+    expect(response.status).toBe(400);
+    expect(response.body.fields.facility).toBeDefined();
   });
 
   test.each([

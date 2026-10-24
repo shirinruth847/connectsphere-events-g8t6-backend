@@ -154,6 +154,18 @@ describe("venueModel.getVenueCatalogue", () => {
     });
   });
 
+  test("[SPM-75] should_match_any_chosen_layout_and_every_chosen_facility", async () => {
+    venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([
+      ["1", { ...venueADetails, supportedLayouts: ["THEATRE"], facilities: ["Projector", "Stage"] }],
+      ["2", { _id: "2", supportedLayouts: ["BANQUET"], facilities: ["Projector"] }],
+    ]));
+
+    const anyLayout = await venueModel.getVenueCatalogue({ layout: ["Theatre", "Banquet"] });
+    expect(anyLayout.venues.map(({ venueId }) => venueId)).toEqual([1, 2]);
+    const everyFacility = await venueModel.getVenueCatalogue({ facility: ["projector", "stage"] });
+    expect(everyFacility.venues.map(({ venueId }) => venueId)).toEqual([1]);
+  });
+
   test("[SPM-72-AC4] should_link_related_venues_by_name_when_they_are_still_available", async () => {
     // Venue A is a hall; B is one of its rooms. Deleted and inactive rooms are not linked.
     venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([

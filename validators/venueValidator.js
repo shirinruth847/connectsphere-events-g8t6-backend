@@ -337,6 +337,10 @@ const validateVenueDetails = (body) => {
 // ---------- catalogue search and filters (GET /api/venues) ----------
 
 const CATALOGUE_PARAMS = new Set(["search", "minCapacity", "layout", "facility", "accessibility"]);
+// layout, facility and accessibility take several values as repeated
+// parameters (developer request of 25 October 2026); one value still works.
+const LIST_FILTERS = ["layout", "facility", "accessibility"];
+const MAX_FILTER_VALUES = 10;
 
 const validateCatalogueQuery = (query) => {
   const fields = {};
@@ -344,12 +348,23 @@ const validateCatalogueQuery = (query) => {
   for (const key of Object.keys(query)) {
     if (!CATALOGUE_PARAMS.has(key)) fields[key] = "This filter is not supported.";
   }
-  for (const key of ["search", "layout", "facility", "accessibility"]) {
+  if (query.search !== undefined) {
+    const text = readText(query.search);
+    if (text === undefined) fields.search = MESSAGES.textInvalid;
+    else if (text && text.length > LIMITS.search) fields.search = MESSAGES.searchTooLong;
+    else if (text) filters.search = text;
+  }
+  for (const key of LIST_FILTERS) {
     if (query[key] === undefined) continue;
-    const text = readText(query[key]);
-    if (text === undefined) fields[key] = MESSAGES.textInvalid;
-    else if (text && text.length > LIMITS.search) fields[key] = MESSAGES.searchTooLong;
-    else if (text) filters[key] = text;
+    const texts = (Array.isArray(query[key]) ? query[key] : [query[key]]).map(readText);
+    if (texts.some((text) => text === undefined)) fields[key] = MESSAGES.textInvalid;
+    else if (texts.some((text) => text && text.length > LIMITS.search)) fields[key] = MESSAGES.searchTooLong;
+    else {
+      // The first spelling of each value is kept.
+      const values = texts.filter(Boolean).filter((text, index, all) => all.findIndex((other) => other.toLowerCase() === text.toLowerCase()) === index);
+      if (values.length > MAX_FILTER_VALUES) fields[key] = `Choose at most ${MAX_FILTER_VALUES} values.`;
+      else if (values.length) filters[key] = values;
+    }
   }
   if (query.minCapacity !== undefined && query.minCapacity !== "") {
     const capacity = toWholeNumber(query.minCapacity);
