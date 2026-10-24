@@ -82,10 +82,14 @@ const validateCursorPagination = (req, res, next) => {
 const parseEventId = (value) =>
   /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_INTEGER ? Number(value) : null;
 
+// Notification IDs are integer keys too, with the same "not found" rule.
+const parseNotificationId = parseEventId;
+
 module.exports = {
   validatePagination,
   validateCursorPagination,
   parseEventId,
+  parseNotificationId,
   PAGE_LIMIT_DEFAULT,
   PAGE_LIMIT_MAX,
   PAGE_OFFSET_MAX,
