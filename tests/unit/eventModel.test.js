@@ -746,3 +746,190 @@ describe("[SPM-177 AC2] coordinator point of contact", () => {
     await expect(eventModel.assignCoordinator({ eventId: 42, coordinatorId: 20, leadId: 11 })).rejects.toMatchObject({ code: "FORBIDDEN", name: "EventRequestError" });
   });
 });
+
+describe("An attendee's own registered event (SPM-155 AC4, AC5)", () => {
+  const eventRow = (overrides = {}) => ({
+    event_id: 7,
+    title: "Gala",
+    description: "Public description",
+    start_datetime: POSTGREST_TIMESTAMP,
+    end_datetime: "2026-10-07T09:14:14.406209+00:00",
+    status: "CONFIRMED",
+    is_published: true,
+    is_registration_enabled: true,
+    registration_capacity: 100,
+    registration_open_at: null,
+    registration_close_at: null,
+    organisation: { organisation_id: 1, name: "Org" },
+    registration: [{ count: 2 }],
+    venue_booking: [{ status: "APPROVED", room: { venue: { venue_id: 3, name: "Hall", address: "1 Road" } } }],
+    ...overrides,
+  });
+  const registered = { registration_status: "REGISTERED", registration_datetime: "2026-10-01T00:00:00+00:00" };
+  // The shape SPM-173's _event_attendee_snapshot stores.
+  const snapshotRow = (overrides = {}) => ({
+    confirmed_at: "2026-09-20T02:00:00+00:00",
+    snapshot: {
+      title: "Gala (as confirmed)",
+      description: "Confirmed description",
+      start_datetime: "2026-11-01T01:00:00+00:00",
+      end_datetime: "2026-11-01T03:00:00+00:00",
+      is_published: true,
+      is_registration_enabled: true,
+      registration_capacity: 80,
+      registration_open_at: "2026-10-01T00:00:00+00:00",
+      registration_close_at: "2026-10-31T00:00:00+00:00",
+      primary_venue: { venue_id: 99, name: "Confirmed Hall", address: "2 Road" },
+      ...overrides,
+    },
+  });
+  const withheld = (attendeeStatus) => ({
+    eventId: 7,
+    title: "Gala",
+    description: null,
+    startDatetime: null,
+    endDatetime: null,
+    organisationName: null,
+    location: null,
+    registrationAvailability: "CLOSED",
+    registrationOpenAt: null,
+    registrationCloseAt: null,
+    attendeeStatus,
+    detailsWithheld: true,
+    lastConfirmedAt: null,
+  });
+
+  // The registration, the event and the latest snapshot are separate queries.
+  const tables = ({ registrations = [], event = null, snapshots = [] }) => {
+    const registrationQuery = queryReturning({ data: registrations, error: null });
+    const eventQuery = queryReturning({ data: event, error: null });
+    const snapshotQuery = queryReturning({ data: snapshots, error: null });
+    supabase.from.mockImplementation((table) => {
+      if (table === "registration") return registrationQuery;
+      if (table === "event_confirmation_snapshots") return snapshotQuery;
+      return eventQuery;
+    });
+    return { registrationQuery, eventQuery, snapshotQuery };
+  };
+
+  test("[SPM-155 AC6] should_look_up_only_this_attendee's_active_registration", async () => {
+    const { registrationQuery } = tables({});
+    await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(registrationQuery.eq).toHaveBeenCalledWith("event_id", 7);
+    expect(registrationQuery.eq).toHaveBeenCalledWith("attendee_id", 21);
+    expect(registrationQuery.in).toHaveBeenCalledWith("registration_status", ["REGISTERED", "WAITLISTED"]);
+  });
+
+  test.each([
+    ["CONFIRMED", "CONFIRMED"],
+    ["PREPARATION", "CONFIRMED"],
+    ["COMPLETED", "COMPLETED"],
+  ])("[SPM-155 AC5] should_return_the_current_details_and_my_registration_for_a_%s_event", async (status, attendeeStatus) => {
+    const { eventQuery, snapshotQuery } = tables({ registrations: [registered], event: eventRow({ status }), snapshots: [snapshotRow()] });
+    const found = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(Object.keys(found).sort()).toEqual(["event", "myRegistration"]);
+    expect(found.event).toEqual({
+      eventId: 7,
+      title: "Gala",
+      description: "Public description",
+      startDatetime: POSTGREST_TIMESTAMP,
+      endDatetime: "2026-10-07T09:14:14.406209+00:00",
+      organisationName: "Org",
+      location: "Hall, 1 Road",
+      registrationAvailability: expect.any(String),
+      registrationOpenAt: null,
+      registrationCloseAt: null,
+      attendeeStatus,
+      detailsWithheld: false,
+      lastConfirmedAt: null,
+    });
+    expect(found.myRegistration).toEqual({ status: "REGISTERED", registeredAt: "2026-10-01T00:00:00+00:00" });
+    // A past event the attendee is registered for still opens.
+    expect(eventQuery.gt).not.toHaveBeenCalled();
+    // The current values are the confirmed ones, so no snapshot is read.
+    expect(snapshotQuery.select).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["PLANNING", "PENDING_CONFIRMATION"],
+    ["SAFETY_REVIEW", "PENDING_CONFIRMATION"],
+    ["CANCELLED", "CANCELLED"],
+  ])("[SPM-155 AC5 / Master 5.7] should_show_the_last_confirmation_snapshot_for_a_%s_event", async (status, attendeeStatus) => {
+    const { snapshotQuery } = tables({
+      registrations: [{ ...registered, registration_status: "WAITLISTED" }],
+      event: eventRow({ status, title: "Gala (renamed, unconfirmed)", start_datetime: "2027-01-01T00:00:00+00:00" }),
+      snapshots: [snapshotRow()],
+    });
+    const found = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(found.event).toEqual({
+      eventId: 7,
+      title: "Gala (as confirmed)",
+      description: "Confirmed description",
+      startDatetime: "2026-11-01T01:00:00+00:00",
+      endDatetime: "2026-11-01T03:00:00+00:00",
+      organisationName: "Org",
+      location: "Confirmed Hall, 2 Road",
+      registrationAvailability: "CLOSED",
+      registrationOpenAt: "2026-10-01T00:00:00+00:00",
+      registrationCloseAt: "2026-10-31T00:00:00+00:00",
+      attendeeStatus,
+      detailsWithheld: false,
+      lastConfirmedAt: "2026-09-20T02:00:00+00:00",
+    });
+    // The latest snapshot of this event, and nothing internal from it.
+    expect(snapshotQuery.eq).toHaveBeenCalledWith("event_id", 7);
+    expect(snapshotQuery.order).toHaveBeenCalledWith("snapshot_id", { ascending: false });
+    expect(snapshotQuery.limit).toHaveBeenCalledWith(1);
+    expect(JSON.stringify(found)).not.toMatch(/venue_id|capacity|is_published|is_registration_enabled|confirmed_by/);
+    expect(found.myRegistration.status).toBe("WAITLISTED");
+  });
+
+  test.each(["PLANNING", "SAFETY_REVIEW", "CANCELLED"])("[SPM-155 AC5] should_withhold_a_%s_event_that_has_no_snapshot", async (status) => {
+    tables({ registrations: [registered], event: eventRow({ status }) });
+    const { event } = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(event).toEqual(withheld(status === "CANCELLED" ? "CANCELLED" : "PENDING_CONFIRMATION"));
+  });
+
+  test("[SPM-155] should_withhold_when_the_snapshot_was_taken_while_unpublished", async () => {
+    tables({ registrations: [registered], event: eventRow({ status: "PLANNING" }), snapshots: [snapshotRow({ is_published: false })] });
+    const { event } = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(event).toEqual(withheld("PENDING_CONFIRMATION"));
+  });
+
+  test("[SPM-155] should_show_a_snapshot_without_a_venue_with_no_location", async () => {
+    tables({ registrations: [registered], event: eventRow({ status: "CANCELLED" }), snapshots: [snapshotRow({ primary_venue: null })] });
+    const { event } = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(event).toMatchObject({ location: null, detailsWithheld: false, lastConfirmedAt: "2026-09-20T02:00:00+00:00" });
+  });
+
+  test.each(["UNDER_REVIEW", "AWAITING_CLARIFICATION", "SUBMITTED"])("[SPM-155] should_withhold_a_%s_event_without_reading_snapshots", async (status) => {
+    const { snapshotQuery } = tables({ registrations: [registered], event: eventRow({ status }), snapshots: [snapshotRow()] });
+    const { event } = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(event.detailsWithheld).toBe(true);
+    expect(snapshotQuery.select).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-155] should_withhold_details_of_an_unpublished_confirmed_event", async () => {
+    tables({ registrations: [registered], event: eventRow({ is_published: false }), snapshots: [snapshotRow()] });
+    const { event } = await eventModel.findRegisteredAttendeeEvent(7, 21);
+    expect(event.detailsWithheld).toBe(true);
+    expect(event.startDatetime).toBeNull();
+  });
+
+  test("[SPM-155] should_throw_when_the_snapshot_read_fails", async () => {
+    const { snapshotQuery } = tables({ registrations: [registered], event: eventRow({ status: "PLANNING" }) });
+    snapshotQuery.limit.mockResolvedValue({ data: null, error: { message: "permission denied" } });
+    await expect(eventModel.findRegisteredAttendeeEvent(7, 21)).rejects.toThrow("permission denied");
+  });
+
+  test("[SPM-155 AC6] should_return_null_without_querying_the_event_when_the_attendee_holds_no_place", async () => {
+    const { eventQuery } = tables({ event: eventRow() });
+    await expect(eventModel.findRegisteredAttendeeEvent(7, 21)).resolves.toBeNull();
+    expect(eventQuery.select).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-155] should_return_null_when_the_event_row_is_gone", async () => {
+    tables({ registrations: [registered], event: null });
+    await expect(eventModel.findRegisteredAttendeeEvent(7, 21)).resolves.toBeNull();
+  });
+});
