@@ -39,22 +39,4 @@ const findCalendarEntries = async (venueIds, from, to) => {
   return documents.map(toEntry);
 };
 
-// Holds that still occupy the venue after `now`: stored ACTIVE and not past
-// their expiry (an overdue hold never counts, Master 5.4.3).
-const findFutureActiveHolds = async (venueId, now) => {
-  const db = await getMongoDb();
-  const documents = await db
-    .collection("venue_calendar")
-    .find({
-      venueId: String(venueId),
-      type: "HOLD",
-      status: "ACTIVE",
-      holdExpiresAt: { $gt: new Date(now) },
-      occupiedEnd: { $gt: new Date(now) },
-    })
-    .sort({ occupiedStart: 1 })
-    .toArray();
-  return documents.map(toEntry);
-};
-
-module.exports = { findCalendarEntries, findFutureActiveHolds };
+module.exports = { findCalendarEntries };

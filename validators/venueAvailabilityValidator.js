@@ -2,7 +2,8 @@
 const { parseDate } = require("./eventValidator");
 const { parseId } = require("./venueBookingValidator");
 
-const MAX_RANGE_DAYS = 31;
+// A year, so the calendar's year view loads in one request.
+const MAX_RANGE_DAYS = 366;
 const MAX_VENUES = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PARAMS = new Set(["from", "to", "venueId", "checkStart", "checkEnd"]);

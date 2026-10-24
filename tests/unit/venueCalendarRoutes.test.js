@@ -61,7 +61,7 @@ describe("GET /api/venues/availability (SPM-74)", () => {
     ["", "from"],
     ["from=2026-11-04&to=2026-11-05", "from"],
     ["from=2026-11-05T00:00:00%2B08:00&to=2026-11-04T00:00:00%2B08:00", "to"],
-    ["from=2026-11-01T00:00:00%2B08:00&to=2026-12-15T00:00:00%2B08:00", "to"],
+    ["from=2026-01-01T00:00:00%2B08:00&to=2027-01-03T00:00:00%2B08:00", "to"],
     [`${RANGE}&venueId=abc`, "venueId"],
     [`${RANGE}&checkStart=2026-11-04T12:45:00%2B08:00`, "check"],
     [`${RANGE}&status=AVAILABLE`, "status"],
@@ -126,14 +126,17 @@ describe("PUT /api/venues/:venueId/details (SPM-73, T27)", () => {
     expect(venueModel.updateVenueDetails).not.toHaveBeenCalled();
   });
 
-  test("[Master 5.4.1] should_list_future_commitments_when_buffers_cannot_change", async () => {
-    const commitments = [{ type: "BOOKING", bookingReference: "VB-000110" }, { type: "HOLD", requestId: "REQ-000500" }];
-    venueModel.updateVenueDetails.mockRejectedValue(venueError("VENUE_HAS_FUTURE_COMMITMENTS", { commitments }));
+  test("[Master 5.4.1] should_refuse_a_buffer_change_once_set_with_field_messages", async () => {
+    venueModel.updateVenueDetails.mockRejectedValue(venueError("VENUE_BUFFERS_LOCKED", { fields: ["setupMinutes"] }));
 
     const response = await put({ version: 1, setupMinutes: 60 });
 
     expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({ code: "VENUE_HAS_FUTURE_COMMITMENTS", commitments });
+    expect(response.body).toEqual({
+      code: "VENUE_BUFFERS_LOCKED",
+      error: "Setup and turnaround times can be set only once and cannot be changed.",
+      fields: { setupMinutes: "Setup time has already been set and cannot be changed." },
+    });
   });
 
   test.each([

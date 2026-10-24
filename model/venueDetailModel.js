@@ -50,9 +50,10 @@ const getVenueDetail = async (venueId) => {
 
 // Saves the detail fields when the document is still at expectedVersion (0 for
 // a venue without a document yet), so a stale edit or a concurrent calendar
-// write is refused (Master 7.4). name/location/pgVersion are the PostgreSQL
-// display copies required by the validator.
-const saveVenueDetails = async ({ venueId, expectedVersion, fields, name, location, pgVersion, actorId }) => {
+// write is refused (Master 7.4). unsetFields must still be empty in the stored
+// document: setup/turnaround minutes are set once (Master 5.4.1). name/location/
+// pgVersion are the PostgreSQL display copies required by the validator.
+const saveVenueDetails = async ({ venueId, expectedVersion, fields, name, location, pgVersion, actorId, unsetFields = [] }) => {
   const db = await getMongoDb();
   const collection = db.collection("venue_details");
   const now = new Date();
@@ -67,8 +68,10 @@ const saveVenueDetails = async ({ venueId, expectedVersion, fields, name, locati
       throw error;
     }
   } else {
+    // { field: null } matches a missing or null value.
+    const stillUnset = Object.fromEntries(unsetFields.map((field) => [field, null]));
     const result = await collection.updateOne(
-      { _id: String(venueId), version: expectedVersion },
+      { _id: String(venueId), version: expectedVersion, ...stillUnset },
       { $set: set, $inc: { version: 1 } }
     );
     if (result.matchedCount === 0) throw detailError("VENUE_DETAILS_VERSION_CONFLICT");

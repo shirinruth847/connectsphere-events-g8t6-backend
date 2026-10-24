@@ -128,7 +128,7 @@ describe("viewing by role and relationship (AC1)", () => {
     expect(res.status).toBe(200);
     expect(res.body.event).toEqual(
       expect.objectContaining({
-        status: "DRAFT",
+        statusLabel: "Draft",
         title: titled("ownDraft"),
         expectedAttendance: 50,
         isOwner: true,
@@ -136,6 +136,8 @@ describe("viewing by role and relationship (AC1)", () => {
         version: expect.any(Number),
       })
     );
+    // Organisers get the label only since SPM-173.
+    expect(res.body.event).not.toHaveProperty("status");
     expect(res.body.event.permissions.canEdit).toBe(true);
   });
 

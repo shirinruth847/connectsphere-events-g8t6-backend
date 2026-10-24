@@ -356,10 +356,12 @@ const cleanupManifest = async (manifest) => {
     if (error) throw error;
     if (count) await require("./adminCleanup").deleteFixtureAudit(manifest);
   }
-  await retireUsers(manifest.userIds);
+  // Catalogue rows go before their creators: venue.created_by refuses to drop a
+  // user who still has venues (SPM-73).
   await deleteIn("room", "room_id", manifest.roomIds);
   await deleteIn("venue", "venue_id", manifest.venueIds);
   await deleteIn("equipment", "equipment_id", manifest.equipmentIds || []);
+  await retireUsers(manifest.userIds);
   await deleteIn("organisation", "organisation_id", manifest.organisationIds);
   for (const authUserId of manifest.authUserIds) {
     const { error } = await supabase.auth.admin.deleteUser(authUserId);

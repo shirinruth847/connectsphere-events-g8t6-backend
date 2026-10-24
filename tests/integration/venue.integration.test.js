@@ -178,6 +178,9 @@ describe("GET /api/venues (SPM-72)", () => {
       operatingHours: "09:00-18:00",
       accessibilityFeatures: ["Step-free access", "Hearing loop"],
       setupTurnaroundMinutes: 20,
+      // MongoDB-owned minutes (Master 1.2, T27); this fixture document records none.
+      setupMinutes: null,
+      turnaroundMinutes: null,
       rooms: expect.arrayContaining([
         { roomId: expect.any(Number), layoutType: "THEATRE", capacity: 120 },
         { roomId: expect.any(Number), layoutType: "CLASSROOM", capacity: 60 },

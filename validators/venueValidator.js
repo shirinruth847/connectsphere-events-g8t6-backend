@@ -223,10 +223,12 @@ const validateVenueStatusChange = (body) => {
   return { values: { status: body.status, reason, version, confirmUpcomingBookings: confirm === true }, fields };
 };
 
-// GET /api/venues/manage filters (SPM-73 search and filter).
+const MANAGED_VENUE_SORTS = Object.freeze(["name", "capacity", "updatedAt", "setupMinutes", "turnaroundMinutes"]);
+
+// GET /api/venues/manage filters (SPM-73 search and filter, SPM-181 sort).
 const validateVenueListQuery = (query) => {
   const fields = {};
-  const filters = {};
+  const filters = { sort: "name", order: "asc" };
   const search = readText(query.search);
   const location = readText(query.location);
   if (search === undefined) fields.search = MESSAGES.textInvalid;
@@ -238,6 +240,14 @@ const validateVenueListQuery = (query) => {
   if (query.status !== undefined && query.status !== "") {
     if (STATUSES.includes(query.status)) filters.status = query.status;
     else fields.status = MESSAGES.statusInvalid;
+  }
+  if (query.sort !== undefined) {
+    if (MANAGED_VENUE_SORTS.includes(query.sort)) filters.sort = query.sort;
+    else fields.sort = `Sort must be one of ${MANAGED_VENUE_SORTS.join(", ")}.`;
+  }
+  if (query.order !== undefined) {
+    if (query.order === "asc" || query.order === "desc") filters.order = query.order;
+    else fields.order = "Order must be asc or desc.";
   }
   return { filters, fields };
 };
@@ -356,6 +366,7 @@ module.exports = {
   validateVenueUpdate,
   validateVenueStatusChange,
   validateVenueListQuery,
+  MANAGED_VENUE_SORTS,
   validateVenueDetails,
   validateCatalogueQuery,
   hasErrors,
