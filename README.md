@@ -132,6 +132,32 @@ Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-che
 - **Audit:** create, detail updates and status changes write the venue and one `activity_log` entry (`VENUE_CREATED`, `VENUE_UPDATED` with before/after values, `VENUE_STATUS_CHANGED` with the reason) in one transaction (`create_venue`, `update_venue`, `set_venue_status`). Entries are `STAFF_ONLY` and never appear in event history.
 - **MongoDB details (Master 1.2, T27):** `PUT …/details` writes `venue_details` directly through `venueDetailModel.js`, only while its `version` still matches, then appends a `VENUE_DETAILS_UPDATED` `activity_log` entry (`STAFF_ONLY`, before/after values). Lists are trimmed and de-duplicated (facilities, accessibility and restrictions up to 50 entries, layouts up to 20); minutes are whole numbers from 0 to 1440. Setup and turnaround times are each set once (zero counts as set) and can never be changed afterwards; a change answers `409 VENUE_BUFFERS_LOCKED` (Master 5.4.1, T16). The MongoDB write re-checks that the field is still empty, so two simultaneous first saves cannot both succeed. A new venue is created `ACTIVE`; until its details have setup/turnaround minutes it cannot receive holds or bookings. Venue deletion is SPM-210.
 
+### Equipment Catalogue (SPM-52)
+
+Technical Support only, reads included; every other role gets `403 FORBIDDEN`, and the database re-checks the role inside each write. Needs migrations `20261024045601_spm52_equipment_catalogue` and `20261024050100_spm52_event_equipment_selectable`, and MongoDB script `0004_equipment_details`.
+
+| Method & path | Input | Success | Errors |
+| --- | --- | --- | --- |
+| `GET /api/equipment` | `?search=` (name, ignores letter case), `?category=`, `?status=ACTIVE\|INACTIVE\|DETAILS_PENDING`, `?limit=1..100` (default 50), `?offset=` | `200 { equipment: [item], nextOffset }`, by name | `400 VALIDATION_FAILED` |
+| `GET /api/equipment/options` | — | `200 { categories }` in use, for the filter | `401`, `403` |
+| `GET /api/equipment/:equipmentId` | — | `200 { equipment, details, detailsRead, unavailability }`: `details` holds the MongoDB `specifications`, `technicalNotes`, `handlingNotes`, `pgVersion` and `updatedAt` (or `null`); `detailsRead` is `NOT_CHECKED` when MongoDB is unavailable; `unavailability` lists current and upcoming records | `404 EQUIPMENT_NOT_FOUND` |
+| `POST /api/equipment` | `{ name, category, storageLocation, totalQuantity, specifications?, technicalNotes?, handlingNotes? }` | `201 { message, equipment }` | `400 VALIDATION_FAILED` with `fields`, `409 EQUIPMENT_NAME_TAKEN` |
+| `PUT /api/equipment/:equipmentId` | Changed fields plus the `version` loaded | `200 { message, equipment, changed }` | `400`, `404`, `409 EQUIPMENT_NAME_TAKEN`, `409 EQUIPMENT_VERSION_CONFLICT` with `current`, `409 EQUIPMENT_QUANTITY_COMMITTED` with `committedQuantity`, `periodStart`, `periodEnd` |
+| `PUT /api/equipment/:equipmentId/status` | `{ active, version, confirmUpcomingRequests? }` | `200 { message, equipment, changed, upcomingRequests }` | `400`, `404`, `409 EQUIPMENT_VERSION_CONFLICT`, `409 EQUIPMENT_HAS_UPCOMING_REQUESTS` with `upcomingCount` and `upcomingEvents: [{ eventId, requestId, title, startDatetime }]` |
+| `POST /api/equipment/:equipmentId/unavailability` | `{ quantity, reason: DAMAGED\|MAINTENANCE\|OTHER, startsAt, endsAt, note }` | `201 { message, unavailability, equipment }` | `400`, `404`, `409 EQUIPMENT_STOCK_EXCEEDED` with `availableQuantity`, `periodStart`, `periodEnd` |
+| `PUT /api/equipment/:equipmentId/unavailability/:unavailabilityId` | Changed fields plus the record's `version` | `200 { message, unavailability, equipment, changed }` | `400`, `404 UNAVAILABILITY_NOT_FOUND`, `409 UNAVAILABILITY_VERSION_CONFLICT`, `409 UNAVAILABILITY_ENDED`, `409 EQUIPMENT_STOCK_EXCEEDED` |
+| `POST /api/equipment/:equipmentId/unavailability/:unavailabilityId/end` | `{ version }` | `200 { message, unavailability, equipment }`: a started record ends now, one not yet started is `CANCELLED` | `404`, `409 UNAVAILABILITY_VERSION_CONFLICT`, `409 UNAVAILABILITY_ENDED` |
+
+`item` is `{ equipmentId, name, category, storageLocation, totalQuantity, unavailableNow, isActive, status, statusLabel, detailStatus, detailNotice, version, createdAt, updatedAt, createdBy, updatedBy }`. `status` is `ACTIVE`, `INACTIVE` or `DETAILS_PENDING` ("Details pending"); `detailStatus` is `CURRENT`, `PENDING`, `OUT_OF_DATE`, `FAILED` or `NONE`, and `detailNotice` reads "Details may be out of date" for the last two states that apply.
+
+- **Fields:** name (≤ 100, unique in any letter case), category (≤ 100), storage location (≤ 150, reference only: it never affects availability, Master 5.5) and total quantity (a whole number from 0 to 1,000,000) are required on create; specifications, technical notes and handling/setup notes (≤ 2,000 each) are optional. Messages follow the SPM-52 test cases, e.g. "Name is required", "Total quantity must be a whole number of 0 or more", "Equipment with this name already exists". Any other field is rejected with `400`. Rows from before SPM-52 have no storage location until one is saved.
+- **Selection by event requests:** an item can be added to an event request only when it is active and its MongoDB document has been applied (`details_pending` is false). Items an event already requests are kept when the event is saved again, even after deactivation. The backend checks this in `findValidationContext`, and `_replace_event_requirements` repeats it in the database. `details_pending` defaults to false, so rows inserted directly (seeds, test fixtures) stay selectable.
+- **Unavailable stock:** checked per time segment (Master 7.2): periods that do not overlap are never added together, and the unavailable total never exceeds the stock. Every write locks the item's row first, so simultaneous records cannot exceed it together. Lowering the total below the largest unavailable total in any future segment is refused and names that quantity and period. Ended and cancelled records are history and cannot change.
+- **Deactivation:** an item requested by upcoming events (end in the future, not draft, cancelled, rejected or completed) answers `409 EQUIPMENT_HAS_UPCOMING_REQUESTS` until the request repeats with `"confirmUpcomingRequests": true`. Requests are never changed. Drafts are private and never listed.
+- **Stale saves:** every change raises `version`; send the one you loaded. A save that changes nothing keeps the version and writes no history.
+- **Audit:** every change writes the item and one `STAFF_ONLY` `activity_log` entry (`EQUIPMENT_CREATED`, `EQUIPMENT_UPDATED` with before/after values, `EQUIPMENT_DEACTIVATED`, `EQUIPMENT_REACTIVATED`, `EQUIPMENT_UNAVAILABILITY_RECORDED`, `_UPDATED`, `_ENDED`) in one transaction. Catalogue changes send no notifications.
+- **MongoDB details (Master 6.4, 6.5, 7.3):** `equipment_details` is written only through the outbox. Create, and any change to name, category or a detail field, writes an `outbox_entries` row in the same transaction as the change: a full snapshot of the document at that PostgreSQL version. After commit the request tries the entry once; `jobs/mongoSyncJob.js` claims the rest with a lease, retries with backoff (30 s doubling, at most an hour) and marks an entry `FAILED` after 8 attempts. Applying an entry only succeeds while the document's `pg_version` is lower, so late or repeated entries are ignored. When MongoDB is unavailable the PostgreSQL change stands and the item reads "Details may be out of date". `npm run mongo:sync` runs one pass by hand. The 2026-10-24 migration backfilled one entry per existing item (`description` → `specifications`); `equipment.description` is no longer written.
+
 ### Venue Photo Gallery (T28, SPM-181)
 
 Venue Staff only (`401` without a token, `403` for every other role). Photos live in MongoDB `venue_photos` (Master 6.4); the venue must exist and not be deleted, otherwise `404 VENUE_NOT_FOUND`. MongoDB down answers `503 VENUE_PHOTOS_UNAVAILABLE`.
@@ -341,6 +367,7 @@ SEED_ACCOUNT_PASSWORD=<private password for seeded dev accounts, 12+ characters>
 SEED_NAMESPACE=dev                         # prefix for seeded emails and organisation names
 SIGNUP_RATE_LIMIT_MAX=5                    # sign-up attempts per IP per 15 minutes (default 5; tests raise it)
 EVENT_COMPLETION_INTERVAL_MS=60000         # how often ended events are completed (default 60000; 0 turns the job off)
+MONGO_SYNC_INTERVAL_MS=30000               # how often pending MongoDB outbox entries are applied (default 30000; 0 turns the job off)
 ```
 
 The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.
@@ -380,6 +407,8 @@ Test names follow `[<Jira test case or domain ID>] should_<behaviour>_when_<cond
 
 Tests that need MongoDB (`tests/unit/venueDetailModel.test.js`, `tests/integration/venue.integration.test.js`) start a local in-memory server with `mongodb-memory-server`, never Atlas (Master M7). The first run downloads a `mongod` binary into the user cache; later runs work offline. `tests/integration/venue.integration.test.js` covers SPM-72 TC-VC-001 and TC-VC-003 against the live database and needs migration `20261019025616_spm72_venue_active_state`. TC-VC-002 (no available venues) cannot run against the shared database, which always holds other venues; the unit suites and the frontend journey cover it.
 
+`tests/integration/equipment.integration.test.js` covers SPM-52 (TC-01 to TC-20 except the browser-only TC-17) against the live database, with MongoDB in a local in-memory replica set. It needs both SPM-52 migrations and `TEST_DATABASE_URL`, which it uses to remove its equipment, unavailable stock and outbox entries and, for TC-14, to fail an activity insert inside a rolled-back transaction. Start any dev server with `MONGO_SYNC_INTERVAL_MS=0` while it runs, or that server's sync job could apply the suite's pending entries to Atlas.
+
 `tests/integration/events.integration.test.js` exercises the event request RPCs end to end, including parallel submissions and idempotent replays. It needs migration `20261007075542_event_request_review_fixes` applied to the development project.
 
 `tests/integration/eventEdits.integration.test.js` covers SPM-33 (TC-01 to TC-21, two parallel saves, and an edit racing a reassignment). It needs the four SPM-33 migrations (`spm33_event_edit_history`, `spm33_owner_history_and_edit_notice`, `spm33_request_organisation_and_history_retention`, `spm33_assignment_enters_under_review`) and the `reassign_event_coordinator` function (SPM-180) in the development project. Cleanup deletes everything a run created except the profiles that wrote history entries: those stay, deactivated and without an Auth account, because history is never deleted.
@@ -396,6 +425,7 @@ MongoDB collections, validators and indexes are defined in `mongodb/schemas/` an
 
 ```bash
 npm run mongo:migrate   # runs each script once and records it in _schema_migrations
+npm run mongo:sync      # applies due MongoDB outbox entries once (the server also runs this every 30 s)
 ```
 
 Never create or change collections by hand or in the Atlas UI.
@@ -416,6 +446,7 @@ Please refer to the `COMMIT_MESSAGES.md` file in the root directory for details.
 connectsphere-events-g8t6-backend/
 ├── app.js                 # Express app and middleware composition
 ├── config/               # External service configurations (Supabase, MongoDB) and shared constants
+│   ├── equipmentConstants.js # Equipment statuses, unavailability reasons, outbox sync settings
 │   ├── eventConstants.js # Event statuses and the SPM-33 field edit matrix
 │   ├── mongodb.js        # Shared MongoDB client; retries after a failed connection
 │   ├── roles.js
@@ -423,11 +454,13 @@ connectsphere-events-g8t6-backend/
 │   └── venueConstants.js # Venue statuses and the maximum capacity
 ├── controller/           # Route handler logic and controllers
 │   ├── authController.js
+│   ├── equipmentController.js
 │   ├── eventController.js
 │   ├── registrationController.js
 │   └── venueController.js
 ├── jobs/                 # Background work started by server.js
-│   └── eventCompletionJob.js  # Completes ended events (SPM-173)
+│   ├── eventCompletionJob.js  # Completes ended events (SPM-173)
+│   └── mongoSyncJob.js   # Applies MongoDB outbox entries (SPM-52; npm run mongo:sync)
 ├── middleware/           # Request/response middleware functions
 │   ├── auth.js           # Verifies the Supabase access token and loads the profile
 │   ├── authorize.js      # Role checks, the event access policy and requireVisibleEvent (404 outside viewing scope)
@@ -436,8 +469,11 @@ connectsphere-events-g8t6-backend/
 │   └── validate.js       # Offset and cursor pagination bounds, event ID parsing
 ├── model/                # Data models and logic
 │   ├── activityModel.js  # Audience-filtered change history
+│   ├── equipmentDetailModel.js # MongoDB equipment_details reads and conditional writes
+│   ├── equipmentModel.js # Equipment catalogue and unavailable stock (SPM-52)
 │   ├── eventModel.js
 │   ├── healthModel.js
+│   ├── outboxModel.js    # Claims and applies MongoDB outbox entries
 │   ├── registrationModel.js
 │   ├── userModel.js
 │   ├── venueCalendarModel.js # MongoDB venue_calendar (holds, blocks)
@@ -452,6 +488,7 @@ connectsphere-events-g8t6-backend/
 │   └── seed/             # Development data (npm run seed:venue-calendar)
 ├── routes/               # API route definitions
 │   ├── authRoutes.js
+│   ├── equipmentRoutes.js
 │   ├── eventRoutes.js
 │   ├── registrationRoutes.js
 │   ├── routers.js
@@ -465,6 +502,7 @@ connectsphere-events-g8t6-backend/
 │   └── unit/             # Mocked Supabase; run by npm test
 ├── validators/           # Pure request validation rules
 │   ├── authValidator.js
+│   ├── equipmentValidator.js # SPM-52 equipment fields, unavailable stock and list filters
 │   ├── eventValidator.js
 │   ├── venueAvailabilityValidator.js # SPM-74 calendar query
 │   ├── venueBookingValidator.js # SPM-181 booking filters
