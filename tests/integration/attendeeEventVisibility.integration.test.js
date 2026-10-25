@@ -1,6 +1,6 @@
 // SPM-44 live integration tests: which events an attendee can see on the
 // Attendee Event Dashboard (GET /api/events/discovery) and through direct detail
-// access. Visibility follows Jira SPM-44 and Master 1.3 section 5.3 and D02:
+// access. Visibility follows Jira SPM-44 and Master 1.5 section 5.3 and D02:
 // published events whose status is exactly CONFIRMED and that have not ended;
 // PREPARATION is hidden. State changes are made directly
 // on this run's fixture events, standing in for the lifecycle transitions.

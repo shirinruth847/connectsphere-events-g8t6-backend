@@ -356,7 +356,7 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     expect(listItem.registrationAvailability).toBe("OPEN");
   });
 
-  // Master 1.3 / SPM-44: attendee discovery shows only CONFIRMED events.
+  // Master 1.5 / SPM-44: attendee discovery shows only CONFIRMED events.
   test("[SPM-44] should_hide_a_published_preparation_event_from_list_and_detail", async () => {
     const { data, error } = await supabase.from("event").insert({
       title: `spm34-${runId}-preparation`,
