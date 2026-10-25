@@ -331,6 +331,7 @@ describe("reads", () => {
     const queries = {
       venue: queryReturning({ data: [{ venue_id: 1, name: "Hall" }], error: null }),
       room: queryReturning({ data: [{ layout_type: "THEATRE" }], error: null }),
+      equipment: queryReturning({ data: [{ equipment_id: 7, name: "Projector", total_quantity: 20 }], error: null }),
     };
     supabase.from.mockImplementation((table) => queries[table]);
 
@@ -339,6 +340,8 @@ describe("reads", () => {
     expect(queries.venue.eq).toHaveBeenCalledWith("is_active", true);
     expect(queries.venue.eq).toHaveBeenCalledWith("status", "ACTIVE");
     expect(options.venues).toEqual([{ venueId: 1, name: "Hall" }]);
+    expect(options.equipment).toEqual([{ equipmentId: 7, name: "Projector" }]);
+    expect(queries.equipment.select).toHaveBeenCalledWith("equipment_id,name");
   });
 
   test("[EVT-PERF-001] should_not_query_the_database_when_no_catalogue_fields_are_sent", async () => {

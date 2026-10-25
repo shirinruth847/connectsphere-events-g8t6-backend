@@ -134,3 +134,30 @@ describe("activityModel (AC8)", () => {
     );
   });
 });
+
+describe("history views (SPM-41 v2)", () => {
+  test("[SPM-41-AC5] should_read_when_this_person_last_viewed_the_events_history", async () => {
+    const query = queryReturning({ data: { last_viewed_at: "2026-10-23T03:00:00+00:00" }, error: null });
+    supabase.from.mockReturnValue(query);
+
+    await expect(activityModel.findLastHistoryView(42, 11)).resolves.toBe("2026-10-23T03:00:00+00:00");
+    expect(supabase.from).toHaveBeenCalledWith("event_history_views");
+    expect(query.eq).toHaveBeenCalledWith("event_id", 42);
+    expect(query.eq).toHaveBeenCalledWith("user_id", 11);
+  });
+
+  test("[SPM-41-AC5] should_return_null_before_the_first_view_and_throw_when_the_read_fails", async () => {
+    supabase.from.mockReturnValueOnce(queryReturning({ data: null, error: null }));
+    await expect(activityModel.findLastHistoryView(42, 11)).resolves.toBeNull();
+
+    supabase.from.mockReturnValueOnce(queryReturning({ data: null, error: { message: "permission denied" } }));
+    await expect(activityModel.findLastHistoryView(42, 11)).rejects.toThrow("permission denied");
+  });
+
+  test("[SPM-41-AC5] should_record_a_view_through_the_database_function", async () => {
+    supabase.rpc.mockResolvedValue({ data: "2026-10-24T03:00:00+00:00", error: null });
+
+    await expect(activityModel.markEventHistoryViewed(42, 11)).resolves.toBe("2026-10-24T03:00:00+00:00");
+    expect(supabase.rpc).toHaveBeenCalledWith("mark_event_history_viewed", { p_event_id: 42, p_actor_id: 11 });
+  });
+});
