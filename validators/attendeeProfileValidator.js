@@ -9,10 +9,14 @@ const SAVE_FIELDS = new Set([...TEXT_FIELDS, "version"]);
 const MESSAGES = Object.freeze({
   bodyInvalid: "Send the profile as a JSON object.",
   textRequired: "Send this field, as text or null to leave it blank.",
-  textInvalid: `Enter text of ${MAX_PROFILE_TEXT_LENGTH} characters or fewer.`,
+  textInvalid: `Enter text of ${MAX_PROFILE_TEXT_LENGTH} characters or fewer, without control characters such as NUL.`,
   versionInvalid: "Version must be the profile version you loaded, or null for a new profile.",
   unknownField: "This field cannot be set.",
 });
+
+// PostgreSQL text cannot store U+0000, so it is refused here as a 400 rather
+// than failing in the database as a 500.
+const NUL_CHARACTER = "\u0000";
 
 // A blank value clears the field and is stored as null.
 const readText = (body, key, fields) => {
@@ -22,7 +26,7 @@ const readText = (body, key, fields) => {
   }
   const value = body[key];
   if (value === null) return null;
-  if (typeof value !== "string" || value.trim().length > MAX_PROFILE_TEXT_LENGTH) {
+  if (typeof value !== "string" || value.includes(NUL_CHARACTER) || value.trim().length > MAX_PROFILE_TEXT_LENGTH) {
     fields[key] = MESSAGES.textInvalid;
     return null;
   }

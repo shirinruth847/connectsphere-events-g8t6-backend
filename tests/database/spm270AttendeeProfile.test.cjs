@@ -8,7 +8,20 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { PGlite } = require(process.env.PGLITE_MODULE || "@electric-sql/pglite");
 const root = path.resolve(__dirname, "../..");
-const MIGRATION = fs.readFileSync(path.join(root, "supabase/migrations/20261024095646_spm270_attendee_profile.sql"), "utf8");
+const MIGRATIONS_DIR = path.join(root, "supabase/migrations");
+const readMigration = (suffix) => {
+  const name = fs.readdirSync(MIGRATIONS_DIR).find((file) => file.endsWith(suffix));
+  assert.ok(name, `migration *${suffix} must exist`);
+  return fs.readFileSync(path.join(MIGRATIONS_DIR, name), "utf8");
+};
+const MIGRATION = readMigration("_spm270_attendee_profile.sql");
+const ROLE_GUARD = readMigration("_spm270_attendee_profile_role_guard.sql");
+
+// The SPM-270 migrations in order, as a new environment applies them.
+const migrate = async (db) => {
+  await db.exec(MIGRATION);
+  await db.exec(ROLE_GUARD);
+};
 
 // The table as found in the development database before this migration.
 const DASHBOARD_TABLE = `
@@ -38,7 +51,7 @@ const setup = async ({ dashboardTable = false, beforeMigration = "" } = {}) => {
   const db = await createDb();
   if (dashboardTable) await db.exec(DASHBOARD_TABLE);
   if (beforeMigration) await db.exec(beforeMigration);
-  await db.exec(MIGRATION);
+  await migrate(db);
   return db;
 };
 
@@ -106,7 +119,7 @@ for (const [label, row, pattern] of [
     const db = await createDb();
     await db.exec(DASHBOARD_TABLE);
     await db.exec(row);
-    await assert.rejects(db.exec(MIGRATION), pattern);
+    await assert.rejects(migrate(db), pattern);
     await db.exec("ROLLBACK");
     const names = (await columns(db)).map((c) => c.column_name);
     assert.ok(!names.includes("version"), "the failed migration must not leave a partial change");
@@ -123,7 +136,7 @@ test("[SPM-270] should_not_leave_a_non_attendee_profile_when_the_dashboard_table
   await db.exec("INSERT INTO public.attendee_profile (user_id, created_at, updated_at) VALUES (3, now(), now());");
   let migrated = true;
   try {
-    await db.exec(MIGRATION);
+    await migrate(db);
   } catch {
     migrated = false;
     await db.exec("ROLLBACK");
@@ -132,6 +145,80 @@ test("[SPM-270] should_not_leave_a_non_attendee_profile_when_the_dashboard_table
     SELECT count(*)::int AS n FROM public.attendee_profile p
       JOIN public."user" u USING (user_id) WHERE u.role <> 'ATTENDEE'`)).n;
   assert.ok(!migrated || offending === 0, `migration succeeded but left ${offending} profile(s) owned by a non-attendee`);
+});
+
+// ---------- role guard (forward migration over legacy rows) ----------
+
+// Everything the guard must leave untouched: rows, constraints, triggers,
+// functions and grants.
+const databaseState = async (db) => ({
+  rows: (await db.query("SELECT * FROM public.attendee_profile ORDER BY attendee_id")).rows,
+  constraints: (await db.query(`
+    SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+     WHERE conrelid = 'public.attendee_profile'::regclass ORDER BY conname`)).rows,
+  triggers: (await db.query(`
+    SELECT tgname, pg_get_triggerdef(oid) AS def FROM pg_trigger
+     WHERE tgrelid = 'public.attendee_profile'::regclass AND NOT tgisinternal ORDER BY tgname`)).rows,
+  functions: (await db.query(`
+    SELECT proname, md5(prosrc) AS src, proacl::text AS acl FROM pg_proc
+     WHERE proname IN ('get_attendee_profile', 'save_attendee_profile', '_attendee_profile_requires_attendee', '_touch_attendee_profile_updated_at')
+     ORDER BY proname`)).rows,
+  tableAcl: (await one(db, "SELECT relacl::text AS acl FROM pg_class WHERE oid = 'public.attendee_profile'::regclass")).acl,
+});
+
+// The original migration ran over a legacy table; the guard runs after it.
+const afterOriginalMigration = async (legacyRows = "") => {
+  const db = await createDb();
+  await db.exec(DASHBOARD_TABLE);
+  if (legacyRows) await db.exec(legacyRows);
+  await db.exec(MIGRATION);
+  return db;
+};
+
+test("[SPM-270] should_complete_the_role_guard_and_change_nothing_when_attendee_profile_is_empty", async () => {
+  const db = await afterOriginalMigration();
+  const before = await databaseState(db);
+  await db.exec(ROLE_GUARD);
+  assert.deepEqual(await databaseState(db), before);
+  assert.equal(before.rows.length, 0);
+});
+
+test("[SPM-270] should_complete_the_role_guard_and_keep_the_row_when_the_existing_profile_belongs_to_an_attendee", async () => {
+  const db = await afterOriginalMigration(
+    "INSERT INTO public.attendee_profile (user_id, dietary_restrictions, created_at, updated_at) VALUES (1, 'Vegan', now(), now());",
+  );
+  const before = await databaseState(db);
+  await db.exec(ROLE_GUARD);
+  assert.deepEqual(await databaseState(db), before);
+  assert.deepEqual(before.rows.map((row) => [row.user_id, row.dietary_restrictions]), [[1, "Vegan"]]);
+  // The guard leaves the save path working.
+  assert.equal((await save(db, 1, "Halal", null, 1)).profile.version, 2);
+});
+
+test("[SPM-270] should_refuse_the_role_guard_naming_the_rows_and_leave_everything_unchanged_when_a_profile_belongs_to_a_non_attendee", async () => {
+  const db = await afterOriginalMigration(`
+    INSERT INTO public.attendee_profile (user_id, dietary_restrictions, created_at, updated_at) VALUES
+      (1, 'Vegan', now(), now()),
+      (3, 'Organiser note', now(), now());`);
+  const before = await databaseState(db);
+  await assert.rejects(db.exec(ROLE_GUARD), (error) => {
+    assert.match(error.message, /^SPM-270 migration refused: 1 attendee_profile row\(s\) belong to non-ATTENDEE users: attendee_id 2 \(user_id 3, role ORGANISER\)$/);
+    assert.match(error.hint, /Nothing was changed/);
+    return true;
+  });
+  await db.exec("ROLLBACK");
+  assert.deepEqual(await databaseState(db), before);
+  assert.equal(before.rows.length, 2);
+});
+
+test("[SPM-270] should_apply_both_migrations_and_keep_the_full_shape_when_the_schema_is_fresh", async () => {
+  const db = await createDb();
+  await migrate(db);
+  assert.deepEqual((await columns(db)).map(({ column_default, ...rest }) => rest), EXPECTED_COLUMNS);
+  const state = await databaseState(db);
+  assert.deepEqual(state.triggers.map((t) => t.tgname), ["attendee_profile_requires_attendee", "attendee_profile_touch_updated_at"]);
+  assert.equal(state.functions.length, 4);
+  assert.equal((await save(db, 1, "Vegan", null, null)).profile.version, 1);
 });
 
 // ---------- behaviour after migration, on both paths ----------

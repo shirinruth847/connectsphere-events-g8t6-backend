@@ -331,10 +331,11 @@ An attendee keeps reusable details for event registration. Name, email and phone
 | `GET /api/attendee-profile/mine` | — | `200 { profile: { attendeeId, userId, name, email, phone, dietaryRestrictions, accessibilityRequirements, version, createdAt, updatedAt } }`. Before the first save, `attendeeId`, `version` and the timestamps are `null` | `401 UNAUTHENTICATED`, `403 FORBIDDEN`, `500 INTERNAL_ERROR` |
 | `PUT /api/attendee-profile/mine` | `{ "dietaryRestrictions", "accessibilityRequirements", "version" }`: both text fields required, each text of up to 1,000 characters or `null`; `version` is the one loaded, or `null` for the first save | `201 { profile }` on the first save, `200 { profile }` afterwards | `400 VALIDATION_FAILED` with `fields` (any other field, including `attendeeId`, `userId`, `role`, `name`, `email`, `phone` or timestamps), `401`, `403`, `409 STALE_PROFILE` (a profile already exists, or it changed since it was loaded: reload and save again), `500 INTERNAL_ERROR` |
 
-- **Blank values:** text is trimmed, and an empty value is saved as `null`.
+- **Blank values:** text is trimmed, and an empty value is saved as `null`. Text containing a NUL character (`\u0000`), which PostgreSQL cannot store, is refused with `400`.
 - **One profile per attendee:** `UNIQUE (user_id)` plus a single conditional insert, so simultaneous first saves create one profile and the other request gets `409`.
 - **Event Registration** reads the same combined details with `findAttendeeProfile(userId)` in `model/attendeeProfileModel.js` (database function `get_attendee_profile`).
-- **Schema:** migration `20261024095646_spm270_attendee_profile`. The development database already had the table without a migration; the migration aligns it in place.
+- **Schema:** migration `20261024095646_spm270_attendee_profile`. The development database already had the table without a migration; the migration aligns it in place. `20261025035109_spm270_attendee_profile_role_guard` then checks the rows that were already there: it stops with an error listing every profile owned by a non-`ATTENDEE` user and changes nothing, so those rows must be resolved before it is rerun.
+- **Database tests:** `tests/database/spm270AttendeeProfile.test.cjs` runs both migrations on in-memory PostgreSQL (PGlite), on a fresh schema and over the dashboard-created table.
 
 ---
 
