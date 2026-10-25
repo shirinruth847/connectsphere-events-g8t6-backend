@@ -614,15 +614,47 @@ describe("marking threads read and history viewed (SPM-41 v2)", () => {
 
   test.each([
     ["the owner", "ORGANISER", ORGANISER_ID],
-    ["a same-organisation organiser", "ORGANISER", COLLEAGUE_ID],
     ["the assigned coordinator", "COORDINATOR", COORDINATOR_ID],
-  ])("[SPM-41-AC3] should_record_that_%s_opened_the_thread", async (_label, role, userId) => {
+  ])("[SPM-41] acknowledges the displayed cursor for %s", async (_label, role, userId) => {
     signedInAs(role, userId, [ORGANISATION_ID]);
+    eventModel.markClarificationRead.mockResolvedValue(true);
+    const res = await post("/api/events/42/clarifications/1/read", { lastMessageId: 30 }, {});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ read: true });
+    expect(eventModel.markClarificationRead).toHaveBeenCalledWith({ eventId: 42, round: 1, actorId: userId, lastMessageId: 30 });
+  });
 
-    const res = await post("/api/events/42/clarifications/1/read", undefined, {});
+  test("[SPM-41] colleagues and legacy clients cannot acknowledge unseen messages", async () => {
+    signedInAs("ORGANISER", COLLEAGUE_ID, [ORGANISATION_ID]);
+    const colleague = await post("/api/events/42/clarifications/1/read", { lastMessageId: 30 }, {});
+    signedInAs("ORGANISER", ORGANISER_ID, [ORGANISATION_ID]);
+    const legacy = await post("/api/events/42/clarifications/1/read", undefined, {});
+    expect(colleague.body).toEqual({ read: false });
+    expect(legacy.body).toEqual({ read: false });
+    expect(eventModel.markClarificationRead).not.toHaveBeenCalled();
+  });
 
-    expect(res.status).toBe(204);
-    expect(eventModel.markClarificationRead).toHaveBeenCalledWith({ eventId: 42, round: 1, actorId: userId });
+  test.each([-1, 1.5, "30", null, 2147483648])("[SPM-41] invalid displayed cursor %p is refused", async (lastMessageId) => {
+    signedInAs("ORGANISER", ORGANISER_ID, [ORGANISATION_ID]);
+    const res = await post("/api/events/42/clarifications/1/read", { lastMessageId }, {});
+    expect(res.status).toBe(400);
+    expect(eventModel.markClarificationRead).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-41] newer replies prevent acknowledgement without claiming success", async () => {
+    signedInAs("ORGANISER", ORGANISER_ID, [ORGANISATION_ID]);
+    eventModel.markClarificationRead.mockResolvedValue(false);
+    const res = await post("/api/events/42/clarifications/1/read", { lastMessageId: 30 }, {});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ read: false });
+  });
+
+  test("[SPM-41 security] Safety Officers cannot acknowledge clarification reads", async () => {
+    signedInAs("SAFETY_OFFICER", 31);
+    eventModel.findVisibleEvent.mockResolvedValue(awaiting({ safety_reviews: [{ status: "OPEN", claimed_by: null }] }));
+    const res = await post("/api/events/42/clarifications/1/read", { lastMessageId: 30 }, {});
+    expect(res.status).toBe(404);
+    expect(eventModel.markClarificationRead).not.toHaveBeenCalled();
   });
 
   test("[SPM-41-AC3] should_answer_404_without_recording_a_read_outside_the_viewing_scope", async () => {
@@ -787,9 +819,9 @@ describe("SPM-41 model mapping", () => {
   });
 
   test("[SPM-41-AC3] should_mark_a_thread_read_and_surface_a_database_failure", async () => {
-    supabase.rpc.mockResolvedValueOnce({ data: null, error: null });
-    await realMarkClarificationRead({ eventId: 42, round: 1, actorId: ORGANISER_ID });
-    expect(supabase.rpc).toHaveBeenCalledWith("mark_clarification_read", { p_event_id: 42, p_round_number: 1, p_actor_id: ORGANISER_ID });
+    supabase.rpc.mockResolvedValueOnce({ data: true, error: null });
+    await expect(realMarkClarificationRead({ eventId: 42, round: 1, actorId: ORGANISER_ID, lastMessageId: 30 })).resolves.toBe(true);
+    expect(supabase.rpc).toHaveBeenCalledWith("mark_clarification_read", { p_event_id: 42, p_round_number: 1, p_actor_id: ORGANISER_ID, p_last_message_id: 30 });
 
     supabase.rpc.mockResolvedValueOnce({ data: null, error: { message: "permission denied" } });
     await expect(realMarkClarificationRead({ eventId: 42, round: 1, actorId: ORGANISER_ID })).rejects.toThrow("permission denied");

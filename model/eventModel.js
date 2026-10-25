@@ -889,15 +889,17 @@ const completeClarification = async ({ eventId, round, actorId, expectedVersion,
     p_request_hash: hashRequest({}, {}, [eventId, round, expectedVersion]),
   }, "clarification"));
 
-// Records that the owner or assigned coordinator opened a thread, which lets the
-// next message notify them again. The database ignores anyone else.
-const markClarificationRead = async ({ eventId, round, actorId }) => {
-  const { error } = await supabase.rpc("mark_clarification_read", {
+// Acknowledge a displayed snapshot; false means newer messages exist or the
+// actor cannot track reads. The database serializes this against message writes.
+const markClarificationRead = async ({ eventId, round, actorId, lastMessageId }) => {
+  const { data, error } = await supabase.rpc("mark_clarification_read", {
     p_event_id: eventId,
     p_round_number: round,
     p_actor_id: actorId,
+    p_last_message_id: lastMessageId,
   });
   if (error) throw dbError(error);
+  return data === true;
 };
 
 // SPM-173 AC12: completes up to "limit" ended events; returns how many.
@@ -926,7 +928,7 @@ const CLARIFICATION_SELECT =
   "requester:user!clarifications_requested_by_fkey(name),responder:user!clarifications_responded_by_fkey(name)," +
   "messages:clarification_messages!clarification_messages_clarification_id_fkey(" +
   "message_id,body,created_at,author_id,author:user!clarification_messages_author_id_fkey(name,role))," +
-  "reads:clarification_reads!clarification_reads_clarification_id_fkey(user_id,last_read_at)";
+  "reads:clarification_reads!clarification_reads_clarification_id_fkey(user_id,last_read_at,last_read_message_id)";
 
 const toClarificationMessage = (row) => ({
   messageId: row.message_id,
@@ -935,13 +937,17 @@ const toClarificationMessage = (row) => ({
   author: { userId: row.author_id, name: row.author ? row.author.name : null, role: row.author ? row.author.role : null },
 });
 
-// Messages from the other party since the reader last opened the thread; null
-// for readers who are not a party (they are never notified, so nothing is stored).
+// Messages from the other party after the displayed-message cursor; timestamp
+// fallback supports older response fixtures. Non-parties have no tracked reads.
 const countUnread = (messages, readerId, reads) => {
   if (readerId == null) return null;
   const read = (reads || []).find((entry) => entry.user_id === readerId);
   const readAt = read && read.last_read_at ? Date.parse(read.last_read_at) : null;
-  return messages.filter((message) => message.author_id !== readerId && (readAt === null || Date.parse(message.created_at) > readAt)).length;
+  return messages.filter((message) => message.author_id !== readerId && (
+    Number.isInteger(read?.last_read_message_id)
+      ? message.message_id > read.last_read_message_id
+      : readAt === null || Date.parse(message.created_at) > readAt
+  )).length;
 };
 
 // A completed thread is stored as RESPONDED (SPM-41 v1 schema) and reported as
@@ -1251,10 +1257,10 @@ const findValidationContext = async (input) => {
   };
 };
 
-// Request creation only needs catalogue names/IDs and supported layouts.
-// This read does not reserve a venue or expose internal venue planning data.
+// Organiser forms need catalogue names/IDs and supported layouts. This read
+// does not reserve resources or expose stock counts/internal planning data.
 const findRequestOptions = async () => {
-  const [venues, rooms] = await Promise.all([
+  const [venues, rooms, equipment] = await Promise.all([
     supabase
       .from("venue")
       .select("venue_id,name")
@@ -1262,11 +1268,13 @@ const findRequestOptions = async () => {
       .eq("status", VENUE_STATUS.ACTIVE)
       .order("name", { ascending: true }),
     supabase.from("room").select("layout_type"),
+    supabase.from("equipment").select("equipment_id,name").order("name", { ascending: true }),
   ]);
-  for (const result of [venues, rooms]) if (result.error) throw dbError(result.error);
+  for (const result of [venues, rooms, equipment]) if (result.error) throw dbError(result.error);
   return {
     venues: venues.data.map(row => ({ venueId: row.venue_id, name: row.name })),
     layouts: [...new Set([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)])].filter(Boolean),
+    equipment: equipment.data.map(row => ({ equipmentId: row.equipment_id, name: row.name })),
   };
 };
 

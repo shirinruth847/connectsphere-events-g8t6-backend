@@ -71,6 +71,18 @@ beforeEach(() => {
 });
 
 describe("GET /api/events/:id/clarifications (SPM-41 AC3)", () => {
+  test.each([
+    { status: "OPEN", claimed_by: null },
+    { status: "OPEN", claimed_by: 31 },
+    { status: "APPROVED", decided_by: 31 },
+  ])("[SPM-41 security] safety visibility does not grant clarification access (%o)", async (review) => {
+    signedInAs("SAFETY_OFFICER", 31);
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SAFETY_REVIEW", safety_reviews: [review] }));
+    const res = await getRounds();
+    expect(res.status).toBe(404);
+    expect(eventModel.findEventClarifications).not.toHaveBeenCalled();
+    expect(JSON.stringify(res.body)).not.toContain("stage size");
+  });
   test("[SPM-41-AC3] should_return_every_round_when_the_owner_opens_the_clarifications", async () => {
     signedInAs("ORGANISER", ORGANISER_ID, [ORGANISATION_ID]);
 
@@ -232,7 +244,7 @@ describe("findEventClarifications (SPM-41)", () => {
     expect(query.select).toHaveBeenCalledWith(expect.stringContaining("requester:user!clarifications_requested_by_fkey(name)"));
     expect(query.select).toHaveBeenCalledWith(expect.stringContaining("messages:clarification_messages!clarification_messages_clarification_id_fkey("));
     expect(query.select).toHaveBeenCalledWith(expect.stringContaining("author:user!clarification_messages_author_id_fkey(name,role)"));
-    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("reads:clarification_reads!clarification_reads_clarification_id_fkey(user_id,last_read_at)"));
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("reads:clarification_reads!clarification_reads_clarification_id_fkey(user_id,last_read_at,last_read_message_id)"));
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
     expect(query.eq).toHaveBeenCalledWith("reads.user_id", ORGANISER_ID);
     expect(query.order).toHaveBeenCalledWith("round_number", { ascending: false });
@@ -282,5 +294,12 @@ describe("findEventClarifications (SPM-41)", () => {
     supabase.from.mockReturnValue(queryReturning({ data: null, error: { message: "permission denied" } }));
 
     await expect(realFindEventClarifications(42)).rejects.toThrow("permission denied");
+  });
+
+  test("[SPM-41] read IDs preserve replies whose transaction timestamp precedes the acknowledgement", async () => {
+    const row = { ...openRow, reads: [{ user_id: ORGANISER_ID, last_read_at: "2030-01-01T00:00:00Z", last_read_message_id: 30 }] };
+    supabase.from.mockReturnValue(queryReturning({ data: [row], error: null }));
+    const [thread] = await realFindEventClarifications(42, { readerId: ORGANISER_ID });
+    expect(thread.unreadCount).toBe(1);
   });
 });

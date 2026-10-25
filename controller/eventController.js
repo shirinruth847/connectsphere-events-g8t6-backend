@@ -484,11 +484,18 @@ const threadReaderId = (req) =>
     ? req.user.user_id
     : null;
 
+const canReadClarifications = (access) => [
+  EVENT_RELATIONSHIP.OWNER,
+  EVENT_RELATIONSHIP.ORGANISATION_MEMBER,
+  EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR,
+].includes(access.relationship);
+
 // SPM-41: the owner, same-organisation organisers (read-only) and the assigned
-// coordinator all see every thread and message; requireVisibleEvent has already
-// answered "not found" for anyone else.
+// coordinator see every thread. General event visibility also admits Safety
+// Officers, so the clarification audience is checked separately here.
 const getEventClarifications = async (req, res, next) => {
   try {
+    if (!canReadClarifications(req.visibleEvent.access)) return eventNotFound(res);
     const clarifications = await eventModel.findEventClarifications(req.visibleEvent.eventId, { readerId: threadReaderId(req) });
     return res.status(200).json({ clarifications });
   } catch (error) {
@@ -922,14 +929,25 @@ const completeClarification = async (req, res, next) => {
 };
 
 // POST /api/events/:id/clarifications/:round/read — SPM-41 v2: opening a thread
-// lets the next message notify this person again. Anyone who can see the event
-// may call it; only the owner's and assigned coordinator's reads are stored.
+// acknowledges the displayed message cursor for the owner/assigned coordinator.
+// General event visibility alone does not grant access to clarification reads.
 const markClarificationRead = async (req, res, next) => {
   try {
+    if (!canReadClarifications(req.visibleEvent.access)) return eventNotFound(res);
     const round = readRound(req);
     if (!round) return sendDomainError(res, "CLARIFICATION_NOT_FOUND");
-    await eventModel.markClarificationRead({ eventId: req.visibleEvent.eventId, round, actorId: req.user.user_id });
-    return res.status(204).end();
+    // Clients without a displayed-message cursor must not acknowledge unseen replies.
+    if (threadReaderId(req) === null || req.body === undefined) return res.status(200).json({ read: false });
+    if (!isPlainObject(req.body)) return validationFailed(res, { body: "Send the request as a JSON object." });
+    const errors = toUnsupportedFieldErrors(Object.keys(req.body).filter((key) => key !== "lastMessageId"));
+    const lastMessageId = req.body.lastMessageId;
+    if (lastMessageId === undefined && !hasErrors(errors)) return res.status(200).json({ read: false });
+    if (!Number.isInteger(lastMessageId) || lastMessageId < 0 || lastMessageId > MAX_INTEGER) {
+      errors.lastMessageId = "Send the ID of the last displayed message (or 0 for an empty thread).";
+    }
+    if (hasErrors(errors)) return validationFailed(res, errors);
+    const read = await eventModel.markClarificationRead({ eventId: req.visibleEvent.eventId, round, actorId: req.user.user_id, lastMessageId });
+    return res.status(200).json({ read });
   } catch (error) {
     return handleError(error, res, next);
   }

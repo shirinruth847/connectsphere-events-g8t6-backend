@@ -315,7 +315,11 @@ describe("clarification threads through the API (SPM-41)", () => {
     call("post", `/api/events/${eventId}/clarifications`, account, body, idempotencyKey);
   const postMessage = (account, round, body, idempotencyKey) =>
     call("post", `/api/events/${eventId}/clarifications/${round}/messages`, account, { body }, idempotencyKey);
-  const markRead = (account, round) => call("post", `/api/events/${eventId}/clarifications/${round}/read`, account);
+  const markRead = async (account, round) => {
+    const thread = (await getRounds(eventId, account)).body.clarifications.find((entry) => entry.round === round);
+    const lastMessageId = Math.max(0, ...thread.messages.map((message) => message.messageId));
+    return call("post", `/api/events/${eventId}/clarifications/${round}/read`, account, { lastMessageId });
+  };
   const amend = (account, body, idempotencyKey) => call("post", `/api/events/${eventId}/amendments`, account, body, idempotencyKey);
   const complete = (account, round, body, idempotencyKey) =>
     call("post", `/api/events/${eventId}/clarifications/${round}/complete`, account, body, idempotencyKey);
@@ -516,7 +520,8 @@ describe("clarification threads through the API (SPM-41)", () => {
 
   test("[SPM-41-AC3] should_notify_again_after_the_coordinator_opens_the_thread", async () => {
     const read = await markRead("coordinator", 1);
-    expect(read.status).toBe(204);
+    expect(read.status).toBe(200);
+    expect(read.body).toEqual({ read: true });
     expect((await openThread("coordinator")).unreadCount).toBe(0);
 
     const reply = await postMessage("coordinator", 1, "Thanks. Is catering needed?", key("coordinator-reply"));
