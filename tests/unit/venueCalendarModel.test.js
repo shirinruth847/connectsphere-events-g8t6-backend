@@ -101,6 +101,20 @@ describe("findCalendarEntries", () => {
   });
 });
 
+test("[SPM-199 AC4/8/9] event holds exclude other events, blocks and staff notes", async () => {
+  await db.collection("venue_calendar").insertMany([
+    entry({ label: "owned", note: "Private staff note", createdBy: 99 }),
+    entry({ label: "expired", status: "EXPIRED" }),
+    entry({ label: "converted", status: "CONVERTED" }),
+    entry({ label: "other event", eventId: 501 }),
+    entry({ label: "block", type: "BLOCK", holdExpiresAt: null, reason: "SAFETY" }),
+  ]);
+  const holds = await calendarModel.findEventHolds(500);
+  expect(holds.map((hold) => hold.label).sort()).toEqual(["converted", "expired", "owned"]);
+  expect(JSON.stringify(holds)).not.toContain("Private staff note");
+  expect(holds.every((hold) => hold.note === null)).toBe(true);
+});
+
 describe("saveVenueDetails (Master 7.4)", () => {
   const save = (expectedVersion, fields) =>
     detailModel.saveVenueDetails({
