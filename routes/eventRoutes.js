@@ -32,6 +32,7 @@ const {
   startPreparation,
   completeEvent,
 } = require("../controller/eventController");
+const { getEventSafetyReviews } = require("../controller/safetyController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
 const { validateCursorPagination } = require("../middleware/validate");
@@ -83,6 +84,9 @@ router.post("/:id/clarifications/:round/messages", anySignedInUser, requireVisib
 router.post("/:id/clarifications/:round/read", anySignedInUser, requireVisibleEvent, markClarificationRead);
 router.post("/:id/clarifications/:round/complete", assignedCoordinatorOnly, completeClarification);
 router.post("/:id/amendments", organiserOnly, requireVisibleEvent, saveClarificationAmendments);
+// SPM-251: each role's own scope is checked in the controller, because Leads,
+// Venue Staff and Technical Support have none through requireVisibleEvent.
+router.get("/:id/safety-reviews", anySignedInUser, getEventSafetyReviews);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
 router.put("/:id/draft", organiserOnly, requireVisibleEvent, updateDraft);

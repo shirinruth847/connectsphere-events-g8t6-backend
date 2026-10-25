@@ -451,7 +451,11 @@ const getEventHistory = async (req, res, next) => {
   try {
     const { eventId, access } = req.visibleEvent;
     const [{ history, nextCursor }, lastViewedAt] = await Promise.all([
-      activityModel.findEventHistory(eventId, { ...req.pagination, audiences: access.historyAudiences }),
+      activityModel.findEventHistory(eventId, {
+        ...req.pagination,
+        audiences: access.historyAudiences,
+        ...(access.historyFields ? { fields: access.historyFields } : {}),
+      }),
       activityModel.findLastHistoryView(eventId, req.user.user_id),
     ]);
     return res.status(200).json({ history, nextCursor, lastViewedAt });

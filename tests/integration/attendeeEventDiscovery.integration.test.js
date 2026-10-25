@@ -66,8 +66,8 @@ const insertEvent = async (suffix, overrides = {}) => {
     purpose: `Internal planning purpose for ${suffix}`,
     accessibility_needs: `Internal accessibility notes for ${suffix}`,
     organiser_id: fixtures.accounts.organiserA.userId,
-    // Unassigned: one coordinator on overlapping fixture events is refused by
-    // SPM-174's overlap guard (COORDINATOR_CONFLICT). Discovery ignores the coordinator.
+    // Discovery never reads the coordinator, and these events share time slots that
+    // one coordinator cannot hold together (SPM-174 schedule guard, COORDINATOR_CONFLICT).
     coordinator_id: null,
     organisation_id: fixtures.organisations.A,
     status: "CONFIRMED",
