@@ -452,6 +452,7 @@ const getEventHistory = async (req, res, next) => {
     const { history, nextCursor } = await activityModel.findEventHistory(eventId, {
       ...req.pagination,
       audiences: access.historyAudiences,
+      ...(access.historyFields ? { fields: access.historyFields } : {}),
     });
     return res.status(200).json({ history, nextCursor });
 

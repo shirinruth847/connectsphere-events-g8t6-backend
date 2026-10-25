@@ -13,6 +13,7 @@ const {
   EVENT_FIELD_GROUPS,
   COORDINATOR_EDITABLE_STATUSES,
   LIFECYCLE_ACTIONS,
+  SAFETY_ROUND_STATUS,
 } = require("../config/eventConstants");
 const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
 
@@ -39,6 +40,33 @@ const EVENT_SELECT =
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
+// A Safety Officer's view: the rounds that put the event in their scope and the
+// number of registered attendees, never who they are (SPM-243 AC2).
+const SAFETY_OFFICER_SELECT = `${EVENT_SELECT},registration(count),safety_reviews!inner(review_id,status,claimed_by,decided_by)`;
+
+// SPM-243 AC2: a Safety Officer may see a round that is open and unclaimed (the
+// shared queue), open and held by them, or decided by them.
+const isRoundInOfficerScope = (round, officerId) =>
+  (round.status === SAFETY_ROUND_STATUS.OPEN && (round.claimed_by == null || round.claimed_by === officerId)) ||
+  (round.decided_by != null && round.decided_by === officerId);
+
+// The round the officer opens from the event page: the open one in their scope,
+// otherwise the latest one they decided. The frontend loads it by this ID rather
+// than applying the scope rule itself.
+const findOfficerReviewId = (rounds, officerId) => {
+  const inScope = (Array.isArray(rounds) ? rounds : []).filter((round) => isRoundInOfficerScope(round, officerId));
+  const open = inScope.find((round) => round.status === SAFETY_ROUND_STATUS.OPEN);
+  if (open) return open.review_id;
+  return inScope.reduce((latest, round) => (latest === null || round.review_id > latest ? round.review_id : latest), null);
+};
+
+// The same rule as a PostgREST filter on an embedded safety_reviews resource.
+const officerScopeFilter = (officerId) => {
+  const id = Number(officerId);
+  if (!Number.isSafeInteger(id)) throw new Error("Invalid officer ID.");
+  const open = `status.eq.${SAFETY_ROUND_STATUS.OPEN}`;
+  return `and(${open},claimed_by.is.null),and(${open},claimed_by.eq.${id}),decided_by.eq.${id}`;
+};
 const LIST_SELECT =
   "event_id,title,status,previously_confirmed,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 const UNASSIGNED_QUEUE_SELECT =
@@ -180,15 +208,25 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
 // The event as one signed-in user may see it (SPM-33 AC1). "access" comes from
 // getEventAccess; permissions tell the interface which controls to offer and are
 // enforced again on every save.
+// Staff see the stored status; organisers see only the label (SPM-173 AC6).
+const STAFF_RELATIONSHIPS = new Set([EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR, EVENT_RELATIONSHIP.SAFETY_OFFICER]);
+
 const toEventView = (row, user, access) => ({
   ...toApi(row, user.user_id, {
-    includeStoredStatus: access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR,
+    includeStoredStatus: STAFF_RELATIONSHIPS.has(access.relationship),
   }),
   ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
     ? {
         coordinatorId: row.coordinator_id,
         organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
         ...(row.arrangement_version === undefined ? {} : { arrangementVersion: row.arrangement_version }),
+      }
+    : {}),
+  ...(access.relationship === EVENT_RELATIONSHIP.SAFETY_OFFICER
+    ? {
+        registeredCount: Array.isArray(row.registration) && row.registration[0] ? row.registration[0].count : 0,
+        arrangementVersion: row.arrangement_version,
+        safetyReviewId: findOfficerReviewId(row.safety_reviews, user.user_id),
       }
     : {}),
   viewerRelationship: access.relationship,
@@ -544,12 +582,21 @@ const buildOrganiserVisibilityFilter = (user) => {
 // inside the user's viewing scope, so callers answer "not found" for everything else.
 // Venue Staff, Technical Support, Leads and attendees have no scope through this view.
 const findVisibleEvent = async (eventId, user) => {
-  const select = user.role === "COORDINATOR" ? COORDINATION_SELECT : EVENT_SELECT;
+  const select = {
+    COORDINATOR: COORDINATION_SELECT,
+    SAFETY_OFFICER: SAFETY_OFFICER_SELECT,
+  }[user.role] || EVENT_SELECT;
   let query = supabase.from("event").select(select).eq("event_id", eventId);
   if (user.role === "COORDINATOR") {
     query = query.eq("coordinator_id", user.user_id).neq("status", "DRAFT");
   } else if (user.role === "ORGANISER") {
     query = query.or(buildOrganiserVisibilityFilter(user));
+  } else if (user.role === "SAFETY_OFFICER") {
+    // The inner join returns the event only with a round in the officer's scope.
+    query = query
+      .neq("status", "DRAFT")
+      .or(officerScopeFilter(user.user_id), { referencedTable: "safety_reviews" })
+      .eq(...REGISTERED_SEATS_FILTER);
   } else {
     return null;
   }
@@ -1084,6 +1131,8 @@ module.exports = {
   updateEventDetails,
   buildOrganiserVisibilityFilter,
   findVisibleEvent,
+  isRoundInOfficerScope,
+  officerScopeFilter,
   findCoordinatorEvents,
   findUnassignedSubmittedEvents,
   findCoordinatorAvailability,

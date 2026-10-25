@@ -8,9 +8,11 @@
 // TC-10 (cancel creation) is a browser-only step: a cancelled form sends no
 // request, so there is nothing for the backend to check.
 const request = require("supertest");
+const { MongoMemoryReplSet } = require("mongodb-memory-server");
 const app = require("../../server");
 const supabase = require("../../config/supabase");
-const { closeMongoDb } = require("../../config/mongodb");
+const { getMongoDb, closeMongoDb } = require("../../config/mongodb");
+const { applyMigrations } = require("../../mongodb/migrate");
 const { MAX_VENUE_CAPACITY } = require("../../config/venueConstants");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
 const { newRunId, createAuthFixtures, cleanupAuthFixtures, recordFixtureIds } = require("../fixtures/authFixtures");
@@ -102,7 +104,17 @@ const catalogueIds = async () => (await call("coordinator", "get", "/api/venues"
 const requestOptionIds = async () =>
   (await call("organiserA", "get", "/api/events/request-options")).body.venues.map(({ venueId }) => venueId);
 
+// Master 11: venue details come from a local in-memory replica set, never Atlas.
+// Closing the client in afterAll also lets Jest exit instead of waiting on it.
+const ORIGINAL_MONGODB_URI = process.env.MONGODB_URI;
+const ORIGINAL_MONGODB_DB_NAME = process.env.MONGODB_DB_NAME;
+let replSet;
+
 beforeAll(async () => {
+  replSet = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: "wiredTiger" } });
+  process.env.MONGODB_URI = replSet.getUri();
+  process.env.MONGODB_DB_NAME = `spm73_${runId}`;
+  await applyMigrations(await getMongoDb());
   fixtures = await createAuthFixtures(runId);
 });
 
@@ -110,8 +122,10 @@ afterAll(async () => {
   try {
     await cleanupAuthFixtures(runId);
   } finally {
-    // The venue routes open MongoDB for venue details; close it so Jest can exit.
     await closeMongoDb();
+    if (replSet) await replSet.stop();
+    process.env.MONGODB_URI = ORIGINAL_MONGODB_URI;
+    process.env.MONGODB_DB_NAME = ORIGINAL_MONGODB_DB_NAME;
   }
 });
 

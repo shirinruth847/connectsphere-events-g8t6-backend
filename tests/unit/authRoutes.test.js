@@ -46,6 +46,7 @@ describe("GET /api/auth/me", () => {
     ["TC-LOGIN-003", "TECH_SUPPORT", "/dashboard"],
     ["TC-LOGIN-004", "ATTENDEE", "/my-registrations"],
     ["TC-LOGIN-005", "ORGANISER", "/dashboard"],
+    ["SPM-243-TC-01", "SAFETY_OFFICER", "/dashboard"],
   ])("[%s] should_return_profile_roles_and_home_path_when_%s_is_signed_in", async (_id, role, homePath) => {
     signedInAs(role);
 
@@ -163,7 +164,7 @@ describe("GET /api/events/mine", () => {
     expect(findOrganiserEventRequests).not.toHaveBeenCalled();
   });
 
-  test.each(["COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT"])(
+  test.each(["COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"])(
     "[TC-AUTH-020] should_return_403_when_%s_lists_organiser_requests",
     async (role) => {
       signedInAs(role);
