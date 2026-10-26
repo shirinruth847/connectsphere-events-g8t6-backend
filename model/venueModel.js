@@ -578,7 +578,7 @@ const deleteVenuePhoto = async (actorId, venueId, photoId) => {
 
 // ---------- availability calendar (SPM-74, Master 5.4.5) ----------
 
-const AVAILABILITY_VENUE_SELECT = "venue_id,name,address,operating_hours,status";
+const AVAILABILITY_VENUE_SELECT = "venue_id,name,address,operating_hours,status,status_reason";
 // Bookings are loaded a day either side of the range: setup and turnaround are
 // at most 1440 minutes each, so nothing that can occupy the range is missed.
 const BUFFER_MARGIN_MS = 24 * 60 * 60 * 1000;
@@ -674,6 +674,8 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null, exc
         name: row.name,
         address: row.address,
         status: row.status,
+        // Why a venue is out of service, shown on the calendar (SPM-186).
+        statusReason: row.status_reason ?? null,
         ...venue,
         // A venue without MongoDB minutes cannot receive holds or bookings (Master 5.4.1).
         buffersRecorded: venue.setupMinutes != null && venue.turnaroundMinutes != null,
