@@ -668,17 +668,17 @@ const LIFECYCLE_REFUSALS = Object.freeze({
 
 // The body carries only the version of the event the coordinator loaded, so an
 // action taken from an outdated page is refused (409) instead of applied.
-const readActionRequest = (req) => {
+const readActionRequest = (req, requireIdempotency = false) => {
   const body = req.body ?? {};
   if (!isPlainObject(body)) return { errors: { body: "Send the request as a JSON object." } };
   const errors = toUnsupportedFieldErrors(Object.keys(body).filter((key) => key !== "version"));
   const expectedVersion = readVersion(body, true, errors);
-  const idempotencyKey = readRequestIdempotencyKey(req, false, errors);
+  const idempotencyKey = readRequestIdempotencyKey(req, requireIdempotency, errors);
   return { errors, expectedVersion, idempotencyKey };
 };
 
-// POST /api/events/:id/submit-for-safety-review, /confirm, /start-preparation and
-// /complete — SPM-173 AC9-AC12. Outside the coordinator's scope is 404 (before
+// POST /api/events/:id/accept-feasibility (SPM-39), /submit-for-safety-review,
+// /confirm, /start-preparation and /complete (SPM-173 AC9-AC12). Outside the coordinator's scope is 404 (before
 // this, in requireVisibleEvent); then 400 for the request itself. The database
 // decides the rest under the event lock: 403 for an action the status does not
 // allow (naming the status, AC3), 409 for a stale version (AC5) or an unmet
@@ -686,7 +686,7 @@ const readActionRequest = (req) => {
 const lifecycleAction = (action) => async (req, res, next) => {
   const { eventId } = req.visibleEvent;
   try {
-    const { errors, expectedVersion, idempotencyKey } = readActionRequest(req);
+    const { errors, expectedVersion, idempotencyKey } = readActionRequest(req, action === "ACCEPT_FEASIBILITY");
     if (hasErrors(errors)) return validationFailed(res, errors);
 
     const result = await eventModel.runLifecycleAction({
@@ -708,12 +708,31 @@ const lifecycleAction = (action) => async (req, res, next) => {
     if (isRequestError && error.code === "EVENT_VERSION_CONFLICT") {
       return sendVersionConflict(req, res, eventId).catch(next);
     }
+    if (isRequestError && action === "ACCEPT_FEASIBILITY") {
+      if (error.code === "FEASIBILITY_REQUIREMENTS_MISSING") {
+        const labels = {
+          title: "Event title", purpose: "Event purpose", description: "Event description",
+          startDatetime: "Start date and time", endDatetime: "Valid end date and time",
+          expectedAttendance: "Positive expected attendance", preferredLayoutType: "Preferred layout",
+          venuePreferences: "Venue preference", contactName: "Organiser contact name", contactEmail: "Organiser contact email",
+        };
+        const fields = Object.fromEntries((error.missingFields || []).filter((field) => labels[field]).map((field) => [field, `${labels[field]} is required.`]));
+        return res.status(409).json({ error: "Complete the mandatory event fields before approving this request.", code: error.code, fields });
+      }
+      if (error.code === "TRANSITION_NOT_ALLOWED") {
+        const message = error.currentStatus === "REJECTED" ? "A rejected event request cannot be approved."
+          : error.currentStatus === "CANCELLED" ? "A cancelled event request cannot be approved."
+            : "Only an event request under review can be approved.";
+        return res.status(409).json({ error: message, code: error.code, currentStatus: error.currentStatus });
+      }
+    }
     const sendRefusal = isRequestError ? LIFECYCLE_REFUSALS[error.code] : undefined;
     if (sendRefusal) return sendRefusal(res, error);
     return handleError(error, res, next);
   }
 };
 
+const acceptFeasibility = lifecycleAction("ACCEPT_FEASIBILITY");
 const submitForSafetyReview = lifecycleAction("SUBMIT_FOR_SAFETY_REVIEW");
 const confirmEvent = lifecycleAction("CONFIRM");
 const startPreparation = lifecycleAction("START_PREPARATION");
@@ -982,6 +1001,7 @@ module.exports = {
   listUnassignedEvents,
   assignCoordinatorAsLead,
   getEventReadiness,
+  acceptFeasibility,
   submitForSafetyReview,
   confirmEvent,
   startPreparation,

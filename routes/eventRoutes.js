@@ -27,6 +27,7 @@ const {
   listUnassignedEvents,
   getCoordinatorAvailability,
   getEventReadiness,
+  acceptFeasibility,
   submitForSafetyReview,
   confirmEvent,
   startPreparation,
@@ -76,6 +77,7 @@ if (process.env.ENABLE_COORDINATOR_WORKFLOWS === "true") {
 }
 router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
 router.get("/:id/readiness", assignedCoordinatorOnly, getEventReadiness);
+router.post("/:id/accept-feasibility", assignedCoordinatorOnly, acceptFeasibility);
 router.post("/:id/submit-for-safety-review", assignedCoordinatorOnly, submitForSafetyReview);
 router.post("/:id/confirm", assignedCoordinatorOnly, confirmEvent);
 router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation);

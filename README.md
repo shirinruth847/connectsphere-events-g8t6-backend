@@ -780,3 +780,15 @@ never returned. MongoDB holds are scoped to the event and overdue active
 holds are returned as expired, even before the expiry job runs.
 
 Verification and dependency boundaries: [SPM-199 test plan](docs/test-plans/spm-199.md).
+
+### Approve a reviewed event request (SPM-39)
+
+`POST /api/events/:id/accept-feasibility` is restricted to the active assigned
+coordinator. Send `{ "version": 1 }` and the existing `Idempotency-Key` header.
+A complete request in `UNDER_REVIEW` enters `PLANNING` (shown to the organiser
+as **Approved & Planning**). This does not book resources. Mandatory-field,
+version and state conflicts return 409; unrelated events return 404.
+
+Deploy migration `20261026190415_spm39_accept_feasibility.sql` before this API.
+See [the SPM-39 test plan](docs/test-plans/spm-39.md) for validation, transaction
+boundaries, approved Jira/Master alignment and hosted verification requirements.
