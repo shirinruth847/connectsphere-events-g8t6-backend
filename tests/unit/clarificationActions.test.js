@@ -406,6 +406,15 @@ describe("POST /api/events/:id/amendments (SPM-41 v2 AC3)", () => {
     });
   });
 
+  test("[SPM-52-AC9] should_keep_equipment_the_event_already_requests_when_judging_amendments", async () => {
+    eventModel.findVisibleEvent.mockResolvedValue(awaiting({ event_equipment_requirement: [{ equipment_id: 9, quantity_requested: 2 }] }));
+
+    await post("/api/events/42/amendments", { changes: { expectedAttendance: 150 }, version: 4 });
+
+    // Item 9 may have been deactivated since it was requested; it stays valid.
+    expect(eventModel.findValidationContext).toHaveBeenCalledWith(expect.objectContaining({ expectedAttendance: 150 }), [9]);
+  });
+
   test.each([
     ["no changes", { version: 4 }],
     ["an empty change list", { changes: {}, version: 4 }],

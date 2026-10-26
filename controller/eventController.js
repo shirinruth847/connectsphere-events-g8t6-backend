@@ -867,7 +867,7 @@ const checkAmendments = async (existing, changes) => {
 
   const input = eventModel.pickEventInput(changes);
   if (Object.keys(input).length === 0) return { errors: { changes: MESSAGES.amendmentEmpty } };
-  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input));
+  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input), existing);
   // The 48-hour lead time applies only to a newly chosen start (team decision, 2026-10-24).
   if (input.startDatetime === undefined && errors.startDatetime === MESSAGES.leadTime) delete errors.startDatetime;
   return { input, errors };
