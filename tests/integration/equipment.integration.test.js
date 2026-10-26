@@ -1,7 +1,7 @@
 // SPM-52 live integration tests: real routes, Supabase Auth and the shared
 // development database. Needs migrations 20261024045601_spm52_equipment_catalogue,
 // 20261024050100_spm52_event_equipment_selectable and
-// 20261025130000_spm52_outbox_retry_and_past_segments. MongoDB is a local
+// 20261026100000_spm52_outbox_retry_and_past_segments. MongoDB is a local
 // in-memory replica set (Master M7), never Atlas.
 //
 // Equipment is synthetic (spm52-<run> ...). It references the Technical Support
