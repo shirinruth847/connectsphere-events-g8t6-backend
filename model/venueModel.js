@@ -79,16 +79,17 @@ const includesText = (list, text) => (list || []).some((item) => String(item).to
 // Detail filters read MongoDB (Master 5.4.5). Without MongoDB, layout and
 // accessibility fall back to the PostgreSQL room layouts and accessibility
 // note; facilities cannot be checked and are reported as not checked (M4).
-// Each filter is one value or a list: a venue matches any of the layouts (an
-// event uses one) and all of the facilities and accessibility features.
+// Each filter is one value or a list, and a venue matches a list when it has
+// any of its values (developer decision of 26 October 2026); every filter
+// used must match.
 const asList = (value) => (value === undefined ? [] : [].concat(value));
+const matchesAny = (have, wanted) => !wanted.length || wanted.some((text) => includesText(have, text));
 const matchesDetailFilters = (row, details, { layout, facility, accessibility }, detailsRead) => {
   const layouts = [...(details?.supportedLayouts || []), ...(row.rooms || []).map((room) => room.layout_type)];
-  const wantedLayouts = asList(layout);
-  if (wantedLayouts.length && !wantedLayouts.some((text) => includesText(layouts, text))) return false;
-  if (detailsRead && !asList(facility).every((text) => includesText(details?.facilities, text))) return false;
+  if (!matchesAny(layouts, asList(layout))) return false;
+  if (detailsRead && !matchesAny(details?.facilities, asList(facility))) return false;
   const accessibilityList = details?.accessibilityFeatures ?? (row.accessibility_features ? [row.accessibility_features] : []);
-  if (!asList(accessibility).every((text) => includesText(accessibilityList, text))) return false;
+  if (!matchesAny(accessibilityList, asList(accessibility))) return false;
   return true;
 };
 

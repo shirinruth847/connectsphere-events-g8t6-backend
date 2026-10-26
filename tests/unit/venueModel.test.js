@@ -154,16 +154,19 @@ describe("venueModel.getVenueCatalogue", () => {
     });
   });
 
-  test("[SPM-75] should_match_any_chosen_layout_and_every_chosen_facility", async () => {
+  test("[SPM-75 TC-VS-003] should_match_a_venue_with_any_chosen_layout_facility_or_accessibility_feature", async () => {
     venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([
-      ["1", { ...venueADetails, supportedLayouts: ["THEATRE"], facilities: ["Projector", "Stage"] }],
-      ["2", { _id: "2", supportedLayouts: ["BANQUET"], facilities: ["Projector"] }],
+      ["1", { ...venueADetails, supportedLayouts: ["THEATRE"], facilities: ["Stage"], accessibilityFeatures: ["Step-free access"] }],
+      ["2", { _id: "2", supportedLayouts: ["BANQUET"], facilities: ["Projector"], accessibilityFeatures: ["Hearing loop"] }],
     ]));
+    const ids = async (filters) => (await venueModel.getVenueCatalogue(filters)).venues.map(({ venueId }) => venueId);
 
-    const anyLayout = await venueModel.getVenueCatalogue({ layout: ["Theatre", "Banquet"] });
-    expect(anyLayout.venues.map(({ venueId }) => venueId)).toEqual([1, 2]);
-    const everyFacility = await venueModel.getVenueCatalogue({ facility: ["projector", "stage"] });
-    expect(everyFacility.venues.map(({ venueId }) => venueId)).toEqual([1]);
+    expect(await ids({ layout: ["Theatre", "Banquet"] })).toEqual([1, 2]);
+    expect(await ids({ facility: ["projector", "stage"] })).toEqual([1, 2]);
+    expect(await ids({ facility: ["Stage", "Whiteboard"] })).toEqual([1]);
+    expect(await ids({ accessibility: ["hearing loop", "Lift"] })).toEqual([2]);
+    // Every filter used must match: a banquet layout with a stage fits neither venue.
+    expect(await ids({ layout: ["Banquet"], facility: ["Stage"] })).toEqual([]);
   });
 
   test("[SPM-72-AC4] should_link_related_venues_by_name_when_they_are_still_available", async () => {

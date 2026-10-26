@@ -338,7 +338,8 @@ const validateVenueDetails = (body) => {
 
 const CATALOGUE_PARAMS = new Set(["search", "minCapacity", "layout", "facility", "accessibility"]);
 // layout, facility and accessibility take several values as repeated
-// parameters (developer request of 25 October 2026); one value still works.
+// parameters (developer request of 25 October 2026), matched as "any of";
+// one value still works.
 const LIST_FILTERS = ["layout", "facility", "accessibility"];
 const MAX_FILTER_VALUES = 10;
 
