@@ -8,6 +8,7 @@ const venueRoutes = require("./venueRoutes");
 const registrationRoutes = require("./registrationRoutes");
 const safetyRoutes = require("./safetyRoutes");
 const notificationRoutes = require("./notificationRoutes");
+const attendeeProfileRoutes = require("./attendeeProfileRoutes");
 
 router.get("/healthcheck", test);
 
@@ -17,5 +18,6 @@ router.use("/venues", venueRoutes);
 router.use("/registrations", registrationRoutes);
 router.use("/safety-reviews", safetyRoutes);
 router.use("/notifications", notificationRoutes);
+router.use("/attendee-profile", attendeeProfileRoutes);
 
 module.exports = router;
