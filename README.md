@@ -656,3 +656,45 @@ in [the SPM-177 test plan](docs/test-plans/spm-177.md). The corrective migration
 retires the obsolete two-argument assignment function and preserves atomic
 assignment, history, activity and notifications. Shared deployment requires
 review of target migration history; no hosted migration was applied here.
+
+## Organiser event arrangements (SPM-199)
+
+`GET /api/events/:id/arrangements` requires a bearer token and the existing
+event visibility check. The owner can read it; permitted organisation members
+can read submitted events. Unrelated users and staff receive the same
+`404 EVENT_NOT_FOUND` as a missing event; unauthenticated requests receive 401.
+The response is private and carries `Cache-Control: no-store`.
+
+The `{ arrangements: { venues, technical, safety } }` response contains
+independent sections with `status: READY | UNAVAILABLE`. A failed read never
+becomes a successful empty array. Venue data includes individually identified
+bookings, primary designation, holds with expiry and safe availability/next
+action messages. Technical data separates named equipment requirements from
+request decisions and technical support requirements. Safety rounds contain
+only the outcome, organiser comment, timestamps and whether they apply to the
+current arrangement version. Internal notes, checklists, staff IDs and raw
+database errors are excluded. This endpoint performs no writes. A final
+read checks the event's arrangement version, event version and lifecycle state;
+a concurrent change returns `409 ARRANGEMENTS_CHANGED` with no section data.
+Refresh loads a newly authorised request. This optimistic check relies on
+arrangement writers advancing the version as required by SPM-250; it does not
+create a cross-store transaction. Hold expiry is evaluated after all I/O.
+PostgreSQL venue status (`INACTIVE`, `UNDER_MAINTENANCE`, or `is_active = false`)
+flags affected active bookings and holds even without a calendar block or
+incident record, using a safe pending-coordinator message. Booking decisions
+are retained. Inactive bookings/holds and completed occupied periods carry no
+current unavailability warning; recorded resolved booking incidents can still
+describe their historical action. Occupied periods include turnaround time.
+
+The reader supports the existing room-based bookings and `equipment_request`
+tables. It also reads the agreed `venue_id`/`is_primary`, `technical_requests`
+and `resource_incidents` structures when deployed, without applying the
+resource draft migration. On the current baseline, the sole active booking
+is primary (the existing SPM-173 rule); multiple legacy bookings have no
+designated primary. Missing combined technical support or incident storage is
+reported as unavailable rather than inferred. Free-form legacy technical
+notes and draft support notes have no external visibility marker and are
+never returned. MongoDB holds are scoped to the event and overdue active
+holds are returned as expired, even before the expiry job runs.
+
+Verification and dependency boundaries: [SPM-199 test plan](docs/test-plans/spm-199.md).

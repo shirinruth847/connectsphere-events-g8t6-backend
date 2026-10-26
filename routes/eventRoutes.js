@@ -42,6 +42,7 @@ const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
 const { validateCursorPagination } = require("../middleware/validate");
 const { USER_ROLES } = require("../config/roles");
+const { getOrganiserArrangements } = require("../controller/organiserArrangementController");
 
 // Applied per route (not router-wide) so coordinator routes can be added here later.
 const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
@@ -99,6 +100,7 @@ router.post("/:id/amendments", organiserOnly, requireVisibleEvent, saveClarifica
 // SPM-251: each role's own scope is checked in the controller, because Leads,
 // Venue Staff and Technical Support have none through requireVisibleEvent.
 router.get("/:id/safety-reviews", anySignedInUser, getEventSafetyReviews);
+router.get("/:id/arrangements", anySignedInUser, requireVisibleEvent, getOrganiserArrangements);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
 router.put("/:id/draft", organiserOnly, requireVisibleEvent, updateDraft);
