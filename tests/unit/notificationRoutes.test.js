@@ -1,6 +1,6 @@
 // Route-level unit tests for SPM-156: real Express app, routes, middleware and
 // controller. Only the model functions that reach Supabase are mocked. The
-// routes are attendee-only until SPM-192/193.
+// routes serve attendees (SPM-155) and organisers (SPM-192); staff wait for SPM-193.
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/userModel");
 jest.mock("../../model/notificationModel", () => {
@@ -54,9 +54,34 @@ describe("authentication (SPM-155 TC-12)", () => {
   });
 });
 
-describe("role restriction (attendees only until SPM-192/193)", () => {
+describe("role restriction (attendees and organisers until SPM-193)", () => {
+  test.each([
+    ["get", "/api/notifications"],
+    ["get", "/api/notifications/unread-count"],
+    ["post", "/api/notifications/read-all"],
+    ["post", "/api/notifications/7/read"],
+  ])("[SPM-192-AC9] ORGANISER: %s %s reaches their own inbox", async (method, path) => {
+    signedInAs("ORGANISER");
+    notificationModel.findNotifications.mockResolvedValue({ notifications: [], nextCursor: null });
+    notificationModel.markNotificationRead.mockResolvedValue({ notification_id: 7, is_read: true, read_at: null });
+    notificationModel.markAllNotificationsRead.mockResolvedValue(0);
+    const res = await send(method, path);
+    expect(res.status).toBe(200);
+    expect(notificationModel.countUnreadNotifications).toHaveBeenCalledWith(USER_ID);
+  });
+
+  test("[SPM-192-AC8] the organiser's list is read with their own user and role", async () => {
+    signedInAs("ORGANISER");
+    notificationModel.findNotifications.mockResolvedValue({ notifications: [], nextCursor: null });
+    await send("get", "/api/notifications");
+    expect(notificationModel.findNotifications).toHaveBeenCalledWith(
+      expect.objectContaining({ user_id: USER_ID, role: "ORGANISER" }),
+      expect.any(Object)
+    );
+  });
+
   test.each(
-    ["ORGANISER", "COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"].flatMap((role) => [
+    ["COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"].flatMap((role) => [
       [role, "get", "/api/notifications"],
       [role, "get", "/api/notifications/unread-count"],
       [role, "post", "/api/notifications/read-all"],

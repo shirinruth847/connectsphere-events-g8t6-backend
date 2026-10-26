@@ -7,15 +7,15 @@ const { requireRole } = require("../middleware/authorize");
 const { validateCursorPagination } = require("../middleware/validate");
 const { USER_ROLES } = require("../config/roles");
 
-// Attendees only for now (SPM-155): the database checks an attendee's event
-// relationship before showing a notification (AC6). SPM-192/193 open the inbox
-// to other roles together with their own visibility rules; until then they get 403.
-// Each user reaches only their own notifications.
-const attendeeOnly = [requireAuth, requireRole(USER_ROLES.ATTENDEE)];
+// Attendees (SPM-155) and organisers (SPM-192): the database shows an attendee
+// only events they hold a place on, and an organiser only events they own.
+// SPM-193 opens the inbox to staff with their own visibility rules; until then
+// they get 403. Each user reaches only their own notifications.
+const inboxRoles = [requireAuth, requireRole(USER_ROLES.ATTENDEE, USER_ROLES.ORGANISER)];
 
-router.get("/", attendeeOnly, validateCursorPagination, listNotifications);
-router.get("/unread-count", attendeeOnly, getUnreadCount);
-router.post("/read-all", attendeeOnly, markAllRead); // must stay above "/:id"
-router.post("/:id/read", attendeeOnly, markRead);
+router.get("/", inboxRoles, validateCursorPagination, listNotifications);
+router.get("/unread-count", inboxRoles, getUnreadCount);
+router.post("/read-all", inboxRoles, markAllRead); // must stay above "/:id"
+router.post("/:id/read", inboxRoles, markRead);
 
 module.exports = router;
