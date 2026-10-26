@@ -10,6 +10,10 @@
     "seed:unassigned:cleanup": "node supabase/seed/seedUnassignedEvent.js cleanup",
     "seed:accounts": "node supabase/seed/provisionAccounts.js",
     "seed:accounts:cleanup": "node supabase/seed/provisionAccounts.js cleanup",
+    "seed:safety-reviews": "node supabase/seed/seedSafetyReviews.js",
+    "seed:safety-reviews:cleanup": "node supabase/seed/seedSafetyReviews.js cleanup",
+    "seed:notifications": "node supabase/seed/seedAttendeeNotifications.js",
+    "seed:notifications:cleanup": "node supabase/seed/seedAttendeeNotifications.js cleanup",
     "mongo:migrate": "node mongodb/migrate.js",
     "seed:venue-calendar": "node mongodb/seed/venueCalendarSeed.js",
     "seed:venue-calendar:cleanup": "node mongodb/seed/venueCalendarSeed.js cleanup",
@@ -32,6 +36,7 @@
     "nodemon": "^3.1.10"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.2.5",
     "jest": "^30.5.2",
     "mongodb-memory-server": "^10.4.3",
     "pg": "^8.23.1",

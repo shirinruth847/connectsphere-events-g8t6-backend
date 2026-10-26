@@ -1,5 +1,6 @@
 const app = require("./app");
 const { startEventCompletionJob } = require("./jobs/eventCompletionJob");
+const { startEventReminderJob } = require("./jobs/eventReminderJob");
 
 const PORT = process.env.PORT || 8000;
 
@@ -11,10 +12,12 @@ if (require.main === module) {
     console.log(`Server is running on http://localhost:${port}`);
   });
   const stopEventCompletionJob = startEventCompletionJob();
+  const stopEventReminderJob = startEventReminderJob();
 
   // Stop scheduling new job runs, then let open requests finish before exiting.
   const shutDown = () => {
     if (stopEventCompletionJob) stopEventCompletionJob();
+    if (stopEventReminderJob) stopEventReminderJob();
     server.close(() => process.exit(0));
   };
   process.once("SIGTERM", shutDown);

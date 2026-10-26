@@ -302,9 +302,62 @@ Coordinator routes (assigned coordinator only; anyone else gets `404`, other rol
 
 All four also answer `403 TRANSITION_NOT_ALLOWED` with `currentStatus` when the action is not allowed in the current state, and `409 EVENT_VERSION_CONFLICT` with the current `event` for a stale `version` (for example, the second of two simultaneous actions).
 
-- **Readiness** (Master 5.3) is checked by `_event_readiness`. Migration `20261021100000_spm173_fail_closed_incident_readiness.sql` checks open resource incidents when their table exists and reports `READINESS_DATA_PENDING` if the incident schema is unavailable. The full Master resource tables remain drafts `20261019100300` and `20261019100400` until SPM-179/SPM-186 agree; readiness integration tests requiring those tables remain pending.
+- **Readiness** (Master 5.3) is checked by `_event_readiness` on today's tables (`20261020112025`, `20261020142915`, `20261021100000`): active bookings are `PENDING`/`APPROVED` `venue_booking` rows, capacity is the venue's `max_capacity`, overlapping active bookings at the same venue report `BOOKING_CONFLICT`, the primary venue is the event's only active booking (several active bookings report `NO_PRIMARY_VENUE` until bookings have a primary flag), every equipment requirement needs an approved `equipment_request`, and a `PENDING` change request blocks. An open resource incident reports `OPEN_BLOCKING_INCIDENT` once `resource_incidents` exists; until then readiness fails closed with `READINESS_DATA_PENDING`. The Master resource draft in `supabase/drafts/` (kept out of `supabase/migrations/` until SPM-179/SPM-181/SPM-186 agree) replaces these functions with the full check; readiness integration tests requiring those tables remain pending.
 - **Completion job:** `jobs/eventCompletionJob.js` starts with the server and calls `complete_due_events` every `EVENT_COMPLETION_INTERVAL_MS` (default one minute, `0` turns it off). It completes ended `CONFIRMED` and `PREPARATION` events in batches of 50, using database time and `SKIP LOCKED`, and records them as `System` in the history (`activity_log.user_id` is null, `actor_role` is `SYSTEM`). Registration closes with the state, because it is open only in `CONFIRMED` and `PREPARATION`.
 - **Assignment uses the shared function:** migration `20261022100000_spm173_assignment_shared_transition.sql` routes Lead assignment through `_check_event_transition` and `_apply_event_transition`, retaining the assignment conflict guard, assignment row and notifications. Other lifecycle writers must use the shared helpers before a database trigger can safely refuse direct status writes.
+
+### Clarification Threads (SPM-41)
+
+Built on the SPM-173 transition table (migrations `20261024025349_spm41_clarification_lifecycle.sql` and `20261024120000_spm41_clarification_threads.sql`). A clarification round ("Request *n*") is a thread of messages between the owner and the assigned coordinator, which can't be edited. While the thread is open, the event stays `AWAITING_CLARIFICATION` and the owner may save amendments. Only the coordinator completes the thread, which returns the event to `UNDER_REVIEW` with the same coordinator. There is no separate resubmit step, and `POST /:id/resubmit` no longer exists. Each write runs in one transaction under the event lock, and any failure rolls all of it back. Every `POST` except `/read` and `/history/viewed` needs an `Idempotency-Key`.
+
+| Route | Who | Body | Result and refusals |
+| --- | --- | --- | --- |
+| `GET /api/events/:id/clarifications` | Owner, same-organisation organisers, assigned coordinator | — | `{ clarifications }`, newest thread first, each with `status` `OPEN` or `COMPLETED`, `completedAt`/`completedBy`, `messages` (oldest first, with author name and role) and `unreadCount`: messages from the other party since this reader last opened the thread, or `null` for readers whose reads are not tracked |
+| `POST /api/events/:id/clarifications` | Assigned coordinator (another coordinator `404`) | `{ message, version }`, message required, at most 2,000 characters | `UNDER_REVIEW` → `AWAITING_CLARIFICATION`; new `OPEN` thread whose first message is the question; owner notified with the question; history keeps the full question. `200 { message, event, clarification }` |
+| `POST /api/events/:id/clarifications/:round/messages` | Owner or assigned coordinator (same-organisation organisers `403 EVENT_READ_ONLY`) | `{ body }`, required, at most 2,000 characters | `201 { message, clarification }` with the new message. `404 CLARIFICATION_NOT_FOUND`, `409 CLARIFICATION_CLOSED` |
+| `POST /api/events/:id/amendments` | Owner (same-organisation organisers `403 EVENT_READ_ONLY`) | `{ changes, version }`, at least one changed field | Event stays `AWAITING_CLARIFICATION`; version increases; recorded as `CLARIFICATION_AMENDED`. `400` with `fields.changes` when nothing changes; `403 FIELD_NOT_EDITABLE` for registration settings, organisation or system fields; `409 CLARIFICATION_NOT_OPEN`; `409 COORDINATOR_CONFLICT` when amended dates clash with the coordinator's schedule. `200 { message, event }` |
+| `POST /api/events/:id/clarifications/:round/complete` | Assigned coordinator (another coordinator `404`) | `{ version }` | Thread `COMPLETED`; `AWAITING_CLARIFICATION` → `UNDER_REVIEW`; recorded as `CLARIFICATION_COMPLETED`; owner notified. A version from before the latest amendments is `409`. `200 { message, event, clarification }` |
+| `POST /api/events/:id/clarifications/:round/read` | Clarification viewers; reads tracked only for owner/assigned coordinator | `{ lastMessageId }` (0 for an empty thread) | `200 { read }`; false if a newer message arrived, the viewer has no tracked reads, or a legacy client sends no cursor |
+| `POST /api/events/:id/history/viewed` | Anyone who can see the event | — | `200 { lastViewedAt }`. `GET /:id/history` also returns this viewer's `lastViewedAt` (or `null`), so the history can mark what is new to them |
+
+Actions that take a `version` also answer `403 TRANSITION_NOT_ALLOWED` with `currentStatus` and `409 EVENT_VERSION_CONFLICT` with the current `event`. Outside the viewing scope, every route answers `404` (`requireVisibleEvent`).
+
+- **Amendable fields:** every submission field except registration settings and the organisation (`AMENDMENT_FIELDS`). They skip the change workflow (Master 5.2). The amended request must still be complete; the 48-hour lead time applies only when `startDatetime` is amended.
+- **Notification throttle:** a new message or amendment notifies the other party only if they haven't already been notified since they last opened the thread (`clarification_reads`). Writing in a thread counts as opening it.
+- **Displayed messages:** opening a thread refreshes its messages before acknowledging it. Migration `20261025120000_spm41_displayed_message_reads.sql` adds `last_read_message_id`; the read function locks the event and thread, and acknowledges only when the supplied ID is still the latest. Newer replies remain unread. Throttle timestamps use actual database time rather than transaction-start time. Safety Officer event visibility does not grant clarification access.
+- **Equipment choices:** organiser-only `GET /api/events/request-options` includes `equipment: [{ equipmentId, name }]`, alongside venues/layouts. The amendment form can add/remove items and change quantities; these requirements do not reserve stock.
+- **Review-fix deployment:** apply `20261025120000` before the backend, then deploy the frontend. The old three-argument read function remains as a safe no-op, so old clients cannot clear undisplayed replies during rollout. Application rollback may retain the additive cursor column; do not drop message/read data. Restoring the former read helper would restore the stale-read defect. See `docs/test-plans/spm-41-review-fixes.md` for local checks and hosted verification limits.
+- **Permission flags:** event responses carry `permissions.canRequestClarification` (assigned coordinator, `UNDER_REVIEW`), `canPostClarificationMessage` (owner or assigned coordinator, `AWAITING_CLARIFICATION`), `canSaveAmendments` (owner, `AWAITING_CLARIFICATION`) and `canCompleteClarification` (assigned coordinator, `AWAITING_CLARIFICATION`). The frontend shows each action only when it is granted.
+- **Rounds from before threads:** the migration copied each round's question, and its answer if there was one, into `clarification_messages`. Rounds closed by the v1 resubmit name the organiser as `completedBy`. Events returned before rounds existed were given one `OPEN` round whose message says the original question was not recorded (seed event 441).
+- **Notifications** use SPM-173's `_notify_event_users`; `TODO(SPM-155)` marks the switch to the keyed helper.
+
+### Safety Reviews (SPM-243)
+
+A coordinator's submission for safety review (above) opens a round in `safety_reviews` for the event's current `arrangement_version`. Open rounds form one shared queue; a Safety Officer claims a round, works through a six-factor checklist and decides it (Master 5.9). Every change runs in a database function that locks the round, and the event when the event changes. A decided or superseded round, and a recorded booking rejection, never change afterwards: a trigger refuses it, and the backend's service role has no direct `UPDATE` on either table (`20261022123827`).
+
+Safety Officer routes (`403` for every other role). A Safety Officer sees an event (`GET /api/events/:id`, `/history`) only while it has an open unclaimed round, a round they hold or a round they decided; they see `registeredCount`, never participants, and `safetyReviewId`, the round to open (the open one in their scope, otherwise the latest they decided), history narrowed to attendance, timing, venue, layout, access, equipment and safety entries, and get `403 FORBIDDEN` on any edit or lifecycle action.
+
+| Route | Does | Refusals |
+| --- | --- | --- |
+| `GET /api/safety-reviews/queue` | Open, unclaimed rounds of events in `SAFETY_REVIEW`, oldest submission first: `{ reviews: [{ reviewId, eventId, requestId, title, startDatetime, endDatetime, expectedAttendance, venues, roundNumber, submittedAt }] }` | — |
+| `GET /api/safety-reviews/mine` | Open rounds the caller holds, same shape | — |
+| `POST /api/safety-reviews/:reviewId/claim` | Claims the round while its event is in `SAFETY_REVIEW`; first come, first served | `409 ROUND_NOT_CLAIMABLE`, `404 REVIEW_NOT_FOUND` |
+| `POST /api/safety-reviews/:reviewId/hand-back` | `{ note? }` (≤500): returns the round to the queue and clears saved progress; staff-only history entry | `403 NOT_CLAIMANT`, `409 ROUND_NOT_OPEN` |
+| `PUT /api/safety-reviews/:reviewId/progress` | Any of `{ checklist, organiserComment, internalNotes, requestedChanges }`; the checklist may be partial | `400 VALIDATION_FAILED` naming `checklist.<factor>`, `403 NOT_CLAIMANT`, `409 ROUND_NOT_OPEN` |
+| `GET /api/safety-reviews/:reviewId/panel` | The event, active bookings, requested equipment (`placement` = technical notes), relevant history, every round, and each venue's `emergencyAccess` and `knownRestrictions` from MongoDB `venue_details` with `venueDetailsAvailable` | `404` outside the caller's scope |
+| `POST /api/safety-reviews/:reviewId/decision` | `Idempotency-Key` required. `{ outcome: APPROVED \| CHANGES_REQUESTED \| REJECTED, checklist (all six), arrangementVersion, organiserComment?, internalNotes?, requestedChanges? (≥1, changes only), rejectedBookings? [{ bookingId, reason }] (≥1 for reject) }`. Approval keeps `SAFETY_REVIEW`; the other two return the event to `PLANNING` (never `REJECTED`, nothing released). Notifies the coordinator, the Venue Staff of the affected bookings and the Technical Support on the event. A replay answers with `Idempotent-Replayed: true`. MongoDB is read only when the claimant decides an open round, so a non-claimant or a replay is answered even while it is down | `400`, `403 NOT_CLAIMANT`, `409 SAFETY_FACTOR_NOT_SATISFACTORY` with `factors`, `409 ARRANGEMENTS_CHANGED` (the round's arrangement version is out of date, so it was superseded instead and the event is in `PLANNING`; or the sent `arrangementVersion` is stale, and nothing changed), `409 ROUND_NOT_OPEN`, `503 VENUE_DETAILS_UNAVAILABLE` |
+
+Checklist factors: `attendanceCapacity`, `layout`, `emergencyAccess`, `accessibility`, `equipmentPlacement`, `venueRestrictions`, each `{ result: SATISFACTORY | NOT_SATISFACTORY | NOT_APPLICABLE, comment }`; a comment is required unless the result is `SATISFACTORY`.
+
+`GET /api/events/:id/safety-reviews` (SPM-251) returns every round in order, shaped for the caller: the coordinator and Safety Officers see everything; the organiser sees `{ roundNumber, status, decidedAt, organiserComment }`; the Lead who supervises the event (made its current assignment, Master 4.2) and Technical Support who reviewed one of its equipment requests see the outcome; Venue Staff who reviewed one of its bookings also see their own rejected bookings. Anyone else gets `404`.
+
+**Arrangement changes (SPM-250).** A change to an event's venue bookings, booking decisions, blocking incidents, technical arrangements or expected attendance invalidates its safety review (Master 5.2, 5.9). Inside the database function that makes the change, call:
+
+```sql
+PERFORM public._supersede_safety_review(p_event_id, p_actor_id, 'Venue blocked for maintenance.');
+```
+
+It raises `event.arrangement_version` and, when the event is in `SAFETY_REVIEW`, closes an open round as `SUPERSEDED` (an approved round stops counting), returns the event to `PLANNING` and notifies the claimant and the coordinator. Backend code outside a database function uses `safetyModel.recordArrangementChange({ eventId, actorId, reason })`. A decision on a round whose version is out of date supersedes it itself and answers `409 ARRANGEMENTS_CHANGED`.
 
 ### Authentication (SPM-32)
 
@@ -363,7 +416,7 @@ EVENT_COMPLETION_INTERVAL_MS=60000         # how often ended events are complete
 
 The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.
 
-`MONGODB_URI` and `MONGODB_DB_NAME` are required: without them the health check fails and the venue catalogue reports its details as `NOT_CHECKED`. Your Atlas user needs read/write access and your current IP on the Atlas Network Access list (Master section 2.7.1).
+`MONGODB_URI` and `MONGODB_DB_NAME` are required: without them the health check fails, the venue catalogue reports its details as `NOT_CHECKED`, and Safety Officers cannot decide a review (`503 VENUE_DETAILS_UNAVAILABLE`, because emergency access and known restrictions come from `venue_details`). Your Atlas user needs read/write access and your current IP on the Atlas Network Access list (Master section 2.7.1).
 
 ---
 
@@ -376,7 +429,7 @@ npm run seed:accounts           # idempotent; re-running resets passwords to SEE
 npm run seed:accounts:cleanup   # removes exactly what supabase/seed/manifests/ lists
 ```
 
-Accounts are `<SEED_NAMESPACE>-<organiser-a|organiser-b|coordinator|venue-staff|tech-support|attendee>@connectsphere.test`. The `.test` domain is undeliverable, so no email is ever sent.
+Accounts are `<SEED_NAMESPACE>-<organiser-a|organiser-b|coordinator-lead|coordinator|venue-staff|tech-support|safety-officer|attendee>@connectsphere.test`. The `.test` domain is undeliverable, so no email is ever sent.
 
 The five pre-existing `user` rows are not linked to Auth accounts. To link one, its owner creates the Auth user in the Supabase dashboard (**Authentication → Users → Add user**, with **Auto Confirm** on) using the profile's email, then sets that row's `auth_user_id` to the new user's ID. Never edit `auth.*` tables with SQL.
 
@@ -443,6 +496,7 @@ connectsphere-events-g8t6-backend/
 │   ├── authController.js
 │   ├── eventController.js
 │   ├── registrationController.js
+│   ├── safetyController.js # Safety Officer reviews and safety outcomes (SPM-243)
 │   └── venueController.js
 ├── jobs/                 # Background work started by server.js
 │   └── eventCompletionJob.js  # Completes ended events (SPM-173)
@@ -457,6 +511,7 @@ connectsphere-events-g8t6-backend/
 │   ├── eventModel.js
 │   ├── healthModel.js
 │   ├── registrationModel.js
+│   ├── safetyModel.js    # Safety review rounds (SPM-243)
 │   ├── userModel.js
 │   ├── venueCalendarModel.js # MongoDB venue_calendar (holds, blocks)
 │   ├── venueConflictModel.js # Occupied ranges, conflicts, availability calendar
@@ -473,17 +528,20 @@ connectsphere-events-g8t6-backend/
 │   ├── eventRoutes.js
 │   ├── registrationRoutes.js
 │   ├── routers.js
+│   ├── safetyRoutes.js
 │   └── venueRoutes.js
 ├── supabase/
 │   ├── migrations/       # Versioned schema changes
 │   └── seed/             # Development account provisioning
 ├── tests/
+│   ├── database/         # In-memory PostgreSQL (PGlite) tests of database functions
 │   ├── fixtures/         # Synthetic data setup and cleanup
 │   ├── integration/      # Live tests against the development project
 │   └── unit/             # Mocked Supabase; run by npm test
 ├── validators/           # Pure request validation rules
 │   ├── authValidator.js
 │   ├── eventValidator.js
+│   ├── safetyValidator.js
 │   ├── venueAvailabilityValidator.js # SPM-74 calendar query
 │   ├── venueBookingValidator.js # SPM-181 booking filters
 │   ├── venuePhotoValidator.js # T28 image type, size, caption and position
@@ -534,6 +592,20 @@ without affecting other data:
 
 ```bash
 npm run seed:unassigned:cleanup
+```
+
+To give the seed Safety Officer events to review (SPM-243), create three events at the core seed
+venues. Each is submitted through the real database functions: two wait under "Awaiting review",
+and one is in the officer's "My reviews" at round 2, after round 1 requested changes. They occupy
+the seed coordinator and the Grand Hall, East Wing Auditorium and Rooftop Terrace on 10, 12 and 14
+November 2028 (Singapore time), so other fixtures that give `dev-coordinator` an event should avoid
+those days (SPM-174 refuses overlapping events for one coordinator). Re-running
+replaces the set; cleanup needs `TEST_DATABASE_URL`, because rounds and their history can only be
+removed through the privileged test connection.
+
+```bash
+npm run seed:safety-reviews
+npm run seed:safety-reviews:cleanup
 ```
 
 

@@ -56,7 +56,7 @@ describe("[SPM-123 AC3] required fields", () => {
 });
 
 describe("[SPM-123 AC1] account type allowlist", () => {
-  test.each(["COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT", "attendee", "ADMIN", "ATTENDEE,ORGANISER"])(
+  test.each(["COORDINATOR", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER", "attendee", "ADMIN", "ATTENDEE,ORGANISER"])(
     "should_reject_account_type_when_it_is_%s",
     (accountType) => {
       expect(validateSignup(validInput({ accountType }))).toEqual({ accountType: MESSAGES.accountTypeInvalid });

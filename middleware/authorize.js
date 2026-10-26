@@ -9,6 +9,7 @@ const {
   EVENT_FIELD_GROUPS,
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,
+  SAFETY_REVIEW_HISTORY_FIELDS,
   VENUE_SUGGESTION_STATUSES,
 } = require("../config/eventConstants");
 
@@ -19,6 +20,8 @@ const HISTORY_AUDIENCES = Object.freeze({
   [EVENT_RELATIONSHIP.OWNER]: Object.freeze([HISTORY_AUDIENCE.OWNER_ONLY, HISTORY_AUDIENCE.ORGANISER_SAFE]),
   [EVENT_RELATIONSHIP.ORGANISATION_MEMBER]: Object.freeze([HISTORY_AUDIENCE.ORGANISER_SAFE]),
   [EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR]: Object.freeze([HISTORY_AUDIENCE.ORGANISER_SAFE, HISTORY_AUDIENCE.STAFF_ONLY]),
+  // Narrowed further to the review-relevant entries (SAFETY_REVIEW_HISTORY_FIELDS).
+  [EVENT_RELATIONSHIP.SAFETY_OFFICER]: Object.freeze([HISTORY_AUDIENCE.ORGANISER_SAFE, HISTORY_AUDIENCE.STAFF_ONLY]),
 });
 
 const CLOSED_STATUSES = [EVENT_STATUS.COMPLETED, EVENT_STATUS.REJECTED, EVENT_STATUS.CANCELLED];
@@ -52,6 +55,11 @@ const getEventRelationship = (user, event) => {
     const isAssigned = event.coordinator_id != null && event.coordinator_id === user.user_id;
     return isAssigned && event.status !== EVENT_STATUS.DRAFT ? EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR : null;
   }
+  if (user.role === USER_ROLES.SAFETY_OFFICER) {
+    // The rounds come with the row from findVisibleEvent; none in scope means no relationship.
+    const rounds = Array.isArray(event.safety_reviews) ? event.safety_reviews : [];
+    return rounds.some((round) => eventModel.isRoundInOfficerScope(round, user.user_id)) ? EVENT_RELATIONSHIP.SAFETY_OFFICER : null;
+  }
   // findVisibleEvent only returns an event to the Lead who supervises it.
   if (user.role === USER_ROLES.COORDINATOR_LEAD) {
     return event.supervising_lead_id === user.user_id ? EVENT_RELATIONSHIP.SUPERVISING_LEAD : null;
@@ -62,6 +70,9 @@ const getEventRelationship = (user, event) => {
 // The SPM-33 field edit matrix for one user and one event row.
 const getEventAccess = (user, event) => {
   const relationship = getEventRelationship(user, event);
+  const isOwner = relationship === EVENT_RELATIONSHIP.OWNER;
+  const isAssignedCoordinator = relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR;
+  const isReturned = event.status === EVENT_STATUS.AWAITING_CLARIFICATION;
   let editableFields = [];
   if (relationship === EVENT_RELATIONSHIP.OWNER && event.status === EVENT_STATUS.DRAFT) {
     editableFields = OWNER_DRAFT_FIELDS;
@@ -75,7 +86,16 @@ const getEventAccess = (user, event) => {
     relationship,
     canEdit: editableFields.length > 0,
     editableFields: [...editableFields],
+    // SPM-41. Every AWAITING_CLARIFICATION event has an open thread: the request
+    // function opens one, and the SPM-41 migration backfilled older ones. Only
+    // the owner and the assigned coordinator write in it; only the coordinator
+    // completes it, which returns the event to UNDER_REVIEW.
+    canRequestClarification: isAssignedCoordinator && event.status === EVENT_STATUS.UNDER_REVIEW,
+    canPostClarificationMessage: (isOwner || isAssignedCoordinator) && isReturned,
+    canSaveAmendments: isOwner && isReturned,
+    canCompleteClarification: isAssignedCoordinator && isReturned,
     historyAudiences: [...(HISTORY_AUDIENCES[relationship] || [])],
+    ...(relationship === EVENT_RELATIONSHIP.SAFETY_OFFICER ? { historyFields: [...SAFETY_REVIEW_HISTORY_FIELDS] } : {}),
     // The suggestion RPC re-checks the coordinator and status under the event lock.
     canSuggestVenue:
       relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR && VENUE_SUGGESTION_STATUSES.includes(event.status),
@@ -86,6 +106,8 @@ const getEventAccess = (user, event) => {
 // answer with, or null when they can.
 const getEditDenial = (access, event) => {
   if (access.canEdit) return null;
+  // A Safety Officer only records safety outcomes (SPM-243 AC2).
+  if (access.relationship === EVENT_RELATIONSHIP.SAFETY_OFFICER) return "FORBIDDEN";
   if (access.relationship === EVENT_RELATIONSHIP.ORGANISATION_MEMBER) return "EVENT_READ_ONLY";
   if (access.relationship === EVENT_RELATIONSHIP.SUPERVISING_LEAD) return "EVENT_READ_ONLY";
   if (access.relationship === EVENT_RELATIONSHIP.OWNER && !CLOSED_STATUSES.includes(event.status)) {

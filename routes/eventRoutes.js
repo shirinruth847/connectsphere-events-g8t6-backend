@@ -13,6 +13,13 @@ const {
   getAttendeeEventDetail,
   getEventRequest,
   getEventHistory,
+  getEventClarifications,
+  markEventHistoryViewed,
+  requestClarification,
+  postClarificationMessage,
+  saveClarificationAmendments,
+  completeClarification,
+  markClarificationRead,
   listAssignedEvents,
   patchCoordinator,
   assignCoordinatorAsLead,
@@ -25,6 +32,7 @@ const {
   startPreparation,
   completeEvent,
 } = require("../controller/eventController");
+const { getEventSafetyReviews } = require("../controller/safetyController");
 const {
   getEventVenueOptions,
   suggestEventVenue,
@@ -77,6 +85,18 @@ const eventVenueReaders = [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER
 router.get("/:id/venue-options", ...eventVenueReaders, getEventVenueOptions);
 router.put("/:id/venue-suggestion", ...coordinatorOnly, requireVisibleEvent, suggestEventVenue);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
+router.post("/:id/history/viewed", anySignedInUser, requireVisibleEvent, markEventHistoryViewed);
+// SPM-41 clarification threads: another coordinator gets 404; same-organisation
+// organisers read every thread but get 403 when they write.
+router.get("/:id/clarifications", anySignedInUser, requireVisibleEvent, getEventClarifications);
+router.post("/:id/clarifications", assignedCoordinatorOnly, requestClarification);
+router.post("/:id/clarifications/:round/messages", anySignedInUser, requireVisibleEvent, postClarificationMessage);
+router.post("/:id/clarifications/:round/read", anySignedInUser, requireVisibleEvent, markClarificationRead);
+router.post("/:id/clarifications/:round/complete", assignedCoordinatorOnly, completeClarification);
+router.post("/:id/amendments", organiserOnly, requireVisibleEvent, saveClarificationAmendments);
+// SPM-251: each role's own scope is checked in the controller, because Leads,
+// Venue Staff and Technical Support have none through requireVisibleEvent.
+router.get("/:id/safety-reviews", anySignedInUser, getEventSafetyReviews);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
 router.put("/:id/draft", organiserOnly, requireVisibleEvent, updateDraft);

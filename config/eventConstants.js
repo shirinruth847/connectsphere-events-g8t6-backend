@@ -92,6 +92,7 @@ const EVENT_RELATIONSHIP = Object.freeze({
   OWNER: "OWNER",
   ORGANISATION_MEMBER: "ORGANISATION_MEMBER",
   ASSIGNED_COORDINATOR: "ASSIGNED_COORDINATOR",
+  SAFETY_OFFICER: "SAFETY_OFFICER", // the event has a round in their queue, held or decided by them (SPM-243 AC2)
   // The Lead who made the current assignment, read-only (Master 4.2, T19, T23).
   SUPERVISING_LEAD: "SUPERVISING_LEAD",
 });
@@ -159,6 +160,37 @@ const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "PREPARATION",
 ]);
 
+// SPM-41: the coordinator's opening question and every thread message are
+// required and at most this long (team decision, 2026-10-20).
+const CLARIFICATION_TEXT_LIMIT = 2000;
+
+// What the owner may amend while a clarification thread is open: every
+// submission field except registration settings and the organisation (team
+// decision). These changes skip the change workflow (Master 5.2).
+const AMENDMENT_FIELDS = Object.freeze([...EVENT_FIELD_GROUPS.ORDINARY, ...EVENT_FIELD_GROUPS.SIGNIFICANT]);
+
+// safety_reviews.status values (Master 6.2).
+const SAFETY_ROUND_STATUS = Object.freeze({
+  OPEN: "OPEN",
+  APPROVED: "APPROVED",
+  CHANGES_REQUESTED: "CHANGES_REQUESTED",
+  REJECTED: "REJECTED",
+  SUPERSEDED: "SUPERSEDED",
+});
+
+// The change history a Safety Officer reads: changes to attendance, timing,
+// venues and layout, access and equipment (Master 5.9), plus every safety
+// review entry. Field names match activity_log.changes keys.
+const SAFETY_REVIEW_HISTORY_FIELDS = Object.freeze([
+  "expectedAttendance",
+  "startDatetime",
+  "endDatetime",
+  "venuePreferences",
+  "preferredLayoutType",
+  "accessibilityNeeds",
+  "equipmentRequirements",
+]);
+
 // Values of the event_type check constraint (SPM-181) and their display labels.
 const EVENT_TYPE_LABELS = Object.freeze({
   CONFERENCE: "Conference",
@@ -199,5 +231,9 @@ module.exports = {
   EVENT_FIELD_GROUPS,
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,
+  CLARIFICATION_TEXT_LIMIT,
+  AMENDMENT_FIELDS,
+  SAFETY_ROUND_STATUS,
+  SAFETY_REVIEW_HISTORY_FIELDS,
   VENUE_SUGGESTION_STATUSES,
 };

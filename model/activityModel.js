@@ -77,11 +77,16 @@ const toHistoryEntry = (row) => ({
   audience: row.audience,
 });
 
+// Only safety review entries and entries that changed one of "fields" (SPM-243 AC2).
+const relevantHistoryFilter = (fields) =>
+  ["action.like.SAFETY_*", ...fields.map((field) => `changes->${field}.not.is.null`)].join(",");
+
 // Newest first. "audiences" lists what this reader may see (getEventAccess decides).
 // The filter is part of the query, so entries for another audience (staff-only
 // assignment records, or the owner's draft history) never leave the database for
 // someone who may not read them (SPM-33 AC8). No audience means no entries.
-const findEventHistory = async (eventId, { limit, cursor = null, audiences = [] }) => {
+// "fields", when given, narrows the history to the portion relevant to the reader.
+const findEventHistory = async (eventId, { limit, cursor = null, audiences = [], fields = null }) => {
   const beforeLogId = decodeHistoryCursor(cursor);
   if (audiences.length === 0) return { history: [], nextCursor: null };
 
@@ -91,6 +96,7 @@ const findEventHistory = async (eventId, { limit, cursor = null, audiences = [] 
     .eq("entity_name", "event")
     .eq("entity_id", eventId)
     .in("audience", audiences);
+  if (fields) query = query.or(relevantHistoryFilter(fields));
   if (beforeLogId) query = query.lt("log_id", beforeLogId);
 
   const { data, error } = await query.order("log_id", { ascending: false }).limit(limit + 1);
@@ -118,9 +124,32 @@ const appendActivity = async ({ userId, entityName, entityId, action, details, c
   if (error) throw error;
 };
 
+// SPM-41 v2: when this person last viewed the event's history, or null, so the
+// history can mark what is new to them (per person, unlike SPM-181's browser copy).
+const findLastHistoryView = async (eventId, userId) => {
+  const { data, error } = await supabase
+    .from("event_history_views")
+    .select("last_viewed_at")
+    .eq("event_id", eventId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  return data ? data.last_viewed_at : null;
+};
+
+// Records that this person viewed the event's history now; returns the time.
+// Callers check first that the viewer may see the event's history.
+const markEventHistoryViewed = async (eventId, userId) => {
+  const { data, error } = await supabase.rpc("mark_event_history_viewed", { p_event_id: eventId, p_actor_id: userId });
+  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  return data;
+};
+
 module.exports = {
   appendActivity,
   findEventHistory,
+  findLastHistoryView,
+  markEventHistoryViewed,
   toHistoryEntry,
   toChangeList,
   encodeHistoryCursor,

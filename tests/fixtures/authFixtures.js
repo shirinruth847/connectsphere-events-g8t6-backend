@@ -282,6 +282,7 @@ const verifyManifestClean = async (manifest) => {
   const tables = [
     ["registration", "registration_id", manifest.registrationIds],
     ["venue_booking", "booking_id", manifest.bookingIds],
+    ["clarifications", "event_id", eventIds],
     ["notification", "event_id", eventIds],
     ["event_assignments", "event_id", eventIds],
     ["event_venue_preference", "event_id", eventIds],
@@ -336,6 +337,13 @@ const cleanupManifest = async (manifest) => {
   const eventIds = manifest.eventIds || [];
   await deleteIn("registration", "registration_id", manifest.registrationIds);
   await deleteIn("venue_booking", "booking_id", manifest.bookingIds);
+  // Clarification rounds block event deletion and are removable only through the
+  // privileged test connection (SPM-41).
+  if (eventIds.length) {
+    const { count, error } = await supabase.from("clarifications").select("clarification_id", { count: "exact", head: true }).in("event_id", eventIds);
+    if (error) throw error;
+    if (count) await require("./adminCleanup").deleteFixtureClarifications(manifest);
+  }
   await deleteIn("notification", "event_id", eventIds);
   // Assignment history references the event without a cascade.
   await deleteIn("event_assignments", "event_id", eventIds);
@@ -343,6 +351,11 @@ const cleanupManifest = async (manifest) => {
   await deleteIn("event_venue_suggestion", "event_id", eventIds);
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);
+  // Venues and equipment before users: venue.created_by and updated_by reference
+  // the fixture user who made them (SPM-73), so retiring users first is refused.
+  await deleteIn("room", "room_id", manifest.roomIds);
+  await deleteIn("venue", "venue_id", manifest.venueIds);
+  await deleteIn("equipment", "equipment_id", manifest.equipmentIds || []);
   await deleteIn("organisation_membership", "user_id", manifest.userIds);
   if (manifest.userIds.length && process.env.TEST_DATABASE_URL) {
     const { count, error } = await supabase.from("activity_log").select("log_id", { count: "exact", head: true }).in("user_id", manifest.userIds);
@@ -350,9 +363,6 @@ const cleanupManifest = async (manifest) => {
     if (count) await require("./adminCleanup").deleteFixtureAudit(manifest);
   }
   await retireUsers(manifest.userIds);
-  await deleteIn("room", "room_id", manifest.roomIds);
-  await deleteIn("venue", "venue_id", manifest.venueIds);
-  await deleteIn("equipment", "equipment_id", manifest.equipmentIds || []);
   await deleteIn("organisation", "organisation_id", manifest.organisationIds);
   for (const authUserId of manifest.authUserIds) {
     const { error } = await supabase.auth.admin.deleteUser(authUserId);
