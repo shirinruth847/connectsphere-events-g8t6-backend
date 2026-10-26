@@ -124,9 +124,32 @@ const appendActivity = async ({ userId, entityName, entityId, action, details, c
   if (error) throw error;
 };
 
+// SPM-41 v2: when this person last viewed the event's history, or null, so the
+// history can mark what is new to them (per person, unlike SPM-181's browser copy).
+const findLastHistoryView = async (eventId, userId) => {
+  const { data, error } = await supabase
+    .from("event_history_views")
+    .select("last_viewed_at")
+    .eq("event_id", eventId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  return data ? data.last_viewed_at : null;
+};
+
+// Records that this person viewed the event's history now; returns the time.
+// Callers check first that the viewer may see the event's history.
+const markEventHistoryViewed = async (eventId, userId) => {
+  const { data, error } = await supabase.rpc("mark_event_history_viewed", { p_event_id: eventId, p_actor_id: userId });
+  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  return data;
+};
+
 module.exports = {
   appendActivity,
   findEventHistory,
+  findLastHistoryView,
+  markEventHistoryViewed,
   toHistoryEntry,
   toChangeList,
   encodeHistoryCursor,

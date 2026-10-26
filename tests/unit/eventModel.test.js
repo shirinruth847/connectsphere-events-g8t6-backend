@@ -331,6 +331,7 @@ describe("reads", () => {
     const queries = {
       venue: queryReturning({ data: [{ venue_id: 1, name: "Hall" }], error: null }),
       room: queryReturning({ data: [{ layout_type: "THEATRE" }], error: null }),
+      equipment: queryReturning({ data: [{ equipment_id: 7, name: "Projector", total_quantity: 20 }], error: null }),
     };
     supabase.from.mockImplementation((table) => queries[table]);
 
@@ -339,6 +340,8 @@ describe("reads", () => {
     expect(queries.venue.eq).toHaveBeenCalledWith("is_active", true);
     expect(queries.venue.eq).toHaveBeenCalledWith("status", "ACTIVE");
     expect(options.venues).toEqual([{ venueId: 1, name: "Hall" }]);
+    expect(options.equipment).toEqual([{ equipmentId: 7, name: "Projector" }]);
+    expect(queries.equipment.select).toHaveBeenCalledWith("equipment_id,name");
   });
 
   test("[EVT-PERF-001] should_not_query_the_database_when_no_catalogue_fields_are_sent", async () => {
@@ -409,8 +412,8 @@ describe("Attendee discovery and registration availability", () => {
     ...overrides,
   });
 
-  test.each(["CONFIRMED", "PREPARATION"])("[SPM-126] should_include_published_%s_events_in_list_and_detail", async (status) => {
-    const row = discoveryRow({ status, registration: [{ count: 0 }] });
+  test("[SPM-44] should_query_only_published_confirmed_events_in_list_and_detail", async () => {
+    const row = discoveryRow({ status: "CONFIRMED", registration: [{ count: 0 }] });
     const list = queryReturning({ data: [row], error: null });
     const detail = queryReturning({ data: row, error: null });
     supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(detail);
@@ -419,7 +422,9 @@ describe("Attendee discovery and registration availability", () => {
     expect((await eventModel.findPublishedAttendeeEvent(7)).registrationAvailability).toBe("OPEN");
     for (const query of [list, detail]) {
       expect(query.eq).toHaveBeenCalledWith("is_published", true);
-      expect(query.in).toHaveBeenCalledWith("status", ["CONFIRMED", "PREPARATION"]);
+      expect(query.eq).toHaveBeenCalledWith("status", "CONFIRMED");
+      expect(query.eq).not.toHaveBeenCalledWith("status", "PREPARATION");
+      expect(query.in).not.toHaveBeenCalledWith("status", expect.arrayContaining(["PREPARATION"]));
     }
   });
 
