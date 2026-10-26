@@ -47,7 +47,7 @@ const signIn = async (key) => {
 };
 
 const bearer = (session) => `Bearer ${session.access_token}`;
-const getCatalogue = async (key = "coordinator") =>
+const getCatalogue = async (key = "venueStaff") =>
   request(app).get("/api/venues").set("Authorization", bearer(await signIn(key)));
 
 const insertVenue = async (label, row) => {
@@ -71,8 +71,10 @@ const insertRoom = async (venueId, layoutType, capacity) => {
   recordFixtureIds(runId, "roomIds", [room.room_id]);
 };
 
-const READ_ROLES = ["coordinator", "coordinatorLead", "venueStaff"];
-const DENIED_ROLES = ["organiserA", "attendee", "techSupport"];
+// Coordinators and Leads browse venues inside each event (SPM-72/74); see
+// eventVenueOptions.integration.test.js.
+const READ_ROLES = ["venueStaff"];
+const DENIED_ROLES = ["coordinator", "coordinatorLead", "organiserA", "attendee", "techSupport"];
 
 beforeAll(async () => {
   mongoServer = await MongoMemoryServer.create();

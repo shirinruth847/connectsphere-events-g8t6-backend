@@ -39,4 +39,17 @@ const findCalendarEntries = async (venueIds, from, to) => {
   return documents.map(toEntry);
 };
 
-module.exports = { findCalendarEntries };
+// SPM-199: only this event's holds, including expired/converted/released ones.
+// Staff notes, creator IDs and other events never leave this read projection.
+const findEventHolds = async (eventId) => {
+  const db = await getMongoDb();
+  const documents = await db.collection("venue_calendar")
+    .find({ eventId, type: "HOLD" }, { projection: {
+      venueId: 1, type: 1, status: 1, start: 1, end: 1, occupiedStart: 1,
+      occupiedEnd: 1, eventId: 1, label: 1, holdExpiresAt: 1,
+    } })
+    .sort({ start: 1, _id: 1 }).toArray();
+  return documents.map(toEntry);
+};
+
+module.exports = { findCalendarEntries, findEventHolds };

@@ -93,6 +93,8 @@ const EVENT_RELATIONSHIP = Object.freeze({
   ORGANISATION_MEMBER: "ORGANISATION_MEMBER",
   ASSIGNED_COORDINATOR: "ASSIGNED_COORDINATOR",
   SAFETY_OFFICER: "SAFETY_OFFICER", // the event has a round in their queue, held or decided by them (SPM-243 AC2)
+  // The Lead who made the current assignment, read-only (Master 4.2, T19, T23).
+  SUPERVISING_LEAD: "SUPERVISING_LEAD",
 });
 
 // Who may read a change-history entry. Values match activity_log.audience.
@@ -146,6 +148,10 @@ const OWNER_DRAFT_FIELDS = Object.freeze([
 // Statuses in which the assigned coordinator may edit ordinary fields, in Master
 // section 5.2 lifecycle order. SUBMITTED is absent because an event in it has no
 // coordinator, and there is no APPROVED state.
+// Where the assigned coordinator may suggest a venue to the organiser (SPM-72/74);
+// suggest_event_venue checks the same list.
+const VENUE_SUGGESTION_STATUSES = Object.freeze(["UNDER_REVIEW", "PLANNING"]);
+
 const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "UNDER_REVIEW",
   "PLANNING",
@@ -153,6 +159,15 @@ const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "CONFIRMED",
   "PREPARATION",
 ]);
+
+// SPM-41: the coordinator's opening question and every thread message are
+// required and at most this long (team decision, 2026-10-20).
+const CLARIFICATION_TEXT_LIMIT = 2000;
+
+// What the owner may amend while a clarification thread is open: every
+// submission field except registration settings and the organisation (team
+// decision). These changes skip the change workflow (Master 5.2).
+const AMENDMENT_FIELDS = Object.freeze([...EVENT_FIELD_GROUPS.ORDINARY, ...EVENT_FIELD_GROUPS.SIGNIFICANT]);
 
 // safety_reviews.status values (Master 6.2).
 const SAFETY_ROUND_STATUS = Object.freeze({
@@ -216,6 +231,9 @@ module.exports = {
   EVENT_FIELD_GROUPS,
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,
+  CLARIFICATION_TEXT_LIMIT,
+  AMENDMENT_FIELDS,
   SAFETY_ROUND_STATUS,
   SAFETY_REVIEW_HISTORY_FIELDS,
+  VENUE_SUGGESTION_STATUSES,
 };
