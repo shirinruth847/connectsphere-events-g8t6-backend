@@ -171,6 +171,11 @@ describe("viewing by role and relationship (AC1)", () => {
       editableFields: [],
       canViewDraftHistory: false,
       canViewStaffHistory: false,
+      // SPM-41: a same-organisation organiser never acts in the clarification loop.
+      canRequestClarification: false,
+      canPostClarificationMessage: false,
+      canSaveAmendments: false,
+      canCompleteClarification: false,
     });
     for (const hidden of ["coordinatorId", "organiser", "registrations", "participants"]) {
       expect(event).not.toHaveProperty(hidden);
@@ -236,6 +241,11 @@ describe("viewing by role and relationship (AC1)", () => {
       editableFields: [],
       canViewDraftHistory: false,
       canViewStaffHistory: true,
+      // SPM-41: clarification starts only from UNDER_REVIEW, so nothing applies here.
+      canRequestClarification: false,
+      canPostClarificationMessage: false,
+      canSaveAmendments: false,
+      canCompleteClarification: false,
     });
     expect((await call("get", `/api/events/${eventId}/history`, "coordinator")).status).toBe(200);
   });
