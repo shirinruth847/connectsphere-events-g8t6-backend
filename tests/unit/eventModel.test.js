@@ -434,8 +434,8 @@ describe("Attendee discovery and registration availability", () => {
     ...overrides,
   });
 
-  test.each(["CONFIRMED", "PREPARATION"])("[SPM-126] should_include_published_%s_events_in_list_and_detail", async (status) => {
-    const row = discoveryRow({ status, registration: [{ count: 0 }] });
+  test("[SPM-44] should_query_only_published_confirmed_events_in_list_and_detail", async () => {
+    const row = discoveryRow({ status: "CONFIRMED", registration: [{ count: 0 }] });
     const list = queryReturning({ data: [row], error: null });
     const detail = queryReturning({ data: row, error: null });
     supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(detail);
@@ -444,7 +444,9 @@ describe("Attendee discovery and registration availability", () => {
     expect((await eventModel.findPublishedAttendeeEvent(7)).registrationAvailability).toBe("OPEN");
     for (const query of [list, detail]) {
       expect(query.eq).toHaveBeenCalledWith("is_published", true);
-      expect(query.in).toHaveBeenCalledWith("status", ["CONFIRMED", "PREPARATION"]);
+      expect(query.eq).toHaveBeenCalledWith("status", "CONFIRMED");
+      expect(query.eq).not.toHaveBeenCalledWith("status", "PREPARATION");
+      expect(query.in).not.toHaveBeenCalledWith("status", expect.arrayContaining(["PREPARATION"]));
     }
   });
 
