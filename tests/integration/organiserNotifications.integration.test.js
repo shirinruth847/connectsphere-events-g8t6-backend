@@ -149,10 +149,13 @@ describe("an organiser's request through its notifications (SPM-192)", () => {
     expect(latest.message).not.toMatch(/previousCoordinatorId|reason|spm32 coordinator(?!Two)/i);
   });
 
-  // Enable when the reassignment wording change (SPM-192 M2) is applied.
-  test.skip("[SPM-192-TC-06/AC4] the reassignment notice names the new coordinator", async () => {
+  test("[SPM-192-TC-06/AC4] the reassignment notice names the new coordinator as the point of contact", async () => {
     const [latest] = await noticesAbout("organiserA", eventId);
-    expect(latest.message).toContain("spm32 coordinatorTwo");
+    expect(latest.title).toBe("Event coordinator changed");
+    expect(latest.message).toBe(
+      `Your event request ${requestId(eventId)} "spm32-${runId} E1" has a new coordinator, spm32 coordinatorTwo, who is now your point of contact.`
+    );
+    expect(latest.message).not.toMatch(/reason|previous/i);
   });
 
   test("[SPM-192-TC-09/AC9] every notice is newest first and opens the event workspace with the latest status", async () => {
