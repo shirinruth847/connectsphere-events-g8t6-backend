@@ -8,7 +8,7 @@ const outboxModel = require("../../model/outboxModel");
 const { runMongoSync, readIntervalMs } = require("../../jobs/mongoSyncJob");
 const { OUTBOX } = require("../../config/equipmentConstants");
 
-const entry = (id, extra = {}) => ({ entry_id: id, target_collection: "equipment_details", document_id: "41", pg_version: 2, payload: { name: "Mixer" }, ...extra });
+const entry = (id, extra = {}) => ({ entry_id: id, claim_generation: 3, target_collection: "equipment_details", document_id: "41", pg_version: 2, payload: { name: "Mixer" }, ...extra });
 
 // rpc(name, args) answers from a table of handlers.
 const rpcAnswers = (handlers) => {
@@ -24,13 +24,34 @@ beforeEach(() => {
 });
 
 describe("SPM-52 applying entries", () => {
+  test("should_not_apply_an_entry_without_claim_ownership", async () => {
+    await expect(outboxModel.applyEntry(entry(7, { claim_generation: undefined }))).rejects.toThrow("claim generation");
+    expect(equipmentDetailModel.applyEquipmentDetail).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  test("should_report_a_stale_claim_when_completion_loses_ownership", async () => {
+    rpcAnswers({ complete_outbox_entry: () => false });
+    await expect(outboxModel.applyEntry(entry(7))).resolves.toBe("STALE_CLAIM");
+    expect(supabase.rpc).toHaveBeenCalledWith("complete_outbox_entry", { p_entry_id: 7, p_claim_generation: 3 });
+  });
+
+  test("should_report_a_stale_claim_when_failure_loses_ownership", async () => {
+    equipmentDetailModel.applyEquipmentDetail.mockRejectedValue(new Error("invalid document"));
+    rpcAnswers({ fail_outbox_entry: () => null });
+    await expect(outboxModel.applyEntry(entry(7))).resolves.toBe("STALE_CLAIM");
+    expect(supabase.rpc).toHaveBeenCalledWith("fail_outbox_entry", {
+      p_entry_id: 7, p_claim_generation: 3, p_error: "Error: invalid document", p_max_attempts: OUTBOX.MAX_ATTEMPTS,
+    });
+  });
+
   test("[AC10] should_apply_then_mark_the_entry_applied", async () => {
     rpcAnswers({ complete_outbox_entry: () => true });
 
     await expect(outboxModel.applyEntry(entry(7))).resolves.toBe("APPLIED");
 
     expect(equipmentDetailModel.applyEquipmentDetail).toHaveBeenCalledWith({ equipmentId: "41", pgVersion: 2, payload: { name: "Mixer" } });
-    expect(supabase.rpc).toHaveBeenCalledWith("complete_outbox_entry", { p_entry_id: 7 });
+    expect(supabase.rpc).toHaveBeenCalledWith("complete_outbox_entry", { p_entry_id: 7, p_claim_generation: 3 });
   });
 
   test.each([
@@ -49,6 +70,7 @@ describe("SPM-52 applying entries", () => {
 
     expect(supabase.rpc).toHaveBeenCalledWith("release_outbox_entry", {
       p_entry_id: 7,
+      p_claim_generation: 3,
       p_error: expect.stringContaining(error.message),
       p_retry_seconds: OUTBOX.RETRY_SECONDS,
     });
@@ -64,6 +86,7 @@ describe("SPM-52 applying entries", () => {
 
     expect(supabase.rpc).toHaveBeenCalledWith("fail_outbox_entry", {
       p_entry_id: 7,
+      p_claim_generation: 3,
       p_error: "MongoServerError: Document failed validation",
       p_max_attempts: OUTBOX.MAX_ATTEMPTS,
     });

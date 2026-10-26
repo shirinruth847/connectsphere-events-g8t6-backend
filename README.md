@@ -160,6 +160,23 @@ Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-che
 
 Technical Support only, reads included; every other role gets `403 FORBIDDEN`, and the database re-checks the role inside each write. Needs migrations `20261024045601_spm52_equipment_catalogue`, `20261024050100_spm52_event_equipment_selectable` and `20261026100000_spm52_outbox_retry_and_past_segments`, and MongoDB script `0004_equipment_details`.
 
+Outbox claim ownership additionally requires
+`20261027100000_spm52_outbox_claim_ownership`. It adds a claim generation and
+requires that generation when completing, failing or releasing an entry. A stale
+worker cannot clear a replacement worker's lease or consume its retry budget.
+Late success is accepted only for the latest generation, including after its
+last abandoned attempt was marked failed. MongoDB's version check still makes
+replayed document writes safe.
+
+Deploy this change with all sync workers and equipment-write handlers stopped:
+apply the migration, deploy the updated backend everywhere, then restart them.
+The old result RPC signatures are removed deliberately; older workers cannot
+bypass ownership checks. The migration retains payloads, states and attempts,
+and has not been applied to the shared database by this change. On rollback,
+stop the updated workers before reverting code; the older backend requires its
+old RPC contract, so coordinate a database rollback rather than running mixed
+worker versions. Do not delete outbox history or MongoDB details.
+
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
 | `GET /api/equipment` | `?search=` (name, ignores letter case), `?category=`, `?status=ACTIVE\|INACTIVE\|DETAILS_PENDING`, `?limit=1..100` (default 50), `?offset=` | `200 { equipment: [item], nextOffset }`, by name | `400 VALIDATION_FAILED` |

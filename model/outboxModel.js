@@ -47,12 +47,15 @@ const isMongoUnreachable = (error) => UNREACHABLE_CODES.has(error?.code) || UNRE
 const UNREACHABLE = "UNREACHABLE";
 
 const releaseEntry = (entry, error) =>
-  callRpc("release_outbox_entry", { p_entry_id: entry.entry_id, p_error: describeFailure(error), p_retry_seconds: OUTBOX.RETRY_SECONDS });
+  callRpc("release_outbox_entry", { p_entry_id: entry.entry_id, p_claim_generation: entry.claim_generation, p_error: describeFailure(error), p_retry_seconds: OUTBOX.RETRY_SECONDS });
 
 // Applies one claimed entry and records the outcome. Returns APPLIED, PENDING
 // (will be retried), FAILED (gave up after the attempt limit) or UNREACHABLE
-// (MongoDB could not be reached; handed back without counting an attempt).
+// (MongoDB could not be reached; handed back without counting an attempt), or
+// STALE_CLAIM when another worker owns the result. Every result carries the
+// generation returned by the claim, so an expired worker cannot change it.
 const applyEntry = async (entry, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
+  if (entry.claim_generation == null) throw new Error("Outbox entry has no claim generation; apply the claim-ownership migration first.");
   const apply = APPLIERS[entry.target_collection];
   try {
     if (!apply) throw new Error(`No applier for ${entry.target_collection}`);
@@ -64,12 +67,13 @@ const applyEntry = async (entry, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
     }
     return (await callRpc("fail_outbox_entry", {
       p_entry_id: entry.entry_id,
+      p_claim_generation: entry.claim_generation,
       p_error: describeFailure(error),
       p_max_attempts: maxAttempts,
-    })) || OUTBOX_STATE.PENDING;
+    })) || "STALE_CLAIM";
   }
-  await callRpc("complete_outbox_entry", { p_entry_id: entry.entry_id });
-  return OUTBOX_STATE.APPLIED;
+  const completed = await callRpc("complete_outbox_entry", { p_entry_id: entry.entry_id, p_claim_generation: entry.claim_generation });
+  return completed ? OUTBOX_STATE.APPLIED : "STALE_CLAIM";
 };
 
 // The request handler's one attempt right after commit (Master 7.3 step 2).
