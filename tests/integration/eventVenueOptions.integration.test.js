@@ -3,7 +3,7 @@
 // MongoDB is a local in-memory server (Master M7). Fixtures are synthetic,
 // namespaced by run ID and removed afterwards.
 const request = require("supertest");
-const { MongoMemoryServer } = require("mongodb-memory-server");
+const { MongoMemoryReplSet } = require("mongodb-memory-server");
 const app = require("../../server");
 const supabase = require("../../config/supabase");
 const { getMongoDb, closeMongoDb } = require("../../config/mongodb");
@@ -83,7 +83,7 @@ const details = (venueId, extra = {}) => ({
 });
 
 beforeAll(async () => {
-  mongoServer = await MongoMemoryServer.create();
+  mongoServer = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: "wiredTiger" } });
   process.env.MONGODB_URI = mongoServer.getUri();
   process.env.MONGODB_DB_NAME = `spm72v_${runId}`;
 

@@ -166,6 +166,8 @@ Venue Staff only (`401` without a token, `403` for every other role). Photos liv
 - **Audit:** each change appends a `STAFF_ONLY` `activity_log` entry (`VENUE_PHOTO_ADDED`, `VENUE_PHOTO_UPDATED`, `VENUE_PHOTO_REPLACED`, `VENUE_PHOTO_DELETED`) after the MongoDB write; if the append fails, the change stands and the failure is logged.
 - **Cover:** `GET /api/venues/manage` rows carry `coverPhotoId` (the first photo, or `null`; `null` for every row when MongoDB is down).
 
+- **Concurrent photo edits:** migration `0005_venue_photo_galleries` adds a per-venue transaction guard. Upload, reorder, replacement and deletion share a MongoDB transaction, so the 20-photo limit and positions are checked against the latest committed gallery. Requires a replica set (Atlas or local `MongoMemoryReplSet`). Run `npm run mongo:migrate` before deploying this code; no photo backfill is needed. Deploy all backend instances together so older writers cannot bypass the guard. The migration has not been applied by this change. Rollback: stop gallery writes before reverting the code; retain guard documents until no transactional writer remains.
+
 ### Venue Availability Calendar (SPM-74)
 
 | Method & path | Access | Input | Success | Errors |
