@@ -98,6 +98,14 @@ The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/
 
 ### Choosing a Venue (SPM-72, SPM-74, SPM-75)
 
+The pending venue-suggestion migration extends the existing idempotency-operation
+constraint rather than replacing it with an older operation list. This preserves
+clarification commands and replay records when upgrading a database that already
+has the newer SPM-41 migrations. Already-applied migrations do not rerun: inspect
+the target's migration history and constraint before deployment; do not replay the
+whole suggestion migration against its existing table. This source fix does not
+repair a database whose constraint was previously narrowed.
+
 Coordinators and Leads search and browse venues inside each event request, starting from the organiser's ranked venue preferences. There is no separate catalogue page for them. `requireVisibleEvent` answers `404` unless the caller is the event's assigned coordinator or its supervising Lead (the Lead who made the open assignment, or any Lead for an event assigned before supervision, Master T23).
 
 | Method & path | Access | Input | Success | Errors |

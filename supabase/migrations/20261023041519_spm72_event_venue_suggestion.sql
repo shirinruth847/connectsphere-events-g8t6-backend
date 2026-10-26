@@ -7,15 +7,28 @@
 -- The VENUE_SUGGESTION notification type is added by 20261023041402, which
 -- must commit first: a new enum value cannot be used in the same transaction.
 
--- Keeps every operation allowed on the development project on 2026-10-23
--- (including safety.decide from the safety-review branch) and adds this one.
-ALTER TABLE public.idempotency_records
-  DROP CONSTRAINT idempotency_records_operation_check,
-  ADD CONSTRAINT idempotency_records_operation_check CHECK (operation IN (
-    'event.create_draft', 'event.create_and_submit', 'event.update_draft', 'event.update_details',
-    'event.submit_for_safety_review', 'event.confirm', 'event.start_preparation', 'event.complete',
-    'safety.decide', 'event.suggest_venue'
-  ));
+-- Keeps every operation already allowed, including operations from newer
+-- branches when this pending migration is applied after them. A historical
+-- hard-coded list would reject clarification replay rows or disable commands.
+DO $idempotency_operations$
+DECLARE
+  v_existing_check text;
+BEGIN
+  LOCK TABLE public.idempotency_records IN ACCESS EXCLUSIVE MODE;
+  SELECT pg_get_expr(conbin, conrelid) INTO STRICT v_existing_check
+    FROM pg_constraint
+   WHERE conrelid = 'public.idempotency_records'::regclass
+     AND conname = 'idempotency_records_operation_check'
+     AND contype = 'c';
+
+  EXECUTE format(
+    'ALTER TABLE public.idempotency_records
+       DROP CONSTRAINT idempotency_records_operation_check,
+       ADD CONSTRAINT idempotency_records_operation_check CHECK ((%s) OR operation = %L)',
+    v_existing_check, 'event.suggest_venue'
+  );
+END;
+$idempotency_operations$;
 
 -- One current suggestion per event; history is the activity_log entries.
 CREATE TABLE public.event_venue_suggestion (
