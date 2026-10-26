@@ -227,14 +227,17 @@ const toVenueSuggestion = (suggestion) => {
   };
 };
 
-const STAFF_RELATIONSHIPS = [EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR, EVENT_RELATIONSHIP.SUPERVISING_LEAD, EVENT_RELATIONSHIP.SAFETY_OFFICER];
+// Staff see the stored status; organisers see only the label (SPM-173 AC6).
+const STAFF_RELATIONSHIPS = new Set([EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR, EVENT_RELATIONSHIP.SUPERVISING_LEAD, EVENT_RELATIONSHIP.SAFETY_OFFICER]);
+// The assigned coordinator and the supervising Lead see who organised the
+// event (SPM-72 AC2); the Safety Officer does not (SPM-243 TC-03).
+const COORDINATION_RELATIONSHIPS = new Set([EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR, EVENT_RELATIONSHIP.SUPERVISING_LEAD]);
 
 const toEventView = (row, user, access) => ({
   ...toApi(row, user.user_id, {
-    includeStoredStatus: STAFF_RELATIONSHIPS.includes(access.relationship),
     includeStoredStatus: STAFF_RELATIONSHIPS.has(access.relationship),
   }),
-  ...(STAFF_RELATIONSHIPS.includes(access.relationship)
+  ...(COORDINATION_RELATIONSHIPS.has(access.relationship)
     ? {
         coordinatorId: row.coordinator_id,
         organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
@@ -255,6 +258,10 @@ const toEventView = (row, user, access) => ({
     editableFields: access.editableFields,
     canViewDraftHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.OWNER_ONLY),
     canViewStaffHistory: access.historyAudiences.includes(HISTORY_AUDIENCE.STAFF_ONLY),
+    canRequestClarification: access.canRequestClarification === true,
+    canPostClarificationMessage: access.canPostClarificationMessage === true,
+    canSaveAmendments: access.canSaveAmendments === true,
+    canCompleteClarification: access.canCompleteClarification === true,
     canSuggestVenue: access.canSuggestVenue === true,
   },
 });

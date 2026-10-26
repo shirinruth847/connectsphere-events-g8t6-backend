@@ -211,6 +211,28 @@ describe("organiser status note (SPM-33)", () => {
     expect(eventModel.toApi({ event_id: 7, status: "UNDER_REVIEW" }, undefined, { includeStoredStatus: true }))
       .toEqual(expect.objectContaining({ status: "UNDER_REVIEW", statusLabel: "Under Review" }));
   });
+
+  test("[SPM-72-AC2] should_show_the_supervising_lead_the_stored_state_and_organiser_with_every_permission_flag", () => {
+    const view = eventModel.toEventView(
+      { event_id: 7, status: "PLANNING", coordinator_id: 5, organiser: { user_id: 9, name: "Synthetic Organiser" } },
+      { user_id: 12 },
+      { relationship: "SUPERVISING_LEAD", canEdit: false, editableFields: [], historyAudiences: ["ORGANISER_SAFE", "STAFF_ONLY"] },
+    );
+
+    expect(view).toEqual(expect.objectContaining({ status: "PLANNING", coordinatorId: 5, organiser: { userId: 9, name: "Synthetic Organiser" } }));
+    // Read-only: every clarification and venue flag is present and false.
+    expect(view.permissions).toEqual({
+      canEdit: false,
+      editableFields: [],
+      canViewDraftHistory: false,
+      canViewStaffHistory: true,
+      canRequestClarification: false,
+      canPostClarificationMessage: false,
+      canSaveAmendments: false,
+      canCompleteClarification: false,
+      canSuggestVenue: false,
+    });
+  });
 });
 
 describe("reads", () => {
