@@ -1042,7 +1042,7 @@ const toBookingListItem = (row) => ({
 
 const DECISION_CLOSED_EVENT_STATUSES = new Set([EVENT_STATUS.COMPLETED, EVENT_STATUS.CANCELLED, EVENT_STATUS.REJECTED]);
 
-// Which decisions Venue Staff may take now (SPM-186 AC4, SPM-189 AC6, T31):
+// Which decisions Venue Staff may take now (SPM-186 AC4, SPM-189 AC6, T32):
 // the database re-checks every rule when the decision is submitted.
 const toDecisionActions = (row, eventStatus, now) => {
   const eventOpen = !DECISION_CLOSED_EVENT_STATUSES.has(eventStatus);
@@ -1215,7 +1215,7 @@ const findVenueBooking = async (bookingId) => {
   };
 };
 
-// ---------- venue booking decisions (SPM-186, SPM-189, T31) ----------
+// ---------- venue booking decisions (SPM-186, SPM-189, T32) ----------
 
 const findBookingForDecision = async (bookingId) => {
   const { data, error } = await supabase

@@ -152,7 +152,7 @@ describe("POST /api/venues/bookings/:bookingId/reject (SPM-189)", () => {
     });
   });
 
-  test("[T31] should_allow_rejecting_an_approved_booking_with_a_reason", async () => {
+  test("[T32] should_allow_rejecting_an_approved_booking_with_a_reason", async () => {
     const response = await post("/api/venues/bookings/110/reject", { reason: "Emergency roof repair", expectedStatus: "APPROVED" });
 
     expect(response.status).toBe(200);

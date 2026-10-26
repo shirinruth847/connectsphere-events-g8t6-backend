@@ -223,7 +223,7 @@ describe("rejectVenueBooking", () => {
   });
 });
 
-describe("decision actions on the booking view (SPM-186 AC4, SPM-189 AC6, T31)", () => {
+describe("decision actions on the booking view (SPM-186 AC4, SPM-189 AC6, T32)", () => {
   const actionsFor = async (row, eventStatus) => {
     supabase.from.mockImplementation((table) =>
       table === "event" ? queryReturning({ data: eventRow(eventStatus), error: null }) : queryReturning({ data: [row], error: null }));
@@ -244,7 +244,7 @@ describe("decision actions on the booking view (SPM-186 AC4, SPM-189 AC6, T31)",
   });
 });
 
-describe("setVenueStatus (Master 5.4.4, T31)", () => {
+describe("setVenueStatus (Master 5.4.4, T32)", () => {
   const venueRow = { venue_id: 7, name: "Hall A", status: "INACTIVE", version: 2, created_by: null, updated_by: null };
   const affected = [{ eventId: 442, requestId: "REQ-000442", title: "Planning summit", status: "CONFIRMED", firstStart: FUTURE_START, bookings: 1, extra: "dropped" }];
 

@@ -293,7 +293,7 @@ describe("SPM-189 reject a venue booking", () => {
     expect(again.body).toEqual(expect.objectContaining({ code: "BOOKING_ALREADY_DECIDED", currentStatus: "REJECTED" }));
   });
 
-  test("[T31] should_reject_an_approved_future_booking_and_keep_the_confirmed_event", async () => {
+  test("[T32] should_reject_an_approved_future_booking_and_keep_the_confirmed_event", async () => {
     const target = await insertBooking("Closing", "registeredConfirmed", "2027-09-01T10:00:00Z", "2027-09-01T11:00:00Z", { status: "APPROVED" });
     const before = await eventRow("registeredConfirmed");
 
@@ -309,7 +309,7 @@ describe("SPM-189 reject a venue booking", () => {
     expect(sent[1].message).toContain("not cancelled");
   });
 
-  test("[T31] should_refuse_rejecting_an_approved_booking_that_has_started", async () => {
+  test("[T32] should_refuse_rejecting_an_approved_booking_that_has_started", async () => {
     const target = await insertBooking("Small", "registeredPlanning", "2020-01-01T10:00:00Z", "2099-01-01T11:00:00Z", {
       status: "APPROVED", expected_attendance: 20,
     });
@@ -321,7 +321,7 @@ describe("SPM-189 reject a venue booking", () => {
   });
 });
 
-describe("Venue taken out of service with upcoming bookings (Master 5.4.4, T31)", () => {
+describe("Venue taken out of service with upcoming bookings (Master 5.4.4, T32)", () => {
   test("should_warn_with_the_affected_events_then_keep_bookings_and_alert_coordinators_and_organisers", async () => {
     const pending = await insertBooking("Closing", "reassignable", "2027-10-01T10:00:00Z", "2027-10-01T11:00:00Z");
     const { data: venue } = await supabase.from("venue").select("version").eq("venue_id", venues.Closing).single();
