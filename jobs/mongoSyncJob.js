@@ -3,20 +3,24 @@
 // are claimed with a lease (FOR UPDATE SKIP LOCKED, database time), applied
 // conditionally on pg_version, retried with backoff and marked FAILED after a
 // bounded number of attempts, so a late, repeated or parallel run never
-// applies an entry twice or out of order.
+// applies an entry twice or out of order. A run that cannot reach MongoDB
+// claims nothing, so it never uses up the attempts of other developers' entries
+// in the shared outbox.
 // Run once by hand: npm run mongo:sync
 const outboxModel = require("../model/outboxModel");
 const { OUTBOX } = require("../config/equipmentConstants");
 
-// Drains a backlog (e.g. after MongoDB was down) in bounded batches.
+// Drains a backlog (e.g. after MongoDB was down) in bounded batches. Returns
+// { processed, unreachable }.
 const runMongoSync = async () => {
-  let total = 0;
+  let processed = 0;
   for (let batch = 0; batch < OUTBOX.MAX_BATCHES_PER_RUN; batch += 1) {
-    const claimed = await outboxModel.processDueEntries(OUTBOX.BATCH_SIZE);
-    total += claimed;
+    const { claimed, unreachable } = await outboxModel.processDueEntries(OUTBOX.BATCH_SIZE);
+    processed += claimed;
+    if (unreachable) return { processed, unreachable: true };
     if (claimed < OUTBOX.BATCH_SIZE) break;
   }
-  return total;
+  return { processed, unreachable: false };
 };
 
 // MONGO_SYNC_INTERVAL_MS sets the period; 0 turns the job off.
@@ -31,12 +35,16 @@ const readIntervalMs = () => {
 const startMongoSyncJob = (intervalMs = readIntervalMs()) => {
   if (intervalMs === 0) return null;
   let running = false;
+  let wasUnreachable = false;
   const tick = async () => {
     if (running) return;
     running = true;
     try {
-      const processed = await runMongoSync();
+      const { processed, unreachable } = await runMongoSync();
       if (processed > 0) console.log(`[jobs] processed ${processed} MongoDB outbox entr${processed === 1 ? "y" : "ies"}`);
+      // Logged when it changes, not on every tick.
+      if (unreachable && !wasUnreachable) console.warn("[jobs] MongoDB is unreachable; outbox entries are left for a backend that can reach it");
+      wasUnreachable = unreachable;
     } catch (error) {
       console.error("[jobs] MongoDB sync failed", { message: String(error.message || "").slice(0, 200) });
     } finally {
@@ -52,7 +60,13 @@ const startMongoSyncJob = (intervalMs = readIntervalMs()) => {
 if (require.main === module) {
   const { closeMongoDb } = require("../config/mongodb");
   runMongoSync()
-    .then((processed) => console.log(`Processed ${processed} outbox entr${processed === 1 ? "y" : "ies"}.`))
+    .then(({ processed, unreachable }) => {
+      if (unreachable) {
+        console.error("MongoDB is unreachable; no outbox entries were applied.");
+        process.exitCode = 1;
+      }
+      console.log(`Processed ${processed} outbox entr${processed === 1 ? "y" : "ies"}.`);
+    })
     .catch((error) => {
       console.error("MongoDB sync failed:", error.message);
       process.exitCode = 1;

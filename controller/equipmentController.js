@@ -31,15 +31,29 @@ const equipmentNotFound = (res) => sendError(res, 404, "EQUIPMENT_NOT_FOUND", DO
 const unavailabilityNotFound = (res) =>
   sendError(res, 404, "UNAVAILABILITY_NOT_FOUND", DOMAIN_ERRORS.UNAVAILABILITY_NOT_FOUND[1]);
 
-const formatPeriod = (start, end) => `${start} to ${end}`;
+// Periods are named in Singapore time, as the Equipment page enters and shows
+// them: "Mon, 6 Jan 2031 · 17:00–18:00 SGT", or both dates across midnight. The
+// response also carries periodStart and periodEnd as instants.
+const SINGAPORE = "Asia/Singapore";
+const dateFormat = new Intl.DateTimeFormat("en-SG", { timeZone: SINGAPORE, weekday: "short", day: "numeric", month: "short", year: "numeric" });
+const timeFormat = new Intl.DateTimeFormat("en-SG", { timeZone: SINGAPORE, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
+const formatPeriod = (start, end) => {
+  const from = new Date(start);
+  const to = new Date(end);
+  if (dateFormat.format(from) === dateFormat.format(to)) {
+    return `${dateFormat.format(from)} · ${timeFormat.format(from)}–${timeFormat.format(to)} SGT`;
+  }
+  return `${dateFormat.format(from)} ${timeFormat.format(from)} – ${dateFormat.format(to)} ${timeFormat.format(to)} SGT`;
+};
 
 // SPM-52 AC7: the message names the committed quantity and period.
 const quantityCommittedMessage = ({ committedQuantity, periodStart, periodEnd }) =>
-  `${committedQuantity} unit${committedQuantity === 1 ? " is" : "s are"} unavailable from ${formatPeriod(periodStart, periodEnd)}, `
+  `${committedQuantity} unit${committedQuantity === 1 ? " is" : "s are"} unavailable during ${formatPeriod(periodStart, periodEnd)}, `
   + `so the total cannot be lower than ${committedQuantity}.`;
 
 const stockExceededMessage = ({ availableQuantity, periodStart, periodEnd }) =>
-  `Only ${availableQuantity} unit${availableQuantity === 1 ? " is" : "s are"} left to mark unavailable from `
+  `Only ${availableQuantity} unit${availableQuantity === 1 ? " is" : "s are"} left to mark unavailable during `
   + `${formatPeriod(periodStart, periodEnd)}. Unavailable stock cannot exceed the total.`;
 
 const upcomingRequestsMessage = ({ upcomingCount }) =>
@@ -53,10 +67,14 @@ const handleError = async (error, res, next, equipmentId) => {
     return sendError(res, 409, error.code, MESSAGES.nameTaken, { fields: { name: MESSAGES.nameTaken } });
   }
   if (error.code === "EQUIPMENT_VERSION_CONFLICT") {
-    // SPM-52 AC6: the refusal carries the current values so the client can reload.
-    const current = equipmentId ? await equipmentModel.findEquipmentSummary(equipmentId) : null;
+    // SPM-52 AC6: the refusal carries the current values, record and details, so
+    // the client can show them before reloading.
+    const [current, currentDetails] = equipmentId
+      ? await Promise.all([equipmentModel.findEquipmentSummary(equipmentId), equipmentModel.findCurrentDetails(equipmentId)])
+      : [null, null];
     return sendError(res, 409, error.code, "This equipment was changed after you loaded it. Review the current values, then try again.", {
       current,
+      currentDetails,
     });
   }
   if (error.code === "EQUIPMENT_QUANTITY_COMMITTED") {
@@ -88,7 +106,7 @@ const listEquipment = async (req, res, next) => {
 
 const listEquipmentOptions = async (req, res, next) => {
   try {
-    return res.status(200).json(await equipmentModel.listEquipmentCategories());
+    return res.status(200).json(await equipmentModel.listEquipmentOptions());
   } catch (err) {
     return next(err);
   }

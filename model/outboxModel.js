@@ -24,14 +24,39 @@ const callRpc = async (name, args) => {
 // hosts, never credentials, and the column is bounded anyway.
 const describeFailure = (error) => `${error.name || "Error"}: ${String(error.message || "").slice(0, 300)}`;
 
+// MongoDB could not be reached at all (not configured, refused, timed out).
+// That is an outage to retry, not an entry that keeps failing (Master 7.3), so
+// it never counts towards FAILED. Every developer's backend runs the sync job
+// against the shared outbox, so one without Atlas access must not use up the
+// attempts of everyone's entries.
+const UNREACHABLE_ERRORS = new Set([
+  "MongoServerSelectionError",
+  "MongoNetworkError",
+  "MongoNetworkTimeoutError",
+  "MongoTopologyClosedError",
+  "MongoNotConnectedError",
+]);
+const isMongoUnreachable = (error) => error?.code === "MONGODB_NOT_CONFIGURED" || UNREACHABLE_ERRORS.has(error?.name);
+
+// applyEntry result when MongoDB could not be reached.
+const UNREACHABLE = "UNREACHABLE";
+
+const releaseEntry = (entry, error) =>
+  callRpc("release_outbox_entry", { p_entry_id: entry.entry_id, p_error: describeFailure(error), p_retry_seconds: OUTBOX.RETRY_SECONDS });
+
 // Applies one claimed entry and records the outcome. Returns APPLIED, PENDING
-// (will be retried) or FAILED (gave up after the attempt limit).
+// (will be retried), FAILED (gave up after the attempt limit) or UNREACHABLE
+// (MongoDB could not be reached; handed back without counting an attempt).
 const applyEntry = async (entry, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
   const apply = APPLIERS[entry.target_collection];
   try {
     if (!apply) throw new Error(`No applier for ${entry.target_collection}`);
     await apply(entry);
   } catch (error) {
+    if (isMongoUnreachable(error)) {
+      await releaseEntry(entry, error);
+      return UNREACHABLE;
+    }
     return (await callRpc("fail_outbox_entry", {
       p_entry_id: entry.entry_id,
       p_error: describeFailure(error),
@@ -44,21 +69,47 @@ const applyEntry = async (entry, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
 
 // The request handler's one attempt right after commit (Master 7.3 step 2).
 // Returns null when the job already holds the entry.
-const applyEntryNow = async (entryId) => {
+const applyEntryNow = async (entryId, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
   if (!entryId) return null;
-  const claimed = await callRpc("claim_outbox_entry", { p_entry_id: entryId, p_lease_seconds: OUTBOX.LEASE_SECONDS });
+  const claimed = await callRpc("claim_outbox_entry", {
+    p_entry_id: entryId,
+    p_lease_seconds: OUTBOX.LEASE_SECONDS,
+    p_max_attempts: maxAttempts,
+  });
   if (!claimed || !claimed.length) return null;
-  return applyEntry(claimed[0]);
+  return applyEntry(claimed[0], maxAttempts);
 };
 
-// One batch for the sync job. Returns how many entries were claimed.
-const processDueEntries = async (limit = OUTBOX.BATCH_SIZE, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
-  const claimed = await callRpc("claim_outbox_entries", { p_limit: limit, p_lease_seconds: OUTBOX.LEASE_SECONDS });
-  const entries = claimed || [];
-  for (const entry of entries) {
-    await applyEntry(entry, maxAttempts);
+// True when the detail store answers. The job checks this before claiming, so a
+// backend that cannot reach MongoDB leaves the shared outbox untouched.
+const canReachDetailStore = async () => {
+  try {
+    await equipmentDetailModel.pingEquipmentDetails();
+    return true;
+  } catch (error) {
+    if (isMongoUnreachable(error)) return false;
+    throw error;
   }
-  return entries.length;
+};
+
+// One batch for the sync job: { claimed, unreachable }. When MongoDB stops
+// answering part-way, the rest of the batch is handed back at once rather than
+// each entry waiting for its own connection timeout.
+const processDueEntries = async (limit = OUTBOX.BATCH_SIZE, maxAttempts = OUTBOX.MAX_ATTEMPTS) => {
+  if (!(await canReachDetailStore())) return { claimed: 0, unreachable: true };
+  const entries = (await callRpc("claim_outbox_entries", {
+    p_limit: limit,
+    p_lease_seconds: OUTBOX.LEASE_SECONDS,
+    p_max_attempts: maxAttempts,
+  })) || [];
+  for (const [index, entry] of entries.entries()) {
+    if ((await applyEntry(entry, maxAttempts)) === UNREACHABLE) {
+      const error = Object.assign(new Error("MongoDB became unreachable during the batch"), { name: "MongoNetworkError" });
+      for (const rest of entries.slice(index + 1)) await releaseEntry(rest, error);
+      return { claimed: entries.length, unreachable: true };
+    }
+  }
+  return { claimed: entries.length, unreachable: false };
 };
 
 const selectEntries = async (targetCollection, documentIds, states) => {
@@ -99,4 +150,27 @@ const findUnappliedDocuments = async (targetCollection, documentIds) => {
   return behind;
 };
 
-module.exports = { applyEntry, applyEntryNow, processDueEntries, findUnappliedDocuments };
+// The payload of the document's newest entry: what PostgreSQL last wrote for it,
+// whether or not MongoDB has applied it yet. Null when it has no entry.
+const findLatestPayload = async (targetCollection, documentId) => {
+  const { data, error } = await supabase
+    .from("outbox_entries")
+    .select("payload")
+    .eq("target_collection", targetCollection)
+    .eq("document_id", String(documentId))
+    .order("pg_version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  return data ? data.payload : null;
+};
+
+module.exports = {
+  applyEntry,
+  applyEntryNow,
+  processDueEntries,
+  findUnappliedDocuments,
+  findLatestPayload,
+  isMongoUnreachable,
+  UNREACHABLE,
+};

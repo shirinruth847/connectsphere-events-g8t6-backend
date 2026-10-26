@@ -51,12 +51,15 @@ const OUTBOX_STATE = Object.freeze({
   FAILED: "FAILED",
 });
 
-// MongoDB sync (Master 7.3): batch size, lease and attempts before FAILED.
+// MongoDB sync (Master 7.3): batch size, lease, attempts before FAILED and the
+// delay before an entry handed back during an outage is due again.
+// MAX_ATTEMPTS matches the default of the claim and fail database functions.
 const OUTBOX = Object.freeze({
   BATCH_SIZE: 50,
   MAX_BATCHES_PER_RUN: 20,
   LEASE_SECONDS: 60,
   MAX_ATTEMPTS: 8,
+  RETRY_SECONDS: 30,
   DEFAULT_INTERVAL_MS: 30 * 1000,
 });
 

@@ -214,16 +214,23 @@ const listEquipment = async ({ search, category, status }, { limit, offset }) =>
   };
 };
 
-// Categories in use, for the filter. Read on demand, so a new or renamed
-// category appears in the next read.
-const listEquipmentCategories = async () => {
+const toOptions = (labels) => Object.entries(labels).map(([value, label]) => ({ value, label }));
+
+// The filter and form choices: categories in use (read on demand, so a new or
+// renamed category appears in the next read), and the statuses and
+// unavailability reasons with their labels, so the page never maps them itself.
+const listEquipmentOptions = async () => {
   const data = readData(await supabase.from("equipment").select("category"));
   const byKey = new Map();
   for (const { category } of data) {
     const key = category.toLowerCase();
     if (!byKey.has(key)) byKey.set(key, category);
   }
-  return { categories: [...byKey.values()].sort((a, b) => a.localeCompare(b)) };
+  return {
+    categories: [...byKey.values()].sort((a, b) => a.localeCompare(b)),
+    statuses: toOptions(EQUIPMENT_STATUS_LABELS),
+    unavailabilityReasons: toOptions(UNAVAILABILITY_REASON_LABELS),
+  };
 };
 
 const findEquipmentRow = async (equipmentId) => {
@@ -297,6 +304,18 @@ const getEquipment = async (equipmentId) => {
     detailsRead,
     unavailability: records.map((record) => toUnavailability(record, names)),
   };
+};
+
+// The detail values PostgreSQL last wrote (the newest outbox entry), for a stale
+// save's refusal. Read from PostgreSQL, so they are current even while MongoDB
+// is behind or down. Null for rows that never had an entry.
+const findCurrentDetails = async (equipmentId) => {
+  const payload = await outboxModel.findLatestPayload(DETAILS_COLLECTION, equipmentId);
+  return payload ? {
+    specifications: payload.specifications ?? null,
+    technicalNotes: payload.technicalNotes ?? null,
+    handlingNotes: payload.handlingNotes ?? null,
+  } : null;
 };
 
 // ---------- writes ----------
@@ -404,9 +423,10 @@ const endUnavailability = async ({ actorId, equipmentId, unavailabilityId, versi
 
 module.exports = {
   listEquipment,
-  listEquipmentCategories,
+  listEquipmentOptions,
   getEquipment,
   findEquipmentSummary,
+  findCurrentDetails,
   findUnavailabilityRow,
   createEquipment,
   updateEquipment,

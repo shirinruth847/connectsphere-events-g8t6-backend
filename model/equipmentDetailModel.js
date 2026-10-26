@@ -16,6 +16,12 @@ const DETAIL_PROJECTION = {
 // The document fields an outbox entry may set; anything else in a payload is ignored.
 const PAYLOAD_FIELDS = Object.freeze(["name", "category", "specifications", "technicalNotes", "handlingNotes"]);
 
+// Throws when MongoDB cannot be reached; the sync job checks this before claiming.
+const pingEquipmentDetails = async () => {
+  const db = await getMongoDb();
+  await db.command({ ping: 1 });
+};
+
 const getEquipmentDetail = async (equipmentId) => {
   const db = await getMongoDb();
   return db.collection(COLLECTION).findOne({ _id: String(equipmentId) }, { projection: DETAIL_PROJECTION });
@@ -44,4 +50,4 @@ const applyEquipmentDetail = async ({ equipmentId, pgVersion, payload }) => {
   }
 };
 
-module.exports = { getEquipmentDetail, applyEquipmentDetail, PAYLOAD_FIELDS };
+module.exports = { getEquipmentDetail, applyEquipmentDetail, pingEquipmentDetails, PAYLOAD_FIELDS };
