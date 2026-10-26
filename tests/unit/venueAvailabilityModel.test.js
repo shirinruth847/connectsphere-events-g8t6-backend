@@ -164,6 +164,27 @@ describe("getVenueAvailability (SPM-74)", () => {
     });
   });
 
+  test("event context excludes its own booking and hold but retains another event's hold", async () => {
+    mockStores(7);
+    supabase.from.mockReturnValueOnce(queryReturning({ data: [], error: null }));
+    const hold = (id, eventId) => ({
+      id, venueId: 45, eventId, type: "HOLD", status: "ACTIVE",
+      start: at("10:00"), end: at("12:00"), occupiedStart: at("09:30"), occupiedEnd: at("12:45"),
+      holdExpiresAt: new Date("2099-01-01T00:00:00Z"),
+    });
+    venueCalendarModel.findCalendarEntries.mockResolvedValue([hold("own", 442), hold("other", 500)]);
+    const result = await venueModel.getVenueAvailability({ ...range, excludeEventId: 442, check: { start: at("10:00"), end: at("12:00") } }, { user_id: 7, role: "COORDINATOR" });
+    expect(result.venues[0].entries).toHaveLength(1);
+    expect(result.venues[0].entries[0].type).toBe("HOLD");
+    expect(result.venues[0].entries[0].requestId).toBe("REQ-000500");
+    expect(result.venues[0].check.availability).toBe("UNAVAILABLE_HOLD");
+
+    mockStores(7);
+    const ownOnly = await venueModel.getVenueAvailability({ ...range, excludeEventId: 442, check: { start: at("10:00"), end: at("12:00") } }, { user_id: 7, role: "COORDINATOR" });
+    expect(ownOnly.venues[0].entries).toEqual([]);
+    expect(ownOnly.venues[0].check.availability).toBe("AVAILABLE");
+  });
+
   test("[Master 4.2] should_hide_titles_of_events_not_assigned_to_the_coordinator", async () => {
     mockStores(98);
     const other = await venueModel.getVenueAvailability(range, { user_id: 7, role: "COORDINATOR" });

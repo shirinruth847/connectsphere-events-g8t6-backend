@@ -6,6 +6,7 @@ jest.mock("../../model/eventModel", () => ({
 }));
 jest.mock("../../model/venueModel", () => ({
   getEventVenueOptions: jest.fn(),
+  getVenueAvailability: jest.fn(),
   listSelectableVenuePhotos: jest.fn(),
   getSelectableVenuePhotoImage: jest.fn(),
   suggestEventVenue: jest.fn(),
@@ -255,5 +256,33 @@ describe("PUT /api/events/:id/venue-suggestion (SPM-72 AC8)", () => {
 
     expect(response.status).toBe(status);
     expect(response.body.code).toBe(code);
+  });
+});
+
+
+describe("GET /api/events/:id/venue-availability", () => {
+  const path = "/api/events/42/venue-availability?from=2026-11-20T00:00:00Z&to=2026-11-21T00:00:00Z&venueId=45";
+  test("derives the excluded event from verified access", async () => {
+    venueModel.getVenueAvailability.mockResolvedValue({ venues: [] });
+    expect((await send("get", path)).status).toBe(200);
+    expect(venueModel.getVenueAvailability).toHaveBeenCalledWith(expect.objectContaining({ excludeEventId: 42, venueIds: [45] }), expect.objectContaining({ user_id: COORDINATOR_ID }));
+  });
+  test("rejects a client-supplied exclusion", async () => {
+    expect((await send("get", path + "&excludeEventId=99")).status).toBe(400);
+    expect(venueModel.getVenueAvailability).not.toHaveBeenCalled();
+  });
+  test("rejects an unrelated coordinator", async () => {
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ coordinator_id: 99 }));
+    expect((await send("get", path)).status).toBe(404);
+    expect(venueModel.getVenueAvailability).not.toHaveBeenCalled();
+  });
+  test("rejects a supervising Lead", async () => {
+    signedInAs(LEAD_ID, "COORDINATOR_LEAD");
+    expect((await send("get", path)).status).toBe(403);
+    expect(venueModel.getVenueAvailability).not.toHaveBeenCalled();
+  });
+  test("requires authentication", async () => {
+    expect((await request(app).get(path)).status).toBe(401);
+    expect(venueModel.getVenueAvailability).not.toHaveBeenCalled();
   });
 });
