@@ -645,18 +645,22 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null, exc
 // booking decision rechecks everything that blocks.
 const REQUIREMENT_STATUS = Object.freeze({ MET: "MET", UNMET: "UNMET", NOT_CHECKED: "NOT_CHECKED" });
 const NO_LAYOUT_PREFERENCE = "NO_PREFERENCE";
-// Words too common to show that a venue meets a need on their own.
-const COMMON_WORDS = new Set(["and", "the", "for", "with", "access", "accessible", "accessibility", "friendly", "free", "available", "none"]);
-
 const normalise = (text) => String(text).toLowerCase().replace(/theatre/g, "theater").replace(/[^a-z0-9]+/g, " ").trim();
 
-// A need is met when any listed feature contains one of its key words, or the
-// whole need when it has none (for example "Ramp").
+// Explicit equivalent labels; shared words alone do not establish a capability.
+const CAPABILITY_ALIASES = new Map([
+  ["wheelchair accessible entrance", "wheelchair access"],
+  ["wheelchair accessible", "wheelchair access"],
+  ["wheelchair barrier free access", "wheelchair access"],
+]);
+const capability = (text) => {
+  const label = normalise(text);
+  return CAPABILITY_ALIASES.get(label) ?? label;
+};
+
 const listMeets = (list, need) => {
-  const items = (list || []).map(normalise);
-  const words = normalise(need).split(" ").filter((word) => word.length >= 3 && !COMMON_WORDS.has(word));
-  const terms = words.length ? words : [normalise(need)];
-  return items.some((item) => terms.some((term) => term && item.includes(term)));
+  const wanted = capability(need);
+  return Boolean(wanted) && (list || []).some((item) => capability(item) === wanted);
 };
 
 const toNeedList = (value) => {

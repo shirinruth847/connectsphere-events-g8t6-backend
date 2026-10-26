@@ -24,6 +24,30 @@ const available = { requirementStatus: "MET", detail: "Free" };
 const statuses = (list) => Object.fromEntries(list.map((item) => [item.key, item.status]));
 
 describe("venueRequirements (SPM-72 AC5)", () => {
+  test("should_not_mark_unrelated_facilities_or_accessibility_as_met_from_shared_words", () => {
+    const list = venueRequirements({
+      venue: venue({ facilities: ["Fire alarm system"], accessibilityFeatures: ["Hearing protection available"] }),
+      event: event({ accessibility_needs: JSON.stringify(["Hearing loop"]) }),
+      requiredFacilities: ["PA system"],
+      availability: available,
+      detailsRead: true,
+    });
+    expect(statuses(list)["facility-0"]).toBe("UNMET");
+    expect(statuses(list)["accessibility-0"]).toBe("UNMET");
+  });
+
+  test("should_match_complete_labels_ignoring_case_and_punctuation", () => {
+    const list = venueRequirements({
+      venue: venue({ facilities: ["PA-system"], accessibilityFeatures: ["HEARING LOOP"] }),
+      event: event({ accessibility_needs: JSON.stringify(["Hearing loop"]) }),
+      requiredFacilities: ["pa system"],
+      availability: available,
+      detailsRead: true,
+    });
+    expect(statuses(list)["facility-0"]).toBe("MET");
+    expect(statuses(list)["accessibility-0"]).toBe("MET");
+  });
+
   test("[SPM-72-AC5] should_mark_every_stated_requirement_met", () => {
     const list = venueRequirements({ venue: venue(), event: event(), requiredFacilities: ["projector"], availability: available, detailsRead: true });
 

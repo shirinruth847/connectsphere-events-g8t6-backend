@@ -288,6 +288,17 @@ const fillSeedLayouts = async (db, actorId, manifest) => {
     // Read directly: the model's projection leaves out the display copies.
     const document = await db.collection("venue_details").findOne({ _id: String(row.venue_id) }, { projection: { name: 1, location: 1, pg_version: 1, version: 1, supportedLayouts: 1 } });
     if (!layouts.length || !document || document.supportedLayouts?.length) continue;
+    // Cleanup needs both a confirmed seed write and unchanged values/version.
+    // If the process stops before confirmation, preserve the document.
+    const record = {
+      venueId: row.venue_id,
+      layouts,
+      version: document.version + 1,
+      previousLayouts: document.supportedLayouts ?? null,
+      applied: false,
+    };
+    manifest.layoutsFilled.push(record);
+    saveManifest(manifest);
     await venueDetailModel.saveVenueDetails({
       venueId: row.venue_id,
       expectedVersion: document.version,
@@ -297,7 +308,7 @@ const fillSeedLayouts = async (db, actorId, manifest) => {
       pgVersion: document.pg_version,
       actorId,
     });
-    if (!manifest.layoutsFilled.includes(row.venue_id)) manifest.layoutsFilled.push(row.venue_id);
+    record.applied = true;
     saveManifest(manifest);
     console.log(`Filled layouts of ${row.name}: ${layouts.join(", ")}`);
   }
@@ -320,6 +331,24 @@ const seed = async (db) => {
   await fillSeedLayouts(db, actorId, manifest);
 };
 
+// Restore only an unchanged seed write. Legacy manifests contain numeric IDs
+// without values/version evidence; leave those documents alone.
+const restoreSeedLayouts = async (db, records) => {
+  let restored = 0;
+  for (const record of records) {
+    if (!record || record.applied !== true || !Array.isArray(record.layouts) || !Number.isInteger(record.version)) continue;
+    const update = record.previousLayouts === null
+      ? { $unset: { supportedLayouts: "" } }
+      : { $set: { supportedLayouts: record.previousLayouts } };
+    const result = await db.collection("venue_details").updateOne(
+      { _id: String(record.venueId), version: record.version, supportedLayouts: record.layouts },
+      { ...update, $inc: { version: 1 }, $currentDate: { updatedAt: true } },
+    );
+    restored += result.modifiedCount;
+  }
+  return restored;
+};
+
 const cleanup = async (db) => {
   const manifest = loadManifest();
   const actorId = manifest.venueIds.length ? await findActor() : null;
@@ -330,13 +359,8 @@ const cleanup = async (db) => {
   const ids = manifest.venueIds.map(String);
   const details = await db.collection("venue_details").deleteMany({ _id: { $in: ids }, fixture: FIXTURE });
   const photos = await db.collection("venue_photos").deleteMany({ venueId: { $in: ids }, fixture: FIXTURE });
-  if (manifest.layoutsFilled.length) {
-    await db.collection("venue_details").updateMany(
-      { _id: { $in: manifest.layoutsFilled.map(String) } },
-      { $unset: { supportedLayouts: "" }, $inc: { version: 1 } },
-    );
-  }
-  console.log(`Took ${manifest.venueIds.length} seeded venues out of service; removed ${details.deletedCount} details and ${photos.deletedCount} photos; unset layouts on ${manifest.layoutsFilled.length} venues.`);
+  const restored = await restoreSeedLayouts(db, manifest.layoutsFilled);
+  console.log(`Took ${manifest.venueIds.length} seeded venues out of service; removed ${details.deletedCount} details and ${photos.deletedCount} photos; restored layouts on ${restored} venues; preserved ${manifest.layoutsFilled.length - restored} changed or unverified entries.`);
   saveManifest({ venueIds: manifest.venueIds, layoutsFilled: [] });
 };
 
@@ -352,4 +376,4 @@ if (require.main === module) {
     .finally(closeMongoDb);
 }
 
-module.exports = { BUILDINGS, FIXTURE, hallCapacity };
+module.exports = { BUILDINGS, FIXTURE, hallCapacity, restoreSeedLayouts };

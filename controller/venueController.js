@@ -349,6 +349,19 @@ const getEventVenueOptions = async (req, res, next) => {
   }
 };
 
+// Event context is derived only after requireVisibleEvent verifies the actor.
+const getEventVenueAvailability = async (req, res, next) => {
+  const { query, fields } = validateAvailabilityQuery(req.query);
+  if (fields) return validationFailed(res, fields);
+  try {
+    return res.status(200).json(await venueModel.getVenueAvailability(
+      { ...query, excludeEventId: req.visibleEvent.eventId }, req.user
+    ));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
 const listSelectableVenuePhotos = async (req, res, next) => {
   const venueId = parseVenueId(req.params.venueId);
   if (!venueId) return venueNotFound(res);
@@ -412,6 +425,7 @@ const suggestEventVenue = async (req, res, next) => {
 };
 
 module.exports = {
+  getEventVenueAvailability,
   getEventVenueOptions,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,

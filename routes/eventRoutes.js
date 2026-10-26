@@ -35,6 +35,7 @@ const {
 const { getEventSafetyReviews } = require("../controller/safetyController");
 const {
   getEventVenueOptions,
+  getEventVenueAvailability,
   suggestEventVenue,
 } = require("../controller/venueController");
 const { requireAuth } = require("../middleware/auth");
@@ -82,6 +83,7 @@ router.post("/:id/complete", assignedCoordinatorOnly, completeEvent);
 // supervising Lead browse; only the coordinator suggests a venue. Photos are
 // read through GET /api/venues/options/:venueId/photos.
 const eventVenueReaders = [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD), requireVisibleEvent];
+router.get("/:id/venue-availability", ...assignedCoordinatorOnly, getEventVenueAvailability);
 router.get("/:id/venue-options", ...eventVenueReaders, getEventVenueOptions);
 router.put("/:id/venue-suggestion", ...coordinatorOnly, requireVisibleEvent, suggestEventVenue);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
