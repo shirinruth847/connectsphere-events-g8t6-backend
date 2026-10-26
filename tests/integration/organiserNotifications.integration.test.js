@@ -126,9 +126,7 @@ describe("an organiser's request through its notifications (SPM-192)", () => {
     expect(latest.message).toContain("description");
   });
 
-  // Enable when 20261025120000_spm41_displayed_message_reads is applied: until
-  // then main's clarification read fails on the missing last_read_message_id.
-  test.skip("[SPM-192-TC-02] a clarification request reaches the owner with its message", async () => {
+  test("[SPM-192-TC-02] a clarification request reaches the owner with its message", async () => {
     const message = "Please confirm attendance.";
     const res = await call("post", `/api/events/${eventId}/clarifications`, "coordinator",
       { message, version: await eventVersion(eventId) }, newKey());
