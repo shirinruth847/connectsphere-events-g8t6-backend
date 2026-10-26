@@ -3,8 +3,11 @@ const router = express.Router();
 const { requireAuth } = require("../middleware/auth");
 const { requireRole } = require("../middleware/authorize");
 const { validatePagination } = require("../middleware/validate");
+const { USER_ROLES } = require("../config/roles");
 const {
   getVenueCatalogue,
+  listSelectableVenuePhotos,
+  getSelectableVenuePhotoImage,
   listManagedVenues,
   listVenueOptions,
   getManagedVenue,
@@ -30,14 +33,15 @@ const venueStaffOnly = [requireAuth, requireRole("VENUE_STAFF")];
 // A larger body is answered 413 by the error handler; 2 MB is the per-photo limit.
 const imageBody = express.raw({ type: PHOTO_TYPES, limit: "2mb" });
 
-// Read-only catalogue of available venues (SPM-72).
-// SAFETY_OFFICER joins this list once its ticket adds the role to user_role.
-router.get(
-  "/",
-  requireAuth,
-  requireRole("COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF"),
-  getVenueCatalogue
-);
+// Read-only catalogue of available venues. Coordinators and Leads browse venues
+// inside each event instead (GET /api/events/:id/venue-options, SPM-72/74).
+router.get("/", ...venueStaffOnly, getVenueCatalogue);
+
+// Read-only photos of available venues for coordinators and Leads choosing a
+// venue in the event's venue section (SPM-72/74). Declared before /:venueId.
+const venueChoosers = [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD)];
+router.get("/options/:venueId/photos", ...venueChoosers, listSelectableVenuePhotos);
+router.get("/options/:venueId/photos/:photoId", ...venueChoosers, getSelectableVenuePhotoImage);
 
 // Availability calendar (SPM-74): Event Coordinators and Venue Staff only;
 // declared before /:venueId.

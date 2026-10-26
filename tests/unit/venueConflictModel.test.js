@@ -263,3 +263,40 @@ describe("operating hours", () => {
     expect(warning.outside).toEqual([{ start: at("22:00").toISOString(), end: at("08:00", "2026-11-05").toISOString() }]);
   });
 });
+
+// SPM-74 / SPM-72 AC6: a multi-day event occupies the venue as one block from
+// its first start to its last end (developer decision of 23 October 2026), so
+// a booking, hold or block on any of its days is a conflict.
+describe("multi-day events (SPM-74, SPM-72 AC6)", () => {
+  const threeDays = { from: at("00:00", "2026-11-04"), to: at("00:00", "2026-11-08") };
+  const multiDay = ({ bookings = [], calendarEntries = [] } = {}) => buildVenueCalendar({
+    venue: venue(),
+    bookings,
+    calendarEntries,
+    ...threeDays,
+    now: NOW,
+    requested: { start: at("10:00", "2026-11-04"), end: at("17:00", "2026-11-06") },
+  }).check;
+
+  test("[SPM-74-TC17] should_flag_a_booking_on_the_middle_day", () => {
+    const secondDay = { ...booking(9, "10:00", "12:00"), start: at("10:00", "2026-11-05"), end: at("12:00", "2026-11-05") };
+
+    expect(multiDay({ bookings: [secondDay] })).toMatchObject({ canRequest: false, availability: AVAILABILITY.UNAVAILABLE_BOOKING });
+  });
+
+  test("[SPM-74-TC17] should_flag_a_block_on_the_last_day", () => {
+    const lastDay = block("b1", "14:00", "15:00", { occupiedStart: at("14:00", "2026-11-06"), occupiedEnd: at("15:00", "2026-11-06"), start: at("14:00", "2026-11-06"), end: at("15:00", "2026-11-06") });
+
+    expect(multiDay({ calendarEntries: [lastDay] })).toMatchObject({ canRequest: false, availability: AVAILABILITY.UNAVAILABLE_BLOCK });
+  });
+
+  test("[SPM-74-TC17] should_cover_every_day_with_setup_before_and_turnaround_after", () => {
+    const check = multiDay();
+
+    expect(check.occupiedStart).toBe(at("09:30", "2026-11-04").toISOString());
+    expect(check.occupiedEnd).toBe(at("17:45", "2026-11-06").toISOString());
+    expect(check.canRequest).toBe(true);
+    // The nights fall outside 08:00-22:00: a warning, never a block (Master 5.4).
+    expect(check.availability).toBe(AVAILABILITY.AVAILABLE_WITH_WARNING);
+  });
+});

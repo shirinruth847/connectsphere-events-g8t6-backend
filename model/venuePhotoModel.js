@@ -25,18 +25,17 @@ const toPhoto = (document) => ({
 
 const collection = async () => (await getMongoDb()).collection("venue_photos");
 
-const orderedPhotos = async (photos, venueId) =>
-  photos.find({ venueId: String(venueId) }, { projection: METADATA }).sort(GALLERY_ORDER).toArray();
+const orderedPhotos = async (photos, venueId, session) =>
+  photos.find({ venueId: String(venueId) }, { projection: METADATA, session }).sort(GALLERY_ORDER).toArray();
 
-// Writes positions 0..n-1 in the order given. Photos past the limit are left
-// alone: they are racing uploads about to back out (see addPhoto).
-const renumber = async (photos, ordered) => {
+// Writes positions 0..n-1 under the same gallery transaction.
+const renumber = async (photos, ordered, session) => {
   const updates = ordered
     .slice(0, MAX_PHOTOS_PER_VENUE)
     .map((document, index) => ({ document, index }))
     .filter(({ document, index }) => document.position !== index)
     .map(({ document, index }) => ({ updateOne: { filter: { _id: document._id }, update: { $set: { position: index } } } }));
-  if (updates.length) await photos.bulkWrite(updates, { ordered: false });
+  if (updates.length) await photos.bulkWrite(updates, { ordered: false, session });
 };
 
 const listPhotos = async (venueId) => (await orderedPhotos(await collection(), venueId)).map((document, index) => ({ ...toPhoto(document), position: index }));
@@ -47,74 +46,82 @@ const getPhotoImage = async (venueId, photoId) => {
   return document ? { contentType: document.contentType, data: Buffer.from(document.data.buffer) } : null;
 };
 
-const addPhoto = async ({ venueId, contentType, data, size, caption, actorId }) => {
-  const photos = await collection();
-  const existing = await photos.countDocuments({ venueId: String(venueId) });
-  if (existing >= MAX_PHOTOS_PER_VENUE) throw photoError("PHOTO_LIMIT_REACHED");
-
-  const now = new Date();
-  const { insertedId } = await photos.insertOne({
-    venueId: String(venueId),
-    position: existing,
-    caption,
-    contentType,
-    size,
-    data,
-    uploadedBy: actorId,
-    uploadedAt: now,
-    updatedBy: actorId,
-    updatedAt: now,
-    version: 1,
-  });
-  // Two uploads at once can both pass the count; the later one backs out.
-  const ordered = await orderedPhotos(photos, venueId);
-  if (ordered.length > MAX_PHOTOS_PER_VENUE && ordered.slice(MAX_PHOTOS_PER_VENUE).some((document) => document._id.equals(insertedId))) {
-    await photos.deleteOne({ _id: insertedId });
-    throw photoError("PHOTO_LIMIT_REACHED");
+// Every writer touches the same guard before reading the gallery. Concurrent
+// transactions conflict here and the driver retries with a fresh snapshot.
+// Readers see committed photo changes only; no temporary overflow is published.
+const withGalleryWrite = async (venueId, write) => {
+  const db = await getMongoDb();
+  const galleries = db.collection("venue_photo_galleries");
+  const id = String(venueId);
+  try {
+    await galleries.updateOne({ _id: id }, { $setOnInsert: { version: 0 } }, { upsert: true });
+  } catch (error) {
+    // Another process created this guard concurrently.
+    if (error.code !== 11000) throw error;
   }
-  await renumber(photos, ordered);
-  return toPhoto({ ...(await photos.findOne({ _id: insertedId }, { projection: METADATA })) });
+  const session = db.client.startSession();
+  try {
+    return await session.withTransaction(async () => {
+      await galleries.updateOne({ _id: id }, { $inc: { version: 1 } }, { session });
+      return write(db.collection("venue_photos"), session);
+    }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" }, timeoutMS: 10000 });
+  } finally {
+    await session.endSession();
+  }
 };
 
-const findOwnPhoto = async (photos, venueId, photoId) => {
-  const document = await photos.findOne({ _id: new ObjectId(photoId), venueId: String(venueId) }, { projection: METADATA });
+const addPhoto = async ({ venueId, contentType, data, size, caption, actorId }) =>
+  withGalleryWrite(venueId, async (photos, session) => {
+    const existing = await photos.countDocuments({ venueId: String(venueId) }, { session });
+    if (existing >= MAX_PHOTOS_PER_VENUE) throw photoError("PHOTO_LIMIT_REACHED");
+    const now = new Date();
+    const document = {
+      _id: new ObjectId(), venueId: String(venueId), position: existing,
+      caption, contentType, size, data, uploadedBy: actorId, uploadedAt: now,
+      updatedBy: actorId, updatedAt: now, version: 1,
+    };
+    await photos.insertOne(document, { session });
+    await renumber(photos, await orderedPhotos(photos, venueId, session), session);
+    return toPhoto(await photos.findOne({ _id: document._id }, { projection: METADATA, session }));
+  });
+
+const findOwnPhoto = async (photos, venueId, photoId, session) => {
+  const document = await photos.findOne({ _id: new ObjectId(photoId), venueId: String(venueId) }, { projection: METADATA, session });
   if (!document) throw photoError("PHOTO_NOT_FOUND");
   return document;
 };
 
 // Caption and/or a new position (0 is the cover); the others shift to make room.
-const updatePhoto = async ({ venueId, photoId, changes, actorId }) => {
-  const photos = await collection();
-  const current = await findOwnPhoto(photos, venueId, photoId);
+const updatePhoto = async ({ venueId, photoId, changes, actorId }) => withGalleryWrite(venueId, async (photos, session) => {
+  const current = await findOwnPhoto(photos, venueId, photoId, session);
   const set = { updatedBy: actorId, updatedAt: new Date() };
   if (Object.prototype.hasOwnProperty.call(changes, "caption")) set.caption = changes.caption;
-  await photos.updateOne({ _id: current._id }, { $set: set, $inc: { version: 1 } });
+  await photos.updateOne({ _id: current._id }, { $set: set, $inc: { version: 1 } }, { session });
 
   if (Object.prototype.hasOwnProperty.call(changes, "position")) {
-    const ordered = (await orderedPhotos(photos, venueId)).filter((document) => !document._id.equals(current._id));
+    const ordered = (await orderedPhotos(photos, venueId, session)).filter((document) => !document._id.equals(current._id));
     ordered.splice(Math.min(changes.position, ordered.length), 0, current);
-    await renumber(photos, ordered);
+    await renumber(photos, ordered, session);
   }
-  return toPhoto(await photos.findOne({ _id: current._id }, { projection: METADATA }));
-};
+  return toPhoto(await photos.findOne({ _id: current._id }, { projection: METADATA, session }));
+});
 
-const replacePhotoImage = async ({ venueId, photoId, contentType, data, size, actorId }) => {
-  const photos = await collection();
-  const current = await findOwnPhoto(photos, venueId, photoId);
+const replacePhotoImage = async ({ venueId, photoId, contentType, data, size, actorId }) => withGalleryWrite(venueId, async (photos, session) => {
+  const current = await findOwnPhoto(photos, venueId, photoId, session);
   await photos.updateOne(
     { _id: current._id },
     { $set: { contentType, data, size, updatedBy: actorId, updatedAt: new Date() }, $inc: { version: 1 } },
+    { session },
   );
-  return toPhoto(await photos.findOne({ _id: current._id }, { projection: METADATA }));
-};
+  return toPhoto(await photos.findOne({ _id: current._id }, { projection: METADATA, session }));
+});
 
-const deletePhoto = async ({ venueId, photoId }) => {
-  const photos = await collection();
-  const current = await findOwnPhoto(photos, venueId, photoId);
-  await photos.deleteOne({ _id: current._id });
-  await renumber(photos, await orderedPhotos(photos, venueId));
+const deletePhoto = async ({ venueId, photoId }) => withGalleryWrite(venueId, async (photos, session) => {
+  const current = await findOwnPhoto(photos, venueId, photoId, session);
+  await photos.deleteOne({ _id: current._id }, { session });
+  await renumber(photos, await orderedPhotos(photos, venueId, session), session);
   return toPhoto(current);
-};
+});
 
 // The first photo of each venue's gallery, as a Map of venue ID string → photo ID.
 const findCoverPhotoIds = async (venueIds) => {

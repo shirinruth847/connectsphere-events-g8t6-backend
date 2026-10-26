@@ -96,11 +96,35 @@ The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/
 - **Assignment** (`POST /api/events/:id/coordinator`, Coordinator Lead only, requires `ENABLE_COORDINATOR_WORKFLOWS=true`) takes a request from the queue: in one transaction (`assign_event_coordinator`) it sets the coordinator, moves the request from `SUBMITTED` to `UNDER_REVIEW` (Master section 5.2), records the staff-only history entry `COORDINATOR_ASSIGNED` and notifies the organiser and the coordinator.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
-### Venue Catalogue (SPM-72)
+### Choosing a Venue (SPM-72, SPM-74, SPM-75)
+
+The pending venue-suggestion migration extends the existing idempotency-operation
+constraint rather than replacing it with an older operation list. This preserves
+clarification commands and replay records when upgrading a database that already
+has the newer SPM-41 migrations. Already-applied migrations do not rerun: inspect
+the target's migration history and constraint before deployment; do not replay the
+whole suggestion migration against its existing table. This source fix does not
+repair a database whose constraint was previously narrowed.
+
+Coordinators and Leads search and browse venues inside each event request, starting from the organiser's ranked venue preferences. There is no separate catalogue page for them. `requireVisibleEvent` answers `404` unless the caller is the event's assigned coordinator or its supervising Lead (the Lead who made the open assignment, or any Lead for an event assigned before supervision, Master T23).
+
+| Method & path | Access | Input | Success | Errors |
+| --- | --- | --- | --- | --- |
+| `GET /api/events/:id/venue-options` | Assigned `COORDINATOR`, supervising `COORDINATOR_LEAD` | Optional `search` (name or address), `minCapacity`, `layout`, `facility`, `accessibility` (these filter), `requiredFacilities` (comma-separated, up to 10; these rank and highlight, never filter), `sort` (`match` default, `name`, `capacity`, `setup`, `turnaround`), `order` (`asc`, `desc`); anything else is rejected | `200 { event, venues: [{ …catalogue fields, coverPhotoId, availability: { status, label, occupiedStart, occupiedEnd, conflicts, operatingHoursWarning }, requirements: [{ key, label, status, detail }], unmetCount, allRequirementsMet }], preferredVenues: [{ rank, venueId, name, option }], detailsAvailable, availabilityChecked, filtersNotChecked, canSuggestVenue }`; `preferredVenues` are the organiser's ranked choices whatever the filters (`option: null` when the venue is no longer available) | `400 VALIDATION_FAILED`, `401`, `403` (other roles), `404 EVENT_NOT_FOUND` |
+| `GET /api/venues/options/:venueId/photos` | `COORDINATOR`, `COORDINATOR_LEAD` | — | `200 { photos: [{ photoId, position, caption, contentType, size, uploadedAt, updatedAt, version }] }` | `404 VENUE_NOT_FOUND` (venue not `ACTIVE`), `503 VENUE_PHOTOS_UNAVAILABLE` |
+| `GET /api/venues/options/:venueId/photos/:photoId` | As above | — | `200` image bytes, `X-Content-Type-Options: nosniff` | `404 VENUE_NOT_FOUND`, `404 PHOTO_NOT_FOUND`, `503` |
+| `PUT /api/events/:id/venue-suggestion` | Assigned `COORDINATOR` only | Body `{ venueId, version }` (`version`: the suggestion version loaded, `0` when there is none); `Idempotency-Key` header required | `200 { message, suggestion: { venueId, name, address, maxCapacity, suggestedAt, suggestedBy, version } }` | `400 VALIDATION_FAILED`, `403` (Lead and other roles), `404 EVENT_NOT_FOUND`, `409 VENUE_SUGGESTION_NOT_ALLOWED_IN_STATUS` (not `UNDER_REVIEW`/`PLANNING`), `409 VENUE_NOT_SELECTABLE`, `409 VENUE_CAPACITY_TOO_SMALL`, `409 VENUE_SUGGESTION_VERSION_CONFLICT`, `409 IDEMPOTENCY_KEY_REUSED` |
+
+- **Available venues only:** venues with `is_active` and `status = 'ACTIVE'`, as in the catalogue below.
+- **Requirements** come from the event: capacity against expected attendance, availability over the event window, the preferred layout, each accessibility need, plus the coordinator's `requiredFacilities`. Each is `MET`, `UNMET` or `NOT_CHECKED` (MongoDB unavailable, Master M4; never shown as met). Venues meeting every requirement sort first, then fewest unmet, then the chosen sort. Matching is advisory (Master 5.4); bookings recheck everything that blocks.
+- **Availability** checks the event window's occupied range (setup and turnaround from MongoDB) against `PENDING`/`APPROVED` bookings and active holds and blocks, leaving out the event's own bookings and holds. A multi-day event is one occupied range from its first start to its last end, so every day is checked (Master 5.4.1, T30). `NOT_CHECKED` ("Error checking availability") when MongoDB is unavailable (`availabilityChecked: false`), `NOT_BOOKABLE` when the venue has no setup/turnaround minutes. The availability requirement's `detail` is the short label (e.g. "Available", "Unavailable – booking"). Other events' titles are never returned.
+- **Suggestion** (`model/venueModel.suggestEventVenue` → RPC `suggest_event_venue`, migrations `20261023041402`, `20261023041519`, `20261023042520`): one transaction locks the event, then the venue, saves `event_venue_suggestion`, appends an `ORGANISER_SAFE` `VENUE_SUGGESTED` activity entry (`changes.suggestedVenue`: the replaced and new venue names; the change history shows it as "Venue suggested") and notifies the organiser (`VENUE_SUGGESTION`). It does not hold or book the venue or change `arrangement_version`. Suggesting the current venue again changes nothing. `GET /api/events/:id` returns `venueSuggestion` to everyone who can see the event and `permissions.canSuggestVenue`.
+
+### Venue Catalogue (Venue Staff)
 
 | Method & path | Access | Success | Errors |
 | --- | --- | --- | --- |
-| `GET /api/venues` | `COORDINATOR`, `COORDINATOR_LEAD`, `VENUE_STAFF`. Optional `?search=` (name or address), `?minCapacity=`, `?layout=`, `?facility=`, `?accessibility=`; any other parameter is rejected | `200 { venues: [{ venueId, name, address, maxCapacity, operatingHours, accessibilityFeatures, setupTurnaroundMinutes, setupMinutes, turnaroundMinutes, rooms: [{ roomId, layoutType, capacity }], detailStatus, description, facilities, supportedLayouts, emergencyAccess, knownRestrictions }], detailsAvailable, filtersNotChecked }`, ordered by name | `400 VALIDATION_FAILED`, `401 UNAUTHENTICATED`, `403 FORBIDDEN` (other roles), `500 INTERNAL_ERROR` (PostgreSQL failure) |
+| `GET /api/venues` | `VENUE_STAFF` (coordinators and Leads use the event venue section above). Optional `?search=` (name or address), `?minCapacity=`, `?layout=`, `?facility=`, `?accessibility=`; any other parameter is rejected | `200 { venues: [{ venueId, name, address, maxCapacity, operatingHours, accessibilityFeatures, setupTurnaroundMinutes, setupMinutes, turnaroundMinutes, rooms: [{ roomId, layoutType, capacity }], detailStatus, description, facilities, supportedLayouts, emergencyAccess, knownRestrictions }], detailsAvailable, filtersNotChecked }`, ordered by name | `400 VALIDATION_FAILED`, `401 UNAUTHENTICATED`, `403 FORBIDDEN` (other roles), `500 INTERNAL_ERROR` (PostgreSQL failure) |
 
 - **Read-only:** the catalogue changes nothing. Only Venue Staff maintain venues (SPM-73, below); bookings and equipment requests belong to SPM-179/181/186. `SAFETY_OFFICER` gets access when its ticket adds the role to `user_role`.
 - **Available venues only:** PostgreSQL is the source of which venues exist. The catalogue lists venues with `is_active` and `status = 'ACTIVE'`. A venue deleted as unusable keeps its row (bookings may still reference it) with `venue.is_active = false` (migration `20261019025616_spm72_venue_active_state`); `INACTIVE` and `UNDER_MAINTENANCE` venues are left out too (SPM-73). An empty `venues` list means no venue is currently available.
@@ -176,11 +200,13 @@ Venue Staff only (`401` without a token, `403` for every other role). Photos liv
 - **Audit:** each change appends a `STAFF_ONLY` `activity_log` entry (`VENUE_PHOTO_ADDED`, `VENUE_PHOTO_UPDATED`, `VENUE_PHOTO_REPLACED`, `VENUE_PHOTO_DELETED`) after the MongoDB write; if the append fails, the change stands and the failure is logged.
 - **Cover:** `GET /api/venues/manage` rows carry `coverPhotoId` (the first photo, or `null`; `null` for every row when MongoDB is down).
 
+- **Concurrent photo edits:** migration `0005_venue_photo_galleries` adds a per-venue transaction guard. Upload, reorder, replacement and deletion share a MongoDB transaction, so the 20-photo limit and positions are checked against the latest committed gallery. Requires a replica set (Atlas or local `MongoMemoryReplSet`). Run `npm run mongo:migrate` before deploying this code; no photo backfill is needed. Deploy all backend instances together so older writers cannot bypass the guard. The migration has not been applied by this change. Rollback: stop gallery writes before reverting the code; retain guard documents until no transactional writer remains.
+
 ### Venue Availability Calendar (SPM-74)
 
 | Method & path | Access | Input | Success | Errors |
 | --- | --- | --- | --- | --- |
-| `GET /api/venues/availability` | `COORDINATOR`, `VENUE_STAFF`; Coordinator Leads and every other role get `403` | `from`, `to` (ISO 8601 with offset, at most 366 days apart, so the calendar's year view loads in one request); optional `venueId` (repeated or comma-separated, up to 20; default every active venue); optional `checkStart` and `checkEnd` (a proposed booking window) | `200 { from, to, generatedAt, venues: [{ venueId, name, address, status, operatingHours, setupMinutes, turnaroundMinutes, buffersRecorded, entries, overlaps, freePeriods, summary, summaryLabel, check }] }` | `400 VALIDATION_FAILED`, `401`, `403`, `503 AVAILABILITY_UNAVAILABLE` |
+| `GET /api/venues/availability` | `COORDINATOR` (from an event's venue section), `VENUE_STAFF` (`/venues?view=availability`); Coordinator Leads and every other role get `403` | `from`, `to` (ISO 8601 with offset, at most 366 days apart, so the calendar's year view loads in one request); optional `venueId` (repeated or comma-separated, up to 20; default every active venue); optional `checkStart` and `checkEnd` (a proposed booking window) | `200 { from, to, generatedAt, venues: [{ venueId, name, address, status, operatingHours, setupMinutes, turnaroundMinutes, buffersRecorded, entries, overlaps, freePeriods, summary, summaryLabel, check }] }` | `400 VALIDATION_FAILED`, `401`, `403`, `503 AVAILABILITY_UNAVAILABLE` |
 
 - **Entries** merge PostgreSQL `PENDING`/`APPROVED` bookings with MongoDB `venue_calendar` holds and blocks. Each has a `type` (`BOOKING`, `HOLD`, `BLOCK`), a backend `label` ("Confirmed booking", "Pending booking request", "Active hold", "Expired hold", "Operational block"), the booked `start`/`end` and the `occupiedStart`/`occupiedEnd` including setup and turnaround, `blocking`, references (`bookingId`, `requestId`), `holdExpiresAt`, block `reason`/`reasonLabel`/`note` and an `operatingHoursWarning`.
 - **Event titles:** Venue Staff see them; a coordinator sees only the titles of events assigned to them. Everyone sees the references.
@@ -192,6 +218,8 @@ Venue Staff only (`401` without a token, `403` for every other role). Photos liv
 
 - `npm run mongo:migrate` applies `mongodb/migrations/0003_venue_photos` (the `venue_photos` collection, validator and `venue_position` index; applied to `connectsphere_dev` on 2026-10-21) and, before it, `0002_venue_calendar`: it adds the minutes and `version` to the `venue_details` validator and creates `venue_calendar` with its validator and index.
 - `npm run seed:venue-photos` downloads free Unsplash photos (Unsplash License, no attribution required) into `venue_photos` for the ten non-test venues, two or three each chosen to match the venue, tagged `fixture: "spm181-unsplash"`; a venue that already has photos is skipped. `npm run seed:venue-photos:cleanup` removes only those documents. The list of photos and their sources is in `mongodb/seed/venuePhotoSeed.js`.
+- `npm run mongo:migrate` also applies `0004_venue_related_venues`: `venue_details.relatedVenueIds`, display-only links between venues of one building (a hall and its rooms, each its own bookable venue).
+- `npm run seed:venue-rooms` (needs `npm run seed:accounts` first) creates three `[seed:dev]` halls with two to four rooms each through the Venue Staff `create_venue` RPC, sets their operating hours, saves their `venue_details` (layouts, facilities, accessibility, setup/turnaround, related venues) and photos tagged `fixture: "spm72-rooms"`, and fills `supportedLayouts` on `[seed:dev]` venues that have none, from their room layouts. A hall's capacity is its rooms plus its common area. The IDs it touches are kept in `supabase/seed/manifests/venue-rooms-<namespace>.json`; `npm run seed:venue-rooms:cleanup` takes those venues out of service (venues are never deleted), removes the fixture documents and restores layouts only when the recorded seed values and version are unchanged. Legacy ID-only manifest entries and later staff edits are preserved.
 - `npm run seed:venue-calendar` copies the legacy `setup_turnaround_min` into `venue_details` (as both minutes; `[seed:dev] Grand Hall` gets 30/45 for SPM-74 TC3) and adds holds and blocks tagged `fixture: "spm74-dev"`. `npm run seed:venue-calendar:cleanup` removes only those calendar fixtures.
 
 Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc schema SQL; apply reviewed migrations to the project-scoped development database and keep the local migration history aligned with the shared branch.
@@ -401,6 +429,21 @@ Prospective attendees and event organisers create their own accounts. Staff role
 - **Organisers** start without an organisation membership, so `GET /api/events/mine` shows only their own requests.
 - **Behind a proxy** (production), set Express `trust proxy` so the rate limit counts each client's IP rather than the proxy's.
 
+### Attendee Profile (SPM-270)
+
+An attendee keeps reusable details for event registration. Name, email and phone come from the `user` record; dietary restrictions and accessibility requirements are stored in `attendee_profile`. Each route works only on the signed-in attendee's own profile, so there is no profile ID in the path. Every other role gets `403 FORBIDDEN`, and the database re-checks the role inside each read and save.
+
+| Method & path | Input | Success | Errors |
+| --- | --- | --- | --- |
+| `GET /api/attendee-profile/mine` | — | `200 { profile: { attendeeId, userId, name, email, phone, dietaryRestrictions, accessibilityRequirements, version, createdAt, updatedAt } }`. Before the first save, `attendeeId`, `version` and the timestamps are `null` | `401 UNAUTHENTICATED`, `403 FORBIDDEN`, `500 INTERNAL_ERROR` |
+| `PUT /api/attendee-profile/mine` | `{ "dietaryRestrictions", "accessibilityRequirements", "version" }`: both text fields required, each text of up to 1,000 characters or `null`; `version` is the one loaded, or `null` for the first save | `201 { profile }` on the first save, `200 { profile }` afterwards | `400 VALIDATION_FAILED` with `fields` (any other field, including `attendeeId`, `userId`, `role`, `name`, `email`, `phone` or timestamps), `401`, `403`, `409 STALE_PROFILE` (a profile already exists, or it changed since it was loaded: reload and save again), `500 INTERNAL_ERROR` |
+
+- **Blank values:** text is trimmed, and an empty value is saved as `null`. Text containing a NUL character (`\u0000`), which PostgreSQL cannot store, is refused with `400`.
+- **One profile per attendee:** `UNIQUE (user_id)` plus a single conditional insert, so simultaneous first saves create one profile and the other request gets `409`.
+- **Event Registration** reads the same combined details with `findAttendeeProfile(userId)` in `model/attendeeProfileModel.js` (database function `get_attendee_profile`).
+- **Schema:** migration `20261024095646_spm270_attendee_profile`. The development database already had the table without a migration; the migration aligns it in place. `20261025035109_spm270_attendee_profile_role_guard` then checks the rows that were already there: it stops with an error listing every profile owned by a non-`ATTENDEE` user and changes nothing, so those rows must be resolved before it is rerun.
+- **Database tests:** `tests/database/spm270AttendeeProfile.test.cjs` runs both migrations on in-memory PostgreSQL (PGlite), on a fresh schema and over the dashboard-created table.
+
 ---
 
 ## 🧪 Example `.env` File
@@ -506,6 +549,7 @@ connectsphere-events-g8t6-backend/
 │   ├── supabase.js
 │   └── venueConstants.js # Venue statuses and the maximum capacity
 ├── controller/           # Route handler logic and controllers
+│   ├── attendeeProfileController.js
 │   ├── authController.js
 │   ├── equipmentController.js
 │   ├── eventController.js
@@ -525,6 +569,7 @@ connectsphere-events-g8t6-backend/
 │   ├── activityModel.js  # Audience-filtered change history
 │   ├── equipmentDetailModel.js # MongoDB equipment_details reads and conditional writes
 │   ├── equipmentModel.js # Equipment catalogue and unavailable stock (SPM-52)
+│   ├── attendeeProfileModel.js # SPM-270 attendee's own profile
 │   ├── eventModel.js
 │   ├── healthModel.js
 │   ├── outboxModel.js    # Claims and applies MongoDB outbox entries
@@ -542,6 +587,7 @@ connectsphere-events-g8t6-backend/
 │   ├── schemas/          # JSON Schema validators
 │   └── seed/             # Development data (npm run seed:venue-calendar)
 ├── routes/               # API route definitions
+│   ├── attendeeProfileRoutes.js
 │   ├── authRoutes.js
 │   ├── equipmentRoutes.js
 │   ├── eventRoutes.js
@@ -558,6 +604,7 @@ connectsphere-events-g8t6-backend/
 │   ├── integration/      # Live tests against the development project
 │   └── unit/             # Mocked Supabase; run by npm test
 ├── validators/           # Pure request validation rules
+│   ├── attendeeProfileValidator.js # SPM-270 profile save fields
 │   ├── authValidator.js
 │   ├── equipmentValidator.js # SPM-52 equipment fields, unavailable stock and list filters
 │   ├── eventValidator.js
@@ -674,3 +721,45 @@ in [the SPM-177 test plan](docs/test-plans/spm-177.md). The corrective migration
 retires the obsolete two-argument assignment function and preserves atomic
 assignment, history, activity and notifications. Shared deployment requires
 review of target migration history; no hosted migration was applied here.
+
+## Organiser event arrangements (SPM-199)
+
+`GET /api/events/:id/arrangements` requires a bearer token and the existing
+event visibility check. The owner can read it; permitted organisation members
+can read submitted events. Unrelated users and staff receive the same
+`404 EVENT_NOT_FOUND` as a missing event; unauthenticated requests receive 401.
+The response is private and carries `Cache-Control: no-store`.
+
+The `{ arrangements: { venues, technical, safety } }` response contains
+independent sections with `status: READY | UNAVAILABLE`. A failed read never
+becomes a successful empty array. Venue data includes individually identified
+bookings, primary designation, holds with expiry and safe availability/next
+action messages. Technical data separates named equipment requirements from
+request decisions and technical support requirements. Safety rounds contain
+only the outcome, organiser comment, timestamps and whether they apply to the
+current arrangement version. Internal notes, checklists, staff IDs and raw
+database errors are excluded. This endpoint performs no writes. A final
+read checks the event's arrangement version, event version and lifecycle state;
+a concurrent change returns `409 ARRANGEMENTS_CHANGED` with no section data.
+Refresh loads a newly authorised request. This optimistic check relies on
+arrangement writers advancing the version as required by SPM-250; it does not
+create a cross-store transaction. Hold expiry is evaluated after all I/O.
+PostgreSQL venue status (`INACTIVE`, `UNDER_MAINTENANCE`, or `is_active = false`)
+flags affected active bookings and holds even without a calendar block or
+incident record, using a safe pending-coordinator message. Booking decisions
+are retained. Inactive bookings/holds and completed occupied periods carry no
+current unavailability warning; recorded resolved booking incidents can still
+describe their historical action. Occupied periods include turnaround time.
+
+The reader supports the existing room-based bookings and `equipment_request`
+tables. It also reads the agreed `venue_id`/`is_primary`, `technical_requests`
+and `resource_incidents` structures when deployed, without applying the
+resource draft migration. On the current baseline, the sole active booking
+is primary (the existing SPM-173 rule); multiple legacy bookings have no
+designated primary. Missing combined technical support or incident storage is
+reported as unavailable rather than inferred. Free-form legacy technical
+notes and draft support notes have no external visibility marker and are
+never returned. MongoDB holds are scoped to the event and overdue active
+holds are returned as expired, even before the expiry job runs.
+
+Verification and dependency boundaries: [SPM-199 test plan](docs/test-plans/spm-199.md).

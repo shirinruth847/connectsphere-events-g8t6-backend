@@ -52,12 +52,20 @@ describe("mongodb/migrate", () => {
       "0002_venue_calendar",
       "0003_venue_photos",
       "0004_equipment_details",
+      "0004_venue_related_venues",
+      "0005_venue_photo_galleries",
     ]);
     await expect(applyMigrations(db)).resolves.toEqual([]);
   });
 
   test("[6.4] should_reject_rule_bearing_or_unknown_fields_in_venue_details", async () => {
     await expect(db.collection("venue_details").insertOne(detail(900, { max_capacity: 500 })))
+      .rejects.toMatchObject({ code: 121 });
+  });
+
+  test("[SPM-72] should_accept_related_venue_ids_and_reject_non_string_ones", async () => {
+    await expect(db.collection("venue_details").insertOne(detail(902, { relatedVenueIds: ["903", "904"] }))).resolves.toBeTruthy();
+    await expect(db.collection("venue_details").insertOne(detail(905, { relatedVenueIds: [903] })))
       .rejects.toMatchObject({ code: 121 });
   });
 

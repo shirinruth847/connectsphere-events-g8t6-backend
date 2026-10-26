@@ -8,6 +8,9 @@ const DETAIL_PROJECTION = {
   supportedLayouts: 1,
   emergencyAccess: 1,
   knownRestrictions: 1,
+  // Display-only links between venues, e.g. a hall and its rooms (each its own
+  // bookable venue); kept in both directions.
+  relatedVenueIds: 1,
   setupMinutes: 1,
   turnaroundMinutes: 1,
   version: 1,

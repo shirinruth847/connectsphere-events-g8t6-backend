@@ -29,7 +29,7 @@ const venue = (venueId, name) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   userModel.verifyAccessToken.mockResolvedValue("auth-venue");
-  userModel.findUserByAuthId.mockResolvedValue({ user_id: 9, role: "COORDINATOR", organisation_ids: [] });
+  userModel.findUserByAuthId.mockResolvedValue({ user_id: 9, role: "VENUE_STAFF", organisation_ids: [] });
   venueModel.getVenueCatalogue.mockResolvedValue({ venues: [], detailsAvailable: true });
 });
 
@@ -49,7 +49,7 @@ describe("GET /api/venues", () => {
     }
   );
 
-  test.each(["COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF"])(
+  test.each(["VENUE_STAFF"])(
     "[SPM-72-AC1] should_allow_catalogue_access_for_%s",
     async (role) => {
       userModel.findUserByAuthId.mockResolvedValue({ user_id: 9, role });
@@ -64,7 +64,8 @@ describe("GET /api/venues", () => {
     }
   );
 
-  test.each(["ORGANISER", "TECH_SUPPORT", "ATTENDEE", "SAFETY_OFFICER"])(
+  // Coordinators and Leads browse venues inside each event instead (SPM-72/74 AC1).
+  test.each(["COORDINATOR", "COORDINATOR_LEAD", "ORGANISER", "TECH_SUPPORT", "ATTENDEE", "SAFETY_OFFICER"])(
     "[SPM-72-AC1] should_return_403_for_%s_without_reading_the_catalogue",
     async (role) => {
       userModel.findUserByAuthId.mockResolvedValue({ user_id: 10, role });
@@ -86,6 +87,7 @@ describe("GET /api/venues", () => {
   ])(
     "[SPM-72-AC1][SPM-73-AC2] should_refuse_venue_maintenance_to_a_coordinator_for_%s_%s",
     async (method, path) => {
+      userModel.findUserByAuthId.mockResolvedValue({ user_id: 9, role: "COORDINATOR", organisation_ids: [] });
       const response = await request(app)[method](path).set("Authorization", "Bearer token").send({ name: "No write" });
 
       expect(response.status).toBe(403);

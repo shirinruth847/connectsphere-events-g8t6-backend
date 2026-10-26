@@ -337,6 +337,11 @@ const validateVenueDetails = (body) => {
 // ---------- catalogue search and filters (GET /api/venues) ----------
 
 const CATALOGUE_PARAMS = new Set(["search", "minCapacity", "layout", "facility", "accessibility"]);
+// layout, facility and accessibility take several values as repeated
+// parameters (developer request of 25 October 2026), matched as "any of";
+// one value still works.
+const LIST_FILTERS = ["layout", "facility", "accessibility"];
+const MAX_FILTER_VALUES = 10;
 
 const validateCatalogueQuery = (query) => {
   const fields = {};
@@ -344,12 +349,23 @@ const validateCatalogueQuery = (query) => {
   for (const key of Object.keys(query)) {
     if (!CATALOGUE_PARAMS.has(key)) fields[key] = "This filter is not supported.";
   }
-  for (const key of ["search", "layout", "facility", "accessibility"]) {
+  if (query.search !== undefined) {
+    const text = readText(query.search);
+    if (text === undefined) fields.search = MESSAGES.textInvalid;
+    else if (text && text.length > LIMITS.search) fields.search = MESSAGES.searchTooLong;
+    else if (text) filters.search = text;
+  }
+  for (const key of LIST_FILTERS) {
     if (query[key] === undefined) continue;
-    const text = readText(query[key]);
-    if (text === undefined) fields[key] = MESSAGES.textInvalid;
-    else if (text && text.length > LIMITS.search) fields[key] = MESSAGES.searchTooLong;
-    else if (text) filters[key] = text;
+    const texts = (Array.isArray(query[key]) ? query[key] : [query[key]]).map(readText);
+    if (texts.some((text) => text === undefined)) fields[key] = MESSAGES.textInvalid;
+    else if (texts.some((text) => text && text.length > LIMITS.search)) fields[key] = MESSAGES.searchTooLong;
+    else {
+      // The first spelling of each value is kept.
+      const values = texts.filter(Boolean).filter((text, index, all) => all.findIndex((other) => other.toLowerCase() === text.toLowerCase()) === index);
+      if (values.length > MAX_FILTER_VALUES) fields[key] = `Choose at most ${MAX_FILTER_VALUES} values.`;
+      else if (values.length) filters[key] = values;
+    }
   }
   if (query.minCapacity !== undefined && query.minCapacity !== "") {
     const capacity = toWholeNumber(query.minCapacity);
@@ -357,6 +373,39 @@ const validateCatalogueQuery = (query) => {
     else filters.minCapacity = capacity;
   }
   return { filters, fields };
+};
+
+// ---------- event venue options (GET /api/events/:id/venue-options, SPM-72/74) ----------
+
+const VENUE_OPTION_SORTS = Object.freeze(["match", "name", "capacity", "setup", "turnaround"]);
+const MAX_REQUIRED_FACILITIES = 10;
+const FACILITY_TERM_LIMIT = 100;
+
+// The catalogue filters plus the coordinator's required facilities (ranked and
+// highlighted, never filtered out), sort and order.
+const validateVenueOptionsQuery = (query) => {
+  const { requiredFacilities, sort, order, ...catalogueQuery } = query;
+  const { filters, fields } = validateCatalogueQuery(catalogueQuery);
+  const options = { filters, requiredFacilities: [], sort: "match", order: "asc" };
+
+  if (requiredFacilities !== undefined) {
+    const terms = typeof requiredFacilities === "string"
+      ? requiredFacilities.split(",").map((term) => term.trim()).filter(Boolean)
+      : null;
+    if (!terms) fields.requiredFacilities = MESSAGES.textInvalid;
+    else if (terms.length > MAX_REQUIRED_FACILITIES) fields.requiredFacilities = `Enter at most ${MAX_REQUIRED_FACILITIES} facilities.`;
+    else if (terms.some((term) => term.length > FACILITY_TERM_LIMIT)) fields.requiredFacilities = `Each facility must be ${FACILITY_TERM_LIMIT} characters or fewer.`;
+    else options.requiredFacilities = [...new Set(terms)];
+  }
+  if (sort !== undefined) {
+    if (!VENUE_OPTION_SORTS.includes(sort)) fields.sort = `Sort by one of: ${VENUE_OPTION_SORTS.join(", ")}.`;
+    else options.sort = sort;
+  }
+  if (order !== undefined) {
+    if (order !== "asc" && order !== "desc") fields.order = "Order must be asc or desc.";
+    else options.order = order;
+  }
+  return { options, fields };
 };
 
 const hasErrors = (fields) => Object.keys(fields).length > 0;
@@ -369,6 +418,8 @@ module.exports = {
   MANAGED_VENUE_SORTS,
   validateVenueDetails,
   validateCatalogueQuery,
+  validateVenueOptionsQuery,
+  VENUE_OPTION_SORTS,
   hasErrors,
   MESSAGES,
   DETAIL_MESSAGES,

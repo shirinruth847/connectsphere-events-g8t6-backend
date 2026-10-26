@@ -128,7 +128,7 @@ describe("eventModel edits", () => {
 });
 
 describe("eventModel.findVisibleEvent (AC1)", () => {
-  test.each(["VENUE_STAFF", "TECH_SUPPORT", "ATTENDEE", "COORDINATOR_LEAD"])(
+  test.each(["VENUE_STAFF", "TECH_SUPPORT", "ATTENDEE"])(
     "[SPM-33-TC-14] should_return_null_without_running_a_query_when_the_user_is_%s",
     async (role) => {
       const query = queryReturning({ data: { event_id: 42 }, error: null });
@@ -139,6 +139,41 @@ describe("eventModel.findVisibleEvent (AC1)", () => {
       expect(query.maybeSingle).not.toHaveBeenCalled();
     }
   );
+
+  // SPM-72/74: the supervising Lead reads the event; same scope as list_lead_event_assignments.
+  const leadRow = (overrides = {}) => ({
+    event_id: 42,
+    status: "UNDER_REVIEW",
+    coordinator_id: 7,
+    event_assignments: [{ assigned_by: 3, ended_at: "2026-10-01T00:00:00Z" }, { assigned_by: 21, ended_at: null }],
+    ...overrides,
+  });
+
+  test("[SPM-72-AC2] should_return_the_event_to_the_lead_who_made_the_open_assignment", async () => {
+    supabase.from.mockReturnValue(queryReturning({ data: leadRow(), error: null }));
+
+    await expect(eventModel.findVisibleEvent(42, staff("COORDINATOR_LEAD", 21))).resolves.toEqual(
+      expect.objectContaining({ event_id: 42, supervising_lead_id: 21 })
+    );
+  });
+
+  test("[SPM-72-AC2] should_return_a_pre_supervision_event_to_any_lead", async () => {
+    supabase.from.mockReturnValue(queryReturning({ data: leadRow({ event_assignments: [{ assigned_by: null, ended_at: null }] }), error: null }));
+
+    await expect(eventModel.findVisibleEvent(42, staff("COORDINATOR_LEAD", 21))).resolves.toEqual(
+      expect.objectContaining({ supervising_lead_id: 21 })
+    );
+  });
+
+  test.each([
+    ["another lead made the open assignment", { event_assignments: [{ assigned_by: 21, ended_at: "2026-10-01T00:00:00Z" }, { assigned_by: 3, ended_at: null }] }],
+    ["the event is unassigned", { status: "SUBMITTED", coordinator_id: null, event_assignments: [] }],
+    ["the event is closed", { status: "CANCELLED" }],
+  ])("[SPM-72-AC2] should_return_null_to_a_lead_when_%s", async (_, overrides) => {
+    supabase.from.mockReturnValue(queryReturning({ data: leadRow(overrides), error: null }));
+
+    await expect(eventModel.findVisibleEvent(42, staff("COORDINATOR_LEAD", 21))).resolves.toBeNull();
+  });
 
   test("[SPM-33-TC-06] should_filter_by_the_assigned_coordinator_and_exclude_drafts", async () => {
     const query = queryReturning({ data: null, error: null });
