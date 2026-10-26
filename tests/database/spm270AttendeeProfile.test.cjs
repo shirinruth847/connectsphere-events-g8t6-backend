@@ -255,8 +255,11 @@ for (const dashboardTable of [false, true]) {
 
   test(`[TC-PROFILE-006] should_update_fields_bump_the_version_and_touch_updated_at_when_the_version_matches_${label}`, async () => {
     const db = await setup({ dashboardTable });
-    await save(db, 1, "Vegetarian", null, null);
-    await db.query("UPDATE public.attendee_profile SET created_at = now() - interval '1 day', updated_at = now() - interval '1 day' WHERE user_id = 1");
+    // Seed an older row on INSERT: backdating via UPDATE invokes the very
+    // timestamp trigger under test and loses the deterministic baseline.
+    await db.query(`INSERT INTO public.attendee_profile
+      (user_id, dietary_restrictions, created_at, updated_at)
+      VALUES (1, 'Vegetarian', now() - interval '1 day', now() - interval '1 day')`);
     const before = await stored(db, 1);
     const updated = await save(db, 1, null, "Step-free access", 1);
     const after = await stored(db, 1);
