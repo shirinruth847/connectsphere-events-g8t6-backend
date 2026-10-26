@@ -134,7 +134,7 @@ Venue Staff only; every other role gets `403 FORBIDDEN`, and the database re-che
 
 ### Equipment Catalogue (SPM-52)
 
-Technical Support only, reads included; every other role gets `403 FORBIDDEN`, and the database re-checks the role inside each write. Needs migrations `20261024045601_spm52_equipment_catalogue`, `20261024050100_spm52_event_equipment_selectable` and `20261025130000_spm52_outbox_retry_and_past_segments`, and MongoDB script `0004_equipment_details`.
+Technical Support only, reads included; every other role gets `403 FORBIDDEN`, and the database re-checks the role inside each write. Needs migrations `20261024045601_spm52_equipment_catalogue`, `20261024050100_spm52_event_equipment_selectable` and `20261026100000_spm52_outbox_retry_and_past_segments`, and MongoDB script `0004_equipment_details`.
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
