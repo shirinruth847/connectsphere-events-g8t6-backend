@@ -127,8 +127,13 @@ const mergeWithExisting = (existingRow, input) => ({
   ...input,
 });
 
-const validateWith = async (validate, input) => {
-  const context = await eventModel.findValidationContext(input);
+// Equipment the saved event already requests stays valid even if it has since
+// been deactivated (SPM-52 AC9).
+const savedEquipmentIds = (existingRow) =>
+  (existingRow?.event_equipment_requirement || []).map((item) => item.equipment_id);
+
+const validateWith = async (validate, input, existingRow = null) => {
+  const context = await eventModel.findValidationContext(input, savedEquipmentIds(existingRow));
   return {
     ...validate(input, { allowedLayouts: context.allowedLayouts }),
     ...validateRequirements(input, context),
@@ -184,7 +189,7 @@ const validateCoordinatorEdit = (input) =>
   Object.keys(input).length === 0 ? { body: "Send at least one field to change." } : validateOrdinaryFields(input);
 
 // The owner's draft is validated as a whole: the saved values plus the ones sent.
-const validateOwnerDraft = (existing, input) => validateWith(validateDraft, mergeWithExisting(existing, input));
+const validateOwnerDraft = (existing, input) => validateWith(validateDraft, mergeWithExisting(existing, input), existing);
 
 // The save was made against an older version: nothing changed, and the current
 // values are returned so the user can review them before trying again (AC7).
@@ -346,6 +351,7 @@ const submitDraft = async (req, res, next) => {
     const errors = await validateWith(
       validateSubmission,
       mergeWithExisting(existing, input),
+      existing,
     );
     // Nothing is written on failure, so the status stays DRAFT (SPM-37 negative TC).
     if (hasErrors(errors)) return validationFailed(res, errors);
@@ -852,7 +858,7 @@ const checkAmendments = async (existing, changes) => {
 
   const input = eventModel.pickEventInput(changes);
   if (Object.keys(input).length === 0) return { errors: { changes: MESSAGES.amendmentEmpty } };
-  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input));
+  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input), existing);
   // The 48-hour lead time applies only to a newly chosen start (team decision, 2026-10-24).
   if (input.startDatetime === undefined && errors.startDatetime === MESSAGES.leadTime) delete errors.startDatetime;
   return { input, errors };

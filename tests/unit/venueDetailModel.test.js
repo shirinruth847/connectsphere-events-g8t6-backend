@@ -47,7 +47,14 @@ describe("mongodb/migrate", () => {
   test("[M8] should_record_each_script_once_and_skip_it_on_the_next_run", async () => {
     const history = await db.collection("_schema_migrations").find().toArray();
 
-    expect(history.map(({ _id }) => _id)).toEqual(["0001_venue_details", "0002_venue_calendar", "0003_venue_photos", "0004_venue_related_venues", "0005_venue_photo_galleries"]);
+    expect(history.map(({ _id }) => _id)).toEqual([
+      "0001_venue_details",
+      "0002_venue_calendar",
+      "0003_venue_photos",
+      "0004_equipment_details",
+      "0004_venue_related_venues",
+      "0005_venue_photo_galleries",
+    ]);
     await expect(applyMigrations(db)).resolves.toEqual([]);
   });
 

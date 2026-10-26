@@ -1,0 +1,19 @@
+{
+  "$jsonSchema": {
+    "bsonType": "object",
+    "description": "Equipment detail (Master section 6.4, SPM-52). _id is the PostgreSQL equipment_id as a string. Display information only: quantities, unavailability and reservations stay in PostgreSQL. Written only by applying outbox entries; pg_version is the PostgreSQL version the document reflects.",
+    "required": ["_id", "pg_version", "name", "category"],
+    "additionalProperties": false,
+    "properties": {
+      "_id": { "bsonType": "string", "maxLength": 64 },
+      "pg_version": { "bsonType": "int", "minimum": 1 },
+      "name": { "bsonType": "string", "maxLength": 150 },
+      "category": { "bsonType": "string", "maxLength": 100 },
+      "specifications": { "bsonType": ["string", "null"], "maxLength": 2000 },
+      "technicalNotes": { "bsonType": ["string", "null"], "maxLength": 2000 },
+      "handlingNotes": { "bsonType": ["string", "null"], "maxLength": 2000 },
+      "updatedAt": { "bsonType": "date" },
+      "fixture": { "bsonType": "string", "maxLength": 64 }
+    }
+  }
+}
