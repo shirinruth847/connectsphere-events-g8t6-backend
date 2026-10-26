@@ -24,19 +24,24 @@ const callRpc = async (name, args) => {
 // hosts, never credentials, and the column is bounded anyway.
 const describeFailure = (error) => `${error.name || "Error"}: ${String(error.message || "").slice(0, 300)}`;
 
-// MongoDB could not be reached at all (not configured, refused, timed out).
-// That is an outage to retry, not an entry that keeps failing (Master 7.3), so
-// it never counts towards FAILED. Every developer's backend runs the sync job
-// against the shared outbox, so one without Atlas access must not use up the
-// attempts of everyone's entries.
+// MongoDB could not be reached at all (not configured, DNS lookup failed,
+// refused, timed out). That is an outage to retry, not an entry that keeps
+// failing (Master 7.3), so it never counts towards FAILED. Every developer's
+// backend runs the sync job against the shared outbox, so one without Atlas
+// access must not use up the attempts of everyone's entries.
 const UNREACHABLE_ERRORS = new Set([
   "MongoServerSelectionError",
   "MongoNetworkError",
   "MongoNetworkTimeoutError",
   "MongoTopologyClosedError",
   "MongoNotConnectedError",
+  "MongoPoolClearedError",
+  "MongoServerClosedError",
 ]);
-const isMongoUnreachable = (error) => error?.code === "MONGODB_NOT_CONFIGURED" || UNREACHABLE_ERRORS.has(error?.name);
+// A failed mongodb+srv lookup reaches us as a plain Error carrying the DNS or
+// socket code (for example querySrv ENOTFOUND or ETIMEOUT).
+const UNREACHABLE_CODES = new Set(["MONGODB_NOT_CONFIGURED", "ENOTFOUND", "ETIMEOUT", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET"]);
+const isMongoUnreachable = (error) => UNREACHABLE_CODES.has(error?.code) || UNREACHABLE_ERRORS.has(error?.name);
 
 // applyEntry result when MongoDB could not be reached.
 const UNREACHABLE = "UNREACHABLE";

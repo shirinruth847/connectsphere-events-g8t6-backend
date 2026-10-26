@@ -37,6 +37,10 @@ describe("SPM-52 applying entries", () => {
     ["MongoServerSelectionError", unreachable()],
     ["MongoNetworkError", Object.assign(new Error("socket closed"), { name: "MongoNetworkError" })],
     ["MONGODB_NOT_CONFIGURED", Object.assign(new Error("MongoDB is not configured."), { code: "MONGODB_NOT_CONFIGURED" })],
+    // How the driver reports a failed mongodb+srv lookup: a plain Error with the DNS code.
+    ["a DNS lookup that found no host", Object.assign(new Error("querySrv ENOTFOUND _mongodb._tcp.spm.example"), { code: "ENOTFOUND" })],
+    ["a DNS lookup that timed out", Object.assign(new Error("querySrv ETIMEOUT _mongodb._tcp.spm.example"), { code: "ETIMEOUT" })],
+    ["MongoPoolClearedError", Object.assign(new Error("Connection pool was cleared"), { name: "MongoPoolClearedError" })],
   ])("[TC-12] should_hand_the_entry_back_without_counting_an_attempt_on_%s", async (_kind, error) => {
     equipmentDetailModel.applyEquipmentDetail.mockRejectedValue(error);
     rpcAnswers({ release_outbox_entry: () => true });
@@ -106,6 +110,22 @@ describe("SPM-52 sync job", () => {
     rpcAnswers({});
 
     await expect(runMongoSync()).resolves.toEqual({ processed: 0, unreachable: true });
+    expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  test("[7.3] should_claim_nothing_when_the_atlas_dns_lookup_fails", async () => {
+    equipmentDetailModel.pingEquipmentDetails.mockRejectedValue(Object.assign(new Error("querySrv ETIMEOUT _mongodb._tcp.spm.example"), { code: "ETIMEOUT" }));
+    rpcAnswers({});
+
+    await expect(runMongoSync()).resolves.toEqual({ processed: 0, unreachable: true });
+    expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  test("[7.3] should_report_other_ping_failures_instead_of_treating_them_as_an_outage", async () => {
+    equipmentDetailModel.pingEquipmentDetails.mockRejectedValue(Object.assign(new Error("not authorized"), { name: "MongoServerError", code: 13 }));
+    rpcAnswers({});
+
+    await expect(runMongoSync()).rejects.toThrow("not authorized");
     expect(supabase.rpc).not.toHaveBeenCalled();
   });
 

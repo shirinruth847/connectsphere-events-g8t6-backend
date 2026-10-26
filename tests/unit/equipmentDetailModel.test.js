@@ -53,6 +53,21 @@ describe("SPM-52 equipment_details", () => {
     await expect(pingEquipmentDetails()).resolves.toBeUndefined();
   });
 
+  // The real driver's errors, so a driver upgrade that changes their shape fails here.
+  test.each([
+    ["a mongodb+srv host that does not resolve", "mongodb+srv://nobody.spm52-unit.invalid/?appName=spm52-unit"],
+    ["a refused connection", "mongodb://127.0.0.1:9/?directConnection=true"],
+  ])("[7.3] should_classify_%s_as_mongodb_unreachable", async (_label, uri) => {
+    const { MongoClient } = require("mongodb");
+    const { isMongoUnreachable } = require("../../model/outboxModel");
+    const client = new MongoClient(uri, { serverSelectionTimeoutMS: 1000 });
+    const error = await client.connect().then(() => null, (caught) => caught);
+    await client.close().catch(() => {});
+
+    expect(error).not.toBeNull();
+    expect(isMongoUnreachable(error)).toBe(true);
+  });
+
   test("[TC-15] should_reject_a_document_holding_total_quantity", async () => {
     await expect(db.collection("equipment_details").insertOne({ _id: "900", pg_version: 1, name: "Mixer", category: "Audio", total_quantity: 5 }))
       .rejects.toMatchObject({ code: 121 });
