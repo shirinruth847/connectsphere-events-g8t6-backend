@@ -74,12 +74,16 @@ describe("findVenueBookings", () => {
     }));
     const list = queryReturning({ data: rows, error: null });
     const pending = queryReturning({ count: 3, error: null });
-    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(pending);
+    const approved = queryReturning({ count: 5, error: null });
+    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(pending).mockReturnValueOnce(approved);
 
     const result = await venueModel.findVenueBookings({ status: "PENDING", venueId: 45, eventId: null, from: null, to: null, limit: 2 });
 
     expect(result.hasMore).toBe(true);
     expect(result.pendingCount).toBe(3);
+    expect(result.approvedCount).toBe(5);
+    expect(pending.eq).toHaveBeenCalledWith("status", "PENDING");
+    expect(approved.eq).toHaveBeenCalledWith("status", "APPROVED");
     expect(result.bookings).toHaveLength(2);
     expect(result.bookings[0]).toEqual({
       bookingId: 1,
@@ -104,7 +108,7 @@ describe("findVenueBookings", () => {
 
   test("[SPM-181-AC5] should_filter_by_overlap_with_the_requested_day", async () => {
     const list = queryReturning({ data: [], error: null });
-    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(queryReturning({ count: 0, error: null }));
+    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(queryReturning({ count: 0, error: null })).mockReturnValueOnce(queryReturning({ count: 0, error: null }));
 
     await venueModel.findVenueBookings({ status: null, venueId: null, eventId: 442, from: "A", to: "B", limit: 100 });
 
@@ -114,6 +118,7 @@ describe("findVenueBookings", () => {
   test("should_throw_database_errors_instead_of_returning_an_empty_list", async () => {
     supabase.from
       .mockReturnValueOnce(queryReturning({ data: null, error: { code: "42P01" } }))
+      .mockReturnValueOnce(queryReturning({ count: 0, error: null }))
       .mockReturnValueOnce(queryReturning({ count: 0, error: null }));
 
     await expect(venueModel.findVenueBookings({ limit: 10 })).rejects.toEqual({ code: "42P01" });

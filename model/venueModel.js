@@ -1145,18 +1145,20 @@ const findVenueBookings = async ({ status, venueId, eventId, from, to, limit, q 
   if (q) query = query.or(await bookingSearchFilter(q));
   query = applyBookingSort(query, sort, order).limit(limit + 1);
 
-  const [list, pending] = await Promise.all([
-    query,
-    supabase.from("venue_booking").select("booking_id", { count: "exact", head: true }).eq("status", "PENDING"),
-  ]);
+  // The dashboard counts cover every booking, whatever the search or filters.
+  const countWithStatus = (bookingStatus) =>
+    supabase.from("venue_booking").select("booking_id", { count: "exact", head: true }).eq("status", bookingStatus);
+  const [list, pending, approved] = await Promise.all([query, countWithStatus("PENDING"), countWithStatus("APPROVED")]);
   if (list.error) throw list.error;
   if (pending.error) throw pending.error;
+  if (approved.error) throw approved.error;
 
   const rows = list.data || [];
   return {
     bookings: rows.slice(0, limit).map(toBookingListItem),
     hasMore: rows.length > limit,
     pendingCount: pending.count ?? 0,
+    approvedCount: approved.count ?? 0,
   };
 };
 
