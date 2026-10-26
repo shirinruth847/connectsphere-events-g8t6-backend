@@ -1,7 +1,7 @@
 const eventModel = require("../model/eventModel");
 const activityModel = require("../model/activityModel");
 const { getEventAccess, getEditDenial, loadEventForViewer, EVENT_NOT_FOUND } = require("../middleware/authorize");
-const { parseEventId } = require("../middleware/validate");
+const { parseEventId, readIdempotencyKey, IDEMPOTENCY_KEY_MESSAGE } = require("../middleware/validate");
 const {
   validateDraft,
   validateSubmission,
@@ -28,9 +28,6 @@ const {
 const EVENT_STATUSES = Object.values(EVENT_STATUS);
 const KNOWN_EVENT_FIELDS = new Set(Object.values(EVENT_FIELD_GROUPS).flat());
 const SYSTEM_FIELDS = new Set(EVENT_FIELD_GROUPS.SYSTEM);
-const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{8,128}$/;
-const IDEMPOTENCY_KEY_MESSAGE =
-  "Send an Idempotency-Key header of 8-128 letters, digits, '.', '_', ':' or '-' (a UUID works).";
 const VERSION_MESSAGE = "Send the version of the event you loaded.";
 
 const DOMAIN_ERRORS = Object.freeze({
@@ -94,12 +91,6 @@ const handleError = (error, res, next) => {
 
   }
   return next(error);
-};
-
-
-const readIdempotencyKey = (req) => {
-  const key = req.get("Idempotency-Key");
-  return typeof key === "string" && IDEMPOTENCY_KEY.test(key) ? key : null;
 };
 
 // A sent key must be well formed; a missing one is an error only when "required".
