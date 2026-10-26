@@ -1,6 +1,7 @@
 // SPM-52 live integration tests: real routes, Supabase Auth and the shared
-// development database. Needs migrations 20261024045601_spm52_equipment_catalogue
-// and 20261024050100_spm52_event_equipment_selectable. MongoDB is a local
+// development database. Needs migrations 20261024045601_spm52_equipment_catalogue,
+// 20261024050100_spm52_event_equipment_selectable and
+// 20261025130000_spm52_outbox_retry_and_past_segments. MongoDB is a local
 // in-memory replica set (Master M7), never Atlas.
 //
 // Equipment is synthetic (spm52-<run> ...). It references the Technical Support
@@ -8,8 +9,9 @@
 // outbox entries through the privileged test connection (TEST_DATABASE_URL)
 // before the shared fixture cleanup removes the profiles.
 //
-// Run with the dev server's sync job off (MONGO_SYNC_INTERVAL_MS=0): a running
-// job could otherwise apply this suite's pending entries to Atlas.
+// Entries this suite leaves pending are parked (next_attempt_at = infinity) as
+// soon as they exist, so another developer's sync job never applies them to
+// Atlas; the suite applies them itself by entry ID.
 //
 // TC-17 (cancel the create form) is browser-only: a cancelled form sends no request.
 const crypto = require("crypto");
@@ -76,6 +78,15 @@ const createItem = async (name, extra = {}) => {
   return response;
 };
 
+// Keeps the item's pending entries away from every sync job's batch claim.
+// applyEntryNow still claims them by ID.
+const parkPendingEntries = (equipmentId) => withPrivileged((client) => client.query(
+  "UPDATE public.outbox_entries SET next_attempt_at = 'infinity' WHERE target_collection = 'equipment_details' AND document_id = $1 AND state = 'PENDING'",
+  [String(equipmentId)]
+));
+
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
 const futureHour = (dayOffset, hour, minute = 0) => {
   const date = new Date(Date.UTC(2031, 0, 6 + dayOffset, hour, minute));
   return date.toISOString();
@@ -132,7 +143,7 @@ beforeAll(async () => {
   process.env.MONGODB_URI = replSet.getUri();
   process.env.MONGODB_DB_NAME = `spm52_${runId}`;
   await applyMigrations(await getMongoDb());
-  fixtures = await createAuthFixtures(runId);
+  fixtures = await createAuthFixtures(runId, { extraAccounts: [{ key: "safetyOfficer", role: "SAFETY_OFFICER" }] });
 });
 
 afterAll(async () => {
@@ -160,7 +171,7 @@ afterAll(async () => {
 });
 
 describe("SPM-52 access", () => {
-  test.each(["organiserA", "coordinatorLead", "coordinator", "venueStaff", "attendee"])(
+  test.each(["organiserA", "coordinatorLead", "coordinator", "venueStaff", "safetyOfficer", "attendee"])(
     "[TC-05] should_refuse_%s_on_every_catalogue_route_and_change_nothing",
     async (key) => {
       const responses = await Promise.all([
@@ -338,6 +349,22 @@ describe("SPM-52 unavailable stock", () => {
       "EQUIPMENT_UNAVAILABILITY_ENDED",
     ]);
   });
+
+  test("[AC8] should_let_a_started_record_be_edited_after_the_total_was_lowered_below_past_use", async () => {
+    const id = (await createItem("Cable Ramp")).body.equipment.equipmentId;
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const inTwoHours = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    const started = (await call("techSupport", "post", `/api/equipment/${id}/unavailability`, period(hourAgo, inTwoHours, 3))).body.unavailability;
+    const other = (await call("techSupport", "post", `/api/equipment/${id}/unavailability`, period(hourAgo, inTwoHours, 2))).body.unavailability;
+    // The second record ends now, so its 2 units count only in the past.
+    expect((await call("techSupport", "post", `/api/equipment/${id}/unavailability/${other.unavailabilityId}/end`, { version: 1 })).status).toBe(200);
+    expect((await call("techSupport", "put", `/api/equipment/${id}`, { totalQuantity: 3, version: 1 })).status).toBe(200);
+
+    const edited = await call("techSupport", "put", `/api/equipment/${id}/unavailability/${started.unavailabilityId}`, { note: "Still at the repairer", version: 1 });
+
+    expect(edited.status).toBe(200);
+    expect(edited.body.unavailability).toMatchObject({ note: "Still at the repairer", quantity: 3 });
+  });
 });
 
 describe("SPM-52 selection by event requests", () => {
@@ -380,6 +407,7 @@ describe("SPM-52 selection by event requests", () => {
     } finally {
       await restoreMongo();
     }
+    await parkPendingEntries(item.equipmentId);
 
     expect(edited.status).toBe(200);
     expect(edited.body.equipment).toMatchObject({ status: "ACTIVE", detailStatus: "OUT_OF_DATE", detailNotice: "Details may be out of date", version: 2 });
@@ -387,8 +415,9 @@ describe("SPM-52 selection by event requests", () => {
     recordDraft(usable);
     expect(usable.status).toBe(201);
 
+    // An outage is retried, never counted towards FAILED (Master 7.3).
     const pending = (await entriesFor(item.equipmentId)).find((entry) => entry.pg_version === 2);
-    expect(pending).toMatchObject({ state: "PENDING", attempts: 1 });
+    expect(pending).toMatchObject({ state: "PENDING", attempts: 0 });
     await expect(outboxModel.applyEntryNow(pending.entry_id)).resolves.toBe("APPLIED");
 
     const reloaded = await call("techSupport", "get", `/api/equipment/${item.equipmentId}`);
@@ -405,6 +434,7 @@ describe("SPM-52 selection by event requests", () => {
       await restoreMongo();
     }
     const item = created.body.equipment;
+    await parkPendingEntries(item.equipmentId);
     expect(item).toMatchObject({ status: "DETAILS_PENDING", statusLabel: "Details pending" });
     // [TC-16] the status filter follows the item from Details pending to Active.
     const listedAs = async (status) => (await call("techSupport", "get", `/api/equipment?search=${encodeURIComponent(`${prefix} Pending Lapel`)}&status=${status}`))
@@ -435,6 +465,7 @@ describe("SPM-52 selection by event requests", () => {
     } finally {
       await restoreMongo();
     }
+    await parkPendingEntries(pending.equipmentId);
     const eventId = fixtures.events.ownDraft;
 
     await withPrivileged(async (client) => {
@@ -452,7 +483,6 @@ describe("SPM-52 selection by event requests", () => {
         await client.query("ROLLBACK");
       }
     });
-    // Apply the pending entry here so no other process's sync job picks it up.
     const [entry] = await entriesFor(pending.equipmentId);
     await expect(outboxModel.applyEntryNow(entry.entry_id)).resolves.toBe("APPLIED");
   });
@@ -464,17 +494,47 @@ describe("SPM-52 outbox and rollback", () => {
     await setMongoUnavailable();
     try {
       await call("techSupport", "put", `/api/equipment/${item.equipmentId}`, { specifications: "Will not sync", version: 1 });
-      const entry = (await entriesFor(item.equipmentId)).find((row) => row.pg_version === 2);
-      const { data: claimed } = await supabase.rpc("claim_outbox_entry", { p_entry_id: entry.entry_id, p_lease_seconds: 30 });
-      // The post-commit attempt already failed once; the limit here is 2.
-      await expect(outboxModel.applyEntry(claimed[0], 2)).resolves.toBe("FAILED");
     } finally {
       await restoreMongo();
     }
+    await parkPendingEntries(item.equipmentId);
+    const entry = (await entriesFor(item.equipmentId)).find((row) => row.pg_version === 2);
+    // An entry that keeps failing: its document breaks the validator's 2000-character limit.
+    await withPrivileged((client) => client.query(
+      "UPDATE public.outbox_entries SET payload = jsonb_set(payload, '{specifications}', to_jsonb(repeat('x', 2001))) WHERE entry_id = $1",
+      [entry.entry_id]
+    ));
+
+    await expect(outboxModel.applyEntryNow(entry.entry_id, 2)).resolves.toBe("PENDING");
+    await expect(outboxModel.applyEntryNow(entry.entry_id, 2)).resolves.toBe("FAILED");
 
     expect((await entriesFor(item.equipmentId)).find((row) => row.pg_version === 2)).toMatchObject({ state: "FAILED", attempts: 2 });
     const reloaded = await call("techSupport", "get", `/api/equipment/${item.equipmentId}`);
     expect(reloaded.body.equipment).toMatchObject({ detailStatus: "FAILED", detailNotice: "Details may be out of date" });
+  });
+
+  test("[7.3] should_count_an_abandoned_lease_and_give_up_at_the_limit", async () => {
+    const item = (await createItem("Abandoned Mic")).body.equipment;
+    await setMongoUnavailable();
+    try {
+      await call("techSupport", "put", `/api/equipment/${item.equipmentId}`, { specifications: "Worker died", version: 1 });
+    } finally {
+      await restoreMongo();
+    }
+    await parkPendingEntries(item.equipmentId);
+    const entry = (await entriesFor(item.equipmentId)).find((row) => row.pg_version === 2);
+
+    // A worker claims the entry and stops before recording anything, twice.
+    const { data: first } = await supabase.rpc("claim_outbox_entry", { p_entry_id: entry.entry_id, p_lease_seconds: 1 });
+    expect(first).toHaveLength(1);
+    await sleep(1500);
+    const { data: second } = await supabase.rpc("claim_outbox_entry", { p_entry_id: entry.entry_id, p_lease_seconds: 1, p_max_attempts: 8 });
+    expect(second[0]).toMatchObject({ entry_id: entry.entry_id, attempts: 1 });
+    await sleep(1500);
+    const { data: third } = await supabase.rpc("claim_outbox_entry", { p_entry_id: entry.entry_id, p_lease_seconds: 1, p_max_attempts: 2 });
+
+    expect(third).toEqual([]);
+    expect((await entriesFor(item.equipmentId)).find((row) => row.pg_version === 2)).toMatchObject({ state: "FAILED", attempts: 2 });
   });
 
   test("[TC-14] should_leave_no_change_and_no_outbox_entry_when_the_activity_insert_fails", async () => {

@@ -3,9 +3,10 @@ jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), aut
 jest.mock("../../model/userModel");
 jest.mock("../../model/equipmentModel", () => ({
   listEquipment: jest.fn(),
-  listEquipmentCategories: jest.fn(),
+  listEquipmentOptions: jest.fn(),
   getEquipment: jest.fn(),
   findEquipmentSummary: jest.fn(),
+  findCurrentDetails: jest.fn(),
   findUnavailabilityRow: jest.fn(),
   createEquipment: jest.fn(),
   updateEquipment: jest.fn(),
@@ -137,15 +138,18 @@ describe("SPM-52 catalogue", () => {
     expect(response.body).toMatchObject({ code: "EQUIPMENT_NAME_TAKEN", fields: { name: "Equipment with this name already exists" } });
   });
 
-  test("[TC-07] should_answer_409_with_the_current_values_when_the_version_is_stale", async () => {
+  test("[TC-07] should_answer_409_with_the_current_record_and_details_when_the_version_is_stale", async () => {
     const current = { ...saved, storageLocation: "Store Room C", version: 3 };
+    const currentDetails = { specifications: "4K, 5000 lm", technicalNotes: null, handlingNotes: "Two people to lift" };
     equipmentModel.updateEquipment.mockRejectedValue(equipmentError("EQUIPMENT_VERSION_CONFLICT"));
     equipmentModel.findEquipmentSummary.mockResolvedValue(current);
+    equipmentModel.findCurrentDetails.mockResolvedValue(currentDetails);
 
     const response = await as("put", "/api/equipment/9").send({ storageLocation: "Store Room D", version: 2 });
 
     expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({ code: "EQUIPMENT_VERSION_CONFLICT", current });
+    expect(response.body).toMatchObject({ code: "EQUIPMENT_VERSION_CONFLICT", current, currentDetails });
+    expect(equipmentModel.findCurrentDetails).toHaveBeenCalledWith(9);
   });
 
   test("[TC-08] should_name_the_committed_quantity_and_period_when_lowering_the_total", async () => {
@@ -157,7 +161,9 @@ describe("SPM-52 catalogue", () => {
 
     expect(response.status).toBe(409);
     expect(response.body).toMatchObject({ code: "EQUIPMENT_QUANTITY_COMMITTED", committedQuantity: 3 });
-    expect(response.body.error).toContain("3 units are unavailable from 2031-01-06T09:00:00+00:00 to 2031-01-06T10:00:00+00:00");
+    // Named in Singapore time, as the page enters it (09:00 UTC is 17:00 SGT).
+    expect(response.body.error).toBe("3 units are unavailable during Mon, 6 Jan 2031 · 17:00–18:00 SGT, so the total cannot be lower than 3.");
+    expect(response.body).toMatchObject({ periodStart: "2031-01-06T09:00:00+00:00", periodEnd: "2031-01-06T10:00:00+00:00" });
     expect(response.body.fields.totalQuantity).toBe(response.body.error);
   });
 
@@ -204,7 +210,19 @@ describe("SPM-52 unavailable stock", () => {
 
     expect(response.status).toBe(409);
     expect(response.body).toMatchObject({ code: "EQUIPMENT_STOCK_EXCEEDED", availableQuantity: 5 });
-    expect(response.body.fields.quantity).toContain("Only 5 units are left");
+    expect(response.body.fields.quantity).toBe(
+      "Only 5 units are left to mark unavailable during Mon, 6 Jan 2031 · 20:00–21:00 SGT. Unavailable stock cannot exceed the total."
+    );
+  });
+
+  test("[AC8] should_give_both_dates_when_the_period_crosses_midnight_in_singapore", async () => {
+    equipmentModel.recordUnavailability.mockRejectedValue(equipmentError("EQUIPMENT_STOCK_EXCEEDED", {
+      detail: { availableQuantity: 1, periodStart: "2031-01-06T15:00:00+00:00", periodEnd: "2031-01-06T17:00:00+00:00" },
+    }));
+
+    const response = await as("post", "/api/equipment/9/unavailability").send({ ...period, quantity: 6 });
+
+    expect(response.body.error).toContain("during Mon, 6 Jan 2031 23:00 – Tue, 7 Jan 2031 01:00 SGT.");
   });
 
   test("[TC-10] should_refuse_an_end_before_the_start_without_calling_the_model", async () => {

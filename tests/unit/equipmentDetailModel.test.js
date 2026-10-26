@@ -7,13 +7,14 @@ let replSet;
 let db;
 let applyEquipmentDetail;
 let getEquipmentDetail;
+let pingEquipmentDetails;
 let closeMongoDb;
 
 beforeAll(async () => {
   replSet = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: "wiredTiger" } });
   process.env.MONGODB_URI = replSet.getUri();
   process.env.MONGODB_DB_NAME = "spm52_unit";
-  ({ applyEquipmentDetail, getEquipmentDetail } = require("../../model/equipmentDetailModel"));
+  ({ applyEquipmentDetail, getEquipmentDetail, pingEquipmentDetails } = require("../../model/equipmentDetailModel"));
   const { applyMigrations } = require("../../mongodb/migrate");
   let getMongoDb;
   ({ getMongoDb, closeMongoDb } = require("../../config/mongodb"));
@@ -46,6 +47,10 @@ describe("SPM-52 equipment_details", () => {
     await applyEquipmentDetail(snapshot(5, { specifications: null, handlingNotes: "Two people" }));
 
     expect(await getEquipmentDetail(41)).toMatchObject({ pg_version: 5, specifications: null, handlingNotes: "Two people" });
+  });
+
+  test("[7.3] should_answer_the_ping_the_sync_job_checks_before_claiming", async () => {
+    await expect(pingEquipmentDetails()).resolves.toBeUndefined();
   });
 
   test("[TC-15] should_reject_a_document_holding_total_quantity", async () => {
