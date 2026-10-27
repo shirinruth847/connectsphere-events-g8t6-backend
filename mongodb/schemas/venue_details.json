@@ -15,6 +15,7 @@
       "supportedLayouts": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 100 }, "maxItems": 20 },
       "emergencyAccess": { "bsonType": ["string", "null"], "maxLength": 1000 },
       "knownRestrictions": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 200 }, "maxItems": 50 },
+      "relatedVenueIds": { "bsonType": "array", "items": { "bsonType": "string", "maxLength": 64 }, "maxItems": 50 },
       "setupMinutes": { "bsonType": "int", "minimum": 0, "maximum": 1440 },
       "turnaroundMinutes": { "bsonType": "int", "minimum": 0, "maximum": 1440 },
       "version": { "bsonType": "int", "minimum": 0 },

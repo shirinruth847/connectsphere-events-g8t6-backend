@@ -93,6 +93,8 @@ const EVENT_RELATIONSHIP = Object.freeze({
   ORGANISATION_MEMBER: "ORGANISATION_MEMBER",
   ASSIGNED_COORDINATOR: "ASSIGNED_COORDINATOR",
   SAFETY_OFFICER: "SAFETY_OFFICER", // the event has a round in their queue, held or decided by them (SPM-243 AC2)
+  // The Lead who made the current assignment, read-only (Master 4.2, T19, T23).
+  SUPERVISING_LEAD: "SUPERVISING_LEAD",
 });
 
 // Who may read a change-history entry. Values match activity_log.audience.
@@ -146,6 +148,10 @@ const OWNER_DRAFT_FIELDS = Object.freeze([
 // Statuses in which the assigned coordinator may edit ordinary fields, in Master
 // section 5.2 lifecycle order. SUBMITTED is absent because an event in it has no
 // coordinator, and there is no APPROVED state.
+// Where the assigned coordinator may suggest a venue to the organiser (SPM-72/74);
+// suggest_event_venue checks the same list.
+const VENUE_SUGGESTION_STATUSES = Object.freeze(["UNDER_REVIEW", "PLANNING"]);
+
 const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "UNDER_REVIEW",
   "PLANNING",
@@ -229,4 +235,5 @@ module.exports = {
   AMENDMENT_FIELDS,
   SAFETY_ROUND_STATUS,
   SAFETY_REVIEW_HISTORY_FIELDS,
+  VENUE_SUGGESTION_STATUSES,
 };

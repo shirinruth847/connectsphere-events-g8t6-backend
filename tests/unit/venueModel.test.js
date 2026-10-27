@@ -46,6 +46,10 @@ const tableOf = (rows, error = null) => {
       filters.push([column, value]);
       return query;
     }),
+    in: jest.fn((column, values) => {
+      filters.push([column, values]);
+      return query;
+    }),
     order: jest.fn((column, { ascending }) => {
       orders.push([column, ascending]);
       return query;
@@ -54,7 +58,7 @@ const tableOf = (rows, error = null) => {
   query.then = (resolve) => {
     if (error) return resolve({ data: null, error });
     const data = rows
-      .filter((row) => filters.every(([column, value]) => row[column] === value))
+      .filter((row) => filters.every(([column, value]) => (Array.isArray(value) ? value.includes(row[column]) : row[column] === value)))
       .sort((a, b) => {
         for (const [column, ascending] of orders) {
           if (a[column] < b[column]) return ascending ? -1 : 1;
@@ -121,6 +125,7 @@ describe("venueModel.getVenueCatalogue", () => {
       supportedLayouts: ["THEATRE"],
       emergencyAccess: "North exit",
       knownRestrictions: ["No open flames"],
+      relatedVenues: [],
     });
     expect(venueDetailModel.getVenueDetailsByIds).toHaveBeenCalledWith([1, 2]);
   });
@@ -145,7 +150,45 @@ describe("venueModel.getVenueCatalogue", () => {
       supportedLayouts: null,
       emergencyAccess: null,
       knownRestrictions: null,
+      relatedVenues: [],
     });
+  });
+
+  test("[SPM-75 TC-VS-003] should_match_a_venue_with_any_chosen_layout_facility_or_accessibility_feature", async () => {
+    venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([
+      ["1", { ...venueADetails, supportedLayouts: ["THEATRE"], facilities: ["Stage"], accessibilityFeatures: ["Step-free access"] }],
+      ["2", { _id: "2", supportedLayouts: ["BANQUET"], facilities: ["Projector"], accessibilityFeatures: ["Hearing loop"] }],
+    ]));
+    const ids = async (filters) => (await venueModel.getVenueCatalogue(filters)).venues.map(({ venueId }) => venueId);
+
+    expect(await ids({ layout: ["Theatre", "Banquet"] })).toEqual([1, 2]);
+    expect(await ids({ facility: ["projector", "stage"] })).toEqual([1, 2]);
+    expect(await ids({ facility: ["Stage", "Whiteboard"] })).toEqual([1]);
+    expect(await ids({ accessibility: ["hearing loop", "Lift"] })).toEqual([2]);
+    // Every filter used must match: a banquet layout with a stage fits neither venue.
+    expect(await ids({ layout: ["Banquet"], facility: ["Stage"] })).toEqual([]);
+  });
+
+  test("[SPM-72-AC4] should_link_related_venues_by_name_when_they_are_still_available", async () => {
+    // Venue A is a hall; B is one of its rooms. Deleted and inactive rooms are not linked.
+    venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([
+      ["1", { ...venueADetails, relatedVenueIds: ["2", "3", "4"] }],
+      ["2", { _id: "2", relatedVenueIds: ["1"] }],
+    ]));
+
+    const result = await venueModel.getVenueCatalogue();
+
+    expect(result.venues[0].relatedVenues).toEqual([{ venueId: 2, name: "Venue B" }]);
+    expect(result.venues[1].relatedVenues).toEqual([{ venueId: 1, name: "Venue A" }]);
+    expect(table.in).toHaveBeenCalledWith("venue_id", [2, 3, 4, 1]);
+  });
+
+  test("[SPM-72-AC11] should_leave_related_venues_unknown_when_mongodb_is_unavailable", async () => {
+    venueDetailModel.getVenueDetailsByIds.mockRejectedValue(new Error("down"));
+
+    const result = await venueModel.getVenueCatalogue();
+
+    expect(result.venues.map(({ relatedVenues }) => relatedVenues)).toEqual([null, null]);
   });
 
   test("[TC-VC-003][SPM-72-AC4] should_exclude_a_deleted_venue_when_it_is_inactive_in_postgres", async () => {
