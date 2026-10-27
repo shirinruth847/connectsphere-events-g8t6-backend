@@ -787,12 +787,14 @@ const assignCoordinator = async ({ eventId, coordinatorId, leadId }) => {
   return data.event;
 };
 
-const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinatorId, leadId }) => {
-  const { data, error } = await supabase.rpc("reassign_event_coordinator", {
+const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinatorId, leadId, idempotencyKey }) => {
+  const { data, error } = await supabase.rpc("reassign_event_coordinator_idempotent", {
     p_event_id: eventId,
     p_coordinator_id: coordinatorId,
     p_expected_coordinator_id: expectedCoordinatorId,
     p_lead_id: leadId,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({ coordinatorId, expectedCoordinatorId }, {}, [eventId]),
   });
   if (error) {
     const code = error.message;
@@ -807,7 +809,7 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
     throw toEventRequestError(error);
   }
   if (!data || !data.event || !data.coordinator) {
-    throw new Error("reassign_event_coordinator returned an incomplete result.");
+    throw new Error("reassign_event_coordinator_idempotent returned an incomplete result.");
   }
   return {
     event: {
@@ -821,6 +823,7 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
       coordinatorId: data.coordinator.user_id,
       name: data.coordinator.name,
     },
+    replayed: data.replayed === true,
   };
 };
 

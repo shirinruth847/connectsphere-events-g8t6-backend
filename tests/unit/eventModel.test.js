@@ -711,17 +711,20 @@ describe("SPM-180 reassignment RPC", () => {
       error: null,
     });
 
-    const result = await eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, expectedCoordinatorId: 21, leadId: 10 });
+    const result = await eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, expectedCoordinatorId: 21, leadId: 10, idempotencyKey: "spm192-reassignment" });
 
-    expect(supabase.rpc).toHaveBeenCalledWith("reassign_event_coordinator", {
+    expect(supabase.rpc).toHaveBeenCalledWith("reassign_event_coordinator_idempotent", {
       p_event_id: 42,
       p_coordinator_id: 29,
       p_expected_coordinator_id: 21,
       p_lead_id: 10,
+      p_idempotency_key: "spm192-reassignment",
+      p_request_hash: eventModel.hashRequest({ coordinatorId: 29, expectedCoordinatorId: 21 }, {}, [42]),
     });
     expect(result).toEqual({
       event: { eventId: 42, requestId: "REQ-000042", title: "Conference", status: "SUBMITTED", coordinatorId: 29 },
       coordinator: { coordinatorId: 29, name: "Coordinator Two" },
+      replayed: false,
     });
   });
 
