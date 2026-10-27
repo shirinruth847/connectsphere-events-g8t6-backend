@@ -10,7 +10,9 @@ const { PGlite } = require(process.env.PGLITE_MODULE || "@electric-sql/pglite");
 const root = path.resolve(__dirname, "../..");
 const migration = (name) => fs.readFileSync(path.join(root, "supabase/migrations", name), "utf8");
 
-async function setup() {
+// failClosed: false stops before the fail-closed incident migration, which is
+// what the shared database runs until resource_incidents exists.
+async function setup({ failClosed = true } = {}) {
   const db = new PGlite();
   await db.exec(fs.readFileSync(path.join(root, "tests/fixtures/spm177DatabaseSchema.sql"), "utf8"));
   await db.exec(`
@@ -45,7 +47,8 @@ async function setup() {
   `);
   await db.exec(migration("20261020112025_spm173_interim_readiness.sql"));
   await db.exec(migration("20261020142915_spm173_readiness_without_venue_buffer.sql"));
-  await db.exec(migration("20261021100000_spm173_fail_closed_incident_readiness.sql"));
+  await db.exec(migration("20261020150000_readiness_no_booking_registration_fix.sql"));
+  if (failClosed) await db.exec(migration("20261021100000_spm173_fail_closed_incident_readiness.sql"));
   await db.exec(`
     INSERT INTO public."user" (user_id, email, name, role, is_active) VALUES (1, 'spm173-owner@example.test', 'Owner', 'ORGANISER', true);
     INSERT INTO public.venue (venue_id, name, address, max_capacity, setup_turnaround_min) VALUES
@@ -169,6 +172,20 @@ test("registration without a primary venue reports blockers instead of failing",
   assert.deepEqual(await codes({ registration: 100, bookings: [{}, { room: 3 }] }), ["NO_PRIMARY_VENUE"]);
   // An invalid capacity is still reported without a primary venue.
   assert.deepEqual(await codes({ registration: 0 }), ["NO_ACTIVE_BOOKING", "REGISTRATION_INVALID"]);
+});
+
+test("without the incident check, registration with no booking still reports blockers", async () => {
+  const db = await setup({ failClosed: false });
+  const codes = async (options) => readiness(db, (await event(db, options)).eventId);
+  assert.deepEqual(await codes({ registration: 100 }), ["NO_ACTIVE_BOOKING"]);
+  assert.deepEqual(await codes({ registration: 100, bookings: [{}, { room: 3 }] }), ["NO_PRIMARY_VENUE"]);
+  assert.deepEqual(await codes({ registration: 0 }), ["NO_ACTIVE_BOOKING", "REGISTRATION_INVALID"]);
+  assert.deepEqual(await codes({ registration: 200, bookings: [{}] }), []);
+  assert.deepEqual(await codes({ registration: 201, bookings: [{}] }), ["REGISTRATION_EXCEEDS_PRIMARY_CAPACITY"]);
+  // Not fail-closed yet: an open incident does not block until that migration runs.
+  const { eventId } = await event(db, { bookings: [{}] });
+  await db.query("INSERT INTO public.resource_incidents (event_id, status) VALUES ($1, 'OPEN')", [eventId]);
+  assert.deepEqual(await readiness(db, eventId), []);
 });
 
 test("an open resource incident blocks readiness", async () => {
