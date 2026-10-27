@@ -10,6 +10,8 @@ const NOTIFICATION_TYPES = Object.freeze({
   EVENT_CANCELLED: "EVENT_CANCELLED",
   EVENT_CHANGED: "EVENT_CHANGED",
   EVENT_REMINDER: "EVENT_REMINDER",
+  VENUE_SUGGESTION: "VENUE_SUGGESTION",
+  ASSIGNMENT_ENDED: "ASSIGNMENT_ENDED",
 });
 
 // Where "Go to Event" leads. The frontend maps each page to its URL: My Events

@@ -7,11 +7,12 @@ const { requireRole } = require("../middleware/authorize");
 const { validateCursorPagination } = require("../middleware/validate");
 const { USER_ROLES } = require("../config/roles");
 
-// Attendees (SPM-155) and organisers (SPM-192): the database shows an attendee
-// only events they hold a place on, and an organiser only events they own.
-// SPM-193 opens the inbox to staff with their own visibility rules; until then
-// they get 403. Each user reaches only their own notifications.
-const inboxRoles = [requireAuth, requireRole(USER_ROLES.ATTENDEE, USER_ROLES.ORGANISER)];
+// Attendees (SPM-155), organisers (SPM-192) and coordinators (SPM-193): the
+// database shows an attendee only events they hold a place on, an organiser
+// only events they own, and a coordinator only events assigned to them now,
+// plus their "assignment ended" notices. Other staff roles have no visibility
+// rules yet and get 403. Each user reaches only their own notifications.
+const inboxRoles = [requireAuth, requireRole(USER_ROLES.ATTENDEE, USER_ROLES.ORGANISER, USER_ROLES.COORDINATOR)];
 
 router.get("/", inboxRoles, validateCursorPagination, listNotifications);
 router.get("/unread-count", inboxRoles, getUnreadCount);

@@ -54,14 +54,19 @@ describe("authentication (SPM-155 TC-12)", () => {
   });
 });
 
-describe("role restriction (attendees and organisers until SPM-193)", () => {
-  test.each([
-    ["get", "/api/notifications"],
-    ["get", "/api/notifications/unread-count"],
-    ["post", "/api/notifications/read-all"],
-    ["post", "/api/notifications/7/read"],
-  ])("[SPM-192-AC9] ORGANISER: %s %s reaches their own inbox", async (method, path) => {
-    signedInAs("ORGANISER");
+describe("role restriction (attendees, organisers and coordinators)", () => {
+  test.each(
+    [
+      ["SPM-192-AC9", "ORGANISER"],
+      ["SPM-193-AC11", "COORDINATOR"],
+    ].flatMap(([key, role]) => [
+      [key, role, "get", "/api/notifications"],
+      [key, role, "get", "/api/notifications/unread-count"],
+      [key, role, "post", "/api/notifications/read-all"],
+      [key, role, "post", "/api/notifications/7/read"],
+    ])
+  )("[%s] %s: %s %s reaches their own inbox", async (key, role, method, path) => {
+    signedInAs(role);
     notificationModel.findNotifications.mockResolvedValue({ notifications: [], nextCursor: null });
     notificationModel.markNotificationRead.mockResolvedValue({ notification_id: 7, is_read: true, read_at: null });
     notificationModel.markAllNotificationsRead.mockResolvedValue(0);
@@ -80,8 +85,18 @@ describe("role restriction (attendees and organisers until SPM-193)", () => {
     );
   });
 
+  test("[SPM-193-AC10] the coordinator's list is read with their own user and role", async () => {
+    signedInAs("COORDINATOR");
+    notificationModel.findNotifications.mockResolvedValue({ notifications: [], nextCursor: null });
+    await send("get", "/api/notifications");
+    expect(notificationModel.findNotifications).toHaveBeenCalledWith(
+      expect.objectContaining({ user_id: USER_ID, role: "COORDINATOR" }),
+      expect.any(Object)
+    );
+  });
+
   test.each(
-    ["COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"].flatMap((role) => [
+    ["COORDINATOR_LEAD", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"].flatMap((role) => [
       [role, "get", "/api/notifications"],
       [role, "get", "/api/notifications/unread-count"],
       [role, "post", "/api/notifications/read-all"],

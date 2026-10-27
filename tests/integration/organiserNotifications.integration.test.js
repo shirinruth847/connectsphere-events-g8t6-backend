@@ -220,8 +220,9 @@ describe("notifications about events the organiser does not own (SPM-192 AC8)", 
     expect((await inboxFor("organiserB")).notifications.map((notice) => notice.notification_id)).toContain(id);
   });
 
-  test("[SPM-192] staff roles still get 403 until SPM-193", async () => {
-    for (const key of ["coordinator", "coordinatorLead", "venueStaff", "techSupport"]) {
+  // Coordinators have their own inbox since SPM-193 (coordinatorNotifications.integration.test.js).
+  test("[SPM-192] staff roles other than coordinators get 403", async () => {
+    for (const key of ["coordinatorLead", "venueStaff", "techSupport"]) {
       expect((await call("get", "/api/notifications", key)).status).toBe(403);
     }
   });
