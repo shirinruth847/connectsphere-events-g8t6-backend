@@ -1,4 +1,3 @@
-process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/userModel");
 jest.mock("../../model/eventModel", () => {

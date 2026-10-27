@@ -68,7 +68,7 @@ HTTP 200 confirms both stores: the Supabase key is accepted and MongoDB answers 
 
 ### Event Requests (SPM-35, SPM-36, SPM-37)
 
-These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes exist only when `ENABLE_COORDINATOR_WORKFLOWS=true`; shared development sets it, because SPM-33's coordinator view needs assigned events.
+These routes require an `ORGANISER` bearer token, except `GET /api/events/:id`, which follows the SPM-33 viewing rules below. All use the error shape described under Authentication. Request and response fields are camelCase. Coordinators separately read their own assigned events through `GET /api/events/assigned`. Lead queue, assignment and reassignment routes are always registered and require an authenticated `COORDINATOR_LEAD`; no rollout environment flag is needed.
 
 The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/discovery/:id` (SPM-34), require an `ATTENDEE` bearer token instead.
 
@@ -93,7 +93,7 @@ The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
 - **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the receipt notification for the organiser and active Coordinator Leads in one database transaction (`submit_event_request`, which changes the state through the shared lifecycle function since SPM-173). A new request's `version` is 2 after submission, because it is created as a draft and then submitted. The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
-- **Assignment** (`POST /api/events/:id/coordinator`, Coordinator Lead only, requires `ENABLE_COORDINATOR_WORKFLOWS=true`) takes a request from the queue: in one transaction (`assign_event_coordinator`) it sets the coordinator, moves the request from `SUBMITTED` to `UNDER_REVIEW` (Master section 5.2), records the staff-only history entry `COORDINATOR_ASSIGNED` and notifies the organiser and the coordinator.
+- **Assignment** (`POST /api/events/:id/coordinator`, Coordinator Lead only) takes a request from the queue: in one transaction (`assign_event_coordinator`) it sets the coordinator, moves the request from `SUBMITTED` to `UNDER_REVIEW` (Master section 5.2), records the staff-only history entry `COORDINATOR_ASSIGNED` and notifies the organiser and the coordinator.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
 
 ### Choosing a Venue (SPM-72, SPM-74, SPM-75)
@@ -701,11 +701,12 @@ Existing event write/validation contracts are preserved. Request creation gains
 an organiser-only, read-only `GET /api/events/request-options` response containing
 `venues: [{ venueId, name }]` and `layouts: [layoutType]`; it creates no holds.
 
-Lead queue/assignment/reassignment endpoints exist only when
-`ENABLE_COORDINATOR_WORKFLOWS=true`; unset or any other value returns 404. Shared
-development sets it to `true` (see `.env.example`) because SPM-33's coordinator
-view and edits need assigned events. The coordinator's own assigned-event read
-remains part of SPM-32 and is always available.
+Lead queue/assignment/reassignment endpoints no longer need the original
+`ENABLE_COORDINATOR_WORKFLOWS` rollout switch. They are always registered and
+retain verified-token and trusted Lead-role checks. An old setting is ignored;
+unset or `false` no longer disables the routes. The coordinator's own assigned
+event read remains part of SPM-32 and retains its Coordinator-only scope. See
+`docs/test-plans/lead-workflow-availability.md` for regression coverage and rollout.
 
 `npm test` runs all unit suites. Real auth/signup can be checked separately:
 
