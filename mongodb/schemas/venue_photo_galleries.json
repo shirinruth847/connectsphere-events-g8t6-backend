@@ -1,0 +1,12 @@
+{
+  "$jsonSchema": {
+    "bsonType": "object",
+    "description": "Per-venue photo transaction guard; contains no images or business data.",
+    "required": ["_id", "version"],
+    "additionalProperties": false,
+    "properties": {
+      "_id": { "bsonType": "string", "maxLength": 64 },
+      "version": { "bsonType": ["int", "long"], "minimum": 0 }
+    }
+  }
+}

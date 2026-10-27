@@ -1,6 +1,7 @@
 const app = require("./app");
 const { startEventCompletionJob } = require("./jobs/eventCompletionJob");
 const { startEventReminderJob } = require("./jobs/eventReminderJob");
+const { startMongoSyncJob } = require("./jobs/mongoSyncJob");
 
 const PORT = process.env.PORT || 8000;
 
@@ -13,11 +14,13 @@ if (require.main === module) {
   });
   const stopEventCompletionJob = startEventCompletionJob();
   const stopEventReminderJob = startEventReminderJob();
+  const stopMongoSyncJob = startMongoSyncJob();
 
   // Stop scheduling new job runs, then let open requests finish before exiting.
   const shutDown = () => {
     if (stopEventCompletionJob) stopEventCompletionJob();
     if (stopEventReminderJob) stopEventReminderJob();
+    if (stopMongoSyncJob) stopMongoSyncJob();
     server.close(() => process.exit(0));
   };
   process.once("SIGTERM", shutDown);

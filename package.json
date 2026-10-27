@@ -15,10 +15,13 @@
     "seed:notifications": "node supabase/seed/seedAttendeeNotifications.js",
     "seed:notifications:cleanup": "node supabase/seed/seedAttendeeNotifications.js cleanup",
     "mongo:migrate": "node mongodb/migrate.js",
+    "mongo:sync": "node jobs/mongoSyncJob.js",
     "seed:venue-calendar": "node mongodb/seed/venueCalendarSeed.js",
     "seed:venue-calendar:cleanup": "node mongodb/seed/venueCalendarSeed.js cleanup",
     "seed:venue-photos": "node mongodb/seed/venuePhotoSeed.js",
     "seed:venue-photos:cleanup": "node mongodb/seed/venuePhotoSeed.js cleanup",
+    "seed:venue-rooms": "node mongodb/seed/venueRoomSeed.js",
+    "seed:venue-rooms:cleanup": "node mongodb/seed/venueRoomSeed.js cleanup",
     "dev": "nodemon server.js"
   },
   "author": "",

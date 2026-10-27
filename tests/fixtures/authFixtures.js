@@ -348,6 +348,7 @@ const cleanupManifest = async (manifest) => {
   // Assignment history references the event without a cascade.
   await deleteIn("event_assignments", "event_id", eventIds);
   await deleteIn("event_venue_preference", "event_id", eventIds);
+  await deleteIn("event_venue_suggestion", "event_id", eventIds);
   await deleteIn("event_equipment_requirement", "event_id", eventIds);
   await deleteIn("event", "event_id", eventIds);
   // Venues and equipment before users: venue.created_by and updated_by reference

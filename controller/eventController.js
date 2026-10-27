@@ -1,7 +1,7 @@
 const eventModel = require("../model/eventModel");
 const activityModel = require("../model/activityModel");
 const { getEventAccess, getEditDenial, loadEventForViewer, EVENT_NOT_FOUND } = require("../middleware/authorize");
-const { parseEventId } = require("../middleware/validate");
+const { parseEventId, readIdempotencyKey, IDEMPOTENCY_KEY_MESSAGE } = require("../middleware/validate");
 const {
   validateDraft,
   validateSubmission,
@@ -28,9 +28,6 @@ const {
 const EVENT_STATUSES = Object.values(EVENT_STATUS);
 const KNOWN_EVENT_FIELDS = new Set(Object.values(EVENT_FIELD_GROUPS).flat());
 const SYSTEM_FIELDS = new Set(EVENT_FIELD_GROUPS.SYSTEM);
-const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{8,128}$/;
-const IDEMPOTENCY_KEY_MESSAGE =
-  "Send an Idempotency-Key header of 8-128 letters, digits, '.', '_', ':' or '-' (a UUID works).";
 const VERSION_MESSAGE = "Send the version of the event you loaded.";
 
 const DOMAIN_ERRORS = Object.freeze({
@@ -96,12 +93,6 @@ const handleError = (error, res, next) => {
   return next(error);
 };
 
-
-const readIdempotencyKey = (req) => {
-  const key = req.get("Idempotency-Key");
-  return typeof key === "string" && IDEMPOTENCY_KEY.test(key) ? key : null;
-};
-
 // A sent key must be well formed; a missing one is an error only when "required".
 const readRequestIdempotencyKey = (req, required, errors) => {
   const idempotencyKey = readIdempotencyKey(req);
@@ -136,8 +127,13 @@ const mergeWithExisting = (existingRow, input) => ({
   ...input,
 });
 
-const validateWith = async (validate, input) => {
-  const context = await eventModel.findValidationContext(input);
+// Equipment the saved event already requests stays valid even if it has since
+// been deactivated (SPM-52 AC9).
+const savedEquipmentIds = (existingRow) =>
+  (existingRow?.event_equipment_requirement || []).map((item) => item.equipment_id);
+
+const validateWith = async (validate, input, existingRow = null) => {
+  const context = await eventModel.findValidationContext(input, savedEquipmentIds(existingRow));
   return {
     ...validate(input, { allowedLayouts: context.allowedLayouts }),
     ...validateRequirements(input, context),
@@ -193,7 +189,7 @@ const validateCoordinatorEdit = (input) =>
   Object.keys(input).length === 0 ? { body: "Send at least one field to change." } : validateOrdinaryFields(input);
 
 // The owner's draft is validated as a whole: the saved values plus the ones sent.
-const validateOwnerDraft = (existing, input) => validateWith(validateDraft, mergeWithExisting(existing, input));
+const validateOwnerDraft = (existing, input) => validateWith(validateDraft, mergeWithExisting(existing, input), existing);
 
 // The save was made against an older version: nothing changed, and the current
 // values are returned so the user can review them before trying again (AC7).
@@ -355,6 +351,7 @@ const submitDraft = async (req, res, next) => {
     const errors = await validateWith(
       validateSubmission,
       mergeWithExisting(existing, input),
+      existing,
     );
     // Nothing is written on failure, so the status stays DRAFT (SPM-37 negative TC).
     if (hasErrors(errors)) return validationFailed(res, errors);
@@ -861,7 +858,7 @@ const checkAmendments = async (existing, changes) => {
 
   const input = eventModel.pickEventInput(changes);
   if (Object.keys(input).length === 0) return { errors: { changes: MESSAGES.amendmentEmpty } };
-  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input));
+  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input), existing);
   // The 48-hour lead time applies only to a newly chosen start (team decision, 2026-10-24).
   if (input.startDatetime === undefined && errors.startDatetime === MESSAGES.leadTime) delete errors.startDatetime;
   return { input, errors };

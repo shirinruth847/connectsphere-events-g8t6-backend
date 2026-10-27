@@ -10,6 +10,7 @@ const {
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,
   SAFETY_REVIEW_HISTORY_FIELDS,
+  VENUE_SUGGESTION_STATUSES,
 } = require("../config/eventConstants");
 
 // History audiences each relationship may read (SPM-33 AC8). Only the owner sees
@@ -59,6 +60,10 @@ const getEventRelationship = (user, event) => {
     const rounds = Array.isArray(event.safety_reviews) ? event.safety_reviews : [];
     return rounds.some((round) => eventModel.isRoundInOfficerScope(round, user.user_id)) ? EVENT_RELATIONSHIP.SAFETY_OFFICER : null;
   }
+  // findVisibleEvent only returns an event to the Lead who supervises it.
+  if (user.role === USER_ROLES.COORDINATOR_LEAD) {
+    return event.supervising_lead_id === user.user_id ? EVENT_RELATIONSHIP.SUPERVISING_LEAD : null;
+  }
   return null;
 };
 
@@ -91,6 +96,9 @@ const getEventAccess = (user, event) => {
     canCompleteClarification: isAssignedCoordinator && isReturned,
     historyAudiences: [...(HISTORY_AUDIENCES[relationship] || [])],
     ...(relationship === EVENT_RELATIONSHIP.SAFETY_OFFICER ? { historyFields: [...SAFETY_REVIEW_HISTORY_FIELDS] } : {}),
+    // The suggestion RPC re-checks the coordinator and status under the event lock.
+    canSuggestVenue:
+      relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR && VENUE_SUGGESTION_STATUSES.includes(event.status),
   };
 };
 
@@ -101,6 +109,7 @@ const getEditDenial = (access, event) => {
   // A Safety Officer only records safety outcomes (SPM-243 AC2).
   if (access.relationship === EVENT_RELATIONSHIP.SAFETY_OFFICER) return "FORBIDDEN";
   if (access.relationship === EVENT_RELATIONSHIP.ORGANISATION_MEMBER) return "EVENT_READ_ONLY";
+  if (access.relationship === EVENT_RELATIONSHIP.SUPERVISING_LEAD) return "EVENT_READ_ONLY";
   if (access.relationship === EVENT_RELATIONSHIP.OWNER && !CLOSED_STATUSES.includes(event.status)) {
     return "EDIT_REQUIRES_CHANGE_REQUEST";
   }

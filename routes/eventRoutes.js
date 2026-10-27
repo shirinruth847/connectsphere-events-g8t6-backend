@@ -33,10 +33,16 @@ const {
   completeEvent,
 } = require("../controller/eventController");
 const { getEventSafetyReviews } = require("../controller/safetyController");
+const {
+  getEventVenueOptions,
+  getEventVenueAvailability,
+  suggestEventVenue,
+} = require("../controller/venueController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
 const { validateCursorPagination } = require("../middleware/validate");
 const { USER_ROLES } = require("../config/roles");
+const { getOrganiserArrangements } = require("../controller/organiserArrangementController");
 
 // Applied per route (not router-wide) so coordinator routes can be added here later.
 const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
@@ -74,6 +80,13 @@ router.post("/:id/submit-for-safety-review", assignedCoordinatorOnly, submitForS
 router.post("/:id/confirm", assignedCoordinatorOnly, confirmEvent);
 router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation);
 router.post("/:id/complete", assignedCoordinatorOnly, completeEvent);
+// Venue section of the event (SPM-72/74): the assigned coordinator and the
+// supervising Lead browse; only the coordinator suggests a venue. Photos are
+// read through GET /api/venues/options/:venueId/photos.
+const eventVenueReaders = [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD), requireVisibleEvent];
+router.get("/:id/venue-availability", ...assignedCoordinatorOnly, getEventVenueAvailability);
+router.get("/:id/venue-options", ...eventVenueReaders, getEventVenueOptions);
+router.put("/:id/venue-suggestion", ...coordinatorOnly, requireVisibleEvent, suggestEventVenue);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.post("/:id/history/viewed", anySignedInUser, requireVisibleEvent, markEventHistoryViewed);
 // SPM-41 clarification threads: another coordinator gets 404; same-organisation
@@ -87,6 +100,7 @@ router.post("/:id/amendments", organiserOnly, requireVisibleEvent, saveClarifica
 // SPM-251: each role's own scope is checked in the controller, because Leads,
 // Venue Staff and Technical Support have none through requireVisibleEvent.
 router.get("/:id/safety-reviews", anySignedInUser, getEventSafetyReviews);
+router.get("/:id/arrangements", anySignedInUser, requireVisibleEvent, getOrganiserArrangements);
 router.get("/:id", anySignedInUser, requireVisibleEvent, getEventRequest);
 router.put("/:id", anySignedInUser, requireVisibleEvent, updateEventDetails);
 router.put("/:id/draft", organiserOnly, requireVisibleEvent, updateDraft);

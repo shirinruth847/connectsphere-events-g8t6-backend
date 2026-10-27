@@ -2,6 +2,10 @@
 // M7), never Atlas. The schema validator from migration 0003 is applied, so
 // every write here also proves the documents satisfy it.
 const { MongoMemoryReplSet } = require("mongodb-memory-server");
+const { MongoClient } = require("mongodb");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const { createRequire } = require("node:module");
 
 jest.setTimeout(120000);
 
@@ -57,6 +61,57 @@ describe("venue_photos schema (migration 0003)", () => {
 });
 
 describe("venuePhotoModel (T28)", () => {
+  test("should_enforce_the_limit_across_independent_database_clients", async () => {
+    const client = new MongoClient(replSet.getUri());
+    await client.connect();
+    try {
+      const filename = require.resolve("../../model/venuePhotoModel");
+      const localRequire = createRequire(filename);
+      const context = {
+        module: { exports: {} },
+        require: (name) => name === "../config/mongodb"
+          ? { getMongoDb: async () => client.db(process.env.MONGODB_DB_NAME) }
+          : localRequire(name),
+      };
+      vm.runInNewContext(fs.readFileSync(filename, "utf8"), context, { filename });
+      const other = context.module.exports;
+      const results = await Promise.allSettled(Array.from({ length: 24 }, (_, index) =>
+        (index % 2 ? model : other).addPhoto({ venueId: VENUE, contentType: "image/jpeg", data: JPEG, size: JPEG.length, caption: `P${index}`, actorId: 7 })
+      ));
+      expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(20);
+      const rejected = results.filter(({ status }) => status === "rejected");
+      expect(rejected).toHaveLength(4);
+      expect(rejected.every(({ reason }) => reason.code === "PHOTO_LIMIT_REACHED")).toBe(true);
+      const stored = await photos.find({ venueId: String(VENUE) }).sort({ position: 1 }).toArray();
+      expect(stored.map(({ position }) => position)).toEqual(Array.from({ length: 20 }, (_, index) => index));
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("should_roll_back_the_guard_and_photo_when_schema_validation_fails", async () => {
+    await add("First");
+    const db = await require("../../config/mongodb").getMongoDb();
+    const before = await db.collection("venue_photo_galleries").findOne({ _id: String(VENUE) });
+    await expect(model.addPhoto({ venueId: VENUE, contentType: "image/svg+xml", data: JPEG, size: JPEG.length, caption: "Invalid", actorId: 7 })).rejects.toMatchObject({ code: 121 });
+    expect(await db.collection("venue_photo_galleries").findOne({ _id: String(VENUE) })).toEqual(before);
+    expect(await captions()).toEqual(["First"]);
+  });
+
+  test("should_keep_stored_positions_contiguous_when_upload_reorder_and_delete_race", async () => {
+    const first = await add("First");
+    const second = await add("Second");
+    await add("Third");
+    await Promise.all([
+      model.updatePhoto({ venueId: VENUE, photoId: second.photoId, changes: { position: 0 }, actorId: 7 }),
+      model.deletePhoto({ venueId: VENUE, photoId: first.photoId }),
+      add("Fourth"),
+    ]);
+    const stored = await photos.find({ venueId: String(VENUE) }).sort({ position: 1 }).toArray();
+    expect(stored.map(({ position }) => position)).toEqual([0, 1, 2]);
+    expect(stored.map(({ caption }) => caption).sort()).toEqual(["Fourth", "Second", "Third"]);
+  });
+
   test("[TC-VENUE-181-104] should_append_photos_in_upload_order_when_added_and_return_metadata_without_bytes", async () => {
     const first = await add("Front");
     await add("Stage");
