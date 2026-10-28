@@ -140,7 +140,7 @@ describe("an organiser's request through its notifications (SPM-192)", () => {
     const res = await call("patch", `/api/events/${eventId}/coordinator`, "coordinatorLead", {
       coordinatorId: userId("coordinatorTwo"),
       expectedCoordinatorId: userId("coordinator"),
-    });
+    }, newKey());
     expect(res.status).toBe(200);
     const [latest] = await noticesAbout("organiserA", eventId);
     expect(latest.title).toBe("Event coordinator changed");
