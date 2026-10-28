@@ -199,7 +199,7 @@ test("[SPM-193-AC10] attendee and organiser rules are unchanged; a Lead's inbox 
 
 // ---------- helpers for missing triggers (AC5, AC6, AC8, AC12) ----------
 
-test("[SPM-193-TC-10] a hold warns its coordinator once, again after an extension, and once at expiry", async () => {
+test("[SPM-193-AC8 helper] repeated warning/expiry calls deduplicate notices and an extension allows a new warning", async () => {
   const eventId = await createEvent();
   const expiresAt = "2027-05-01T02:00:00Z";
   await run(eventId, "hold_expiring", { hold: "6720aa01b2c3d4e5f6a7b8c9", venue: VENUE, expiresAt });
@@ -220,7 +220,7 @@ test("[SPM-193-TC-10] a hold warns its coordinator once, again after an extensio
   assert.equal(notices[2].action_key, "HOLD_EXPIRED:6720aa01b2c3d4e5f6a7b8c9");
 });
 
-test("[SPM-193-TC-10] hold notices refuse an unusable hold ID or a missing expiry, and an unknown venue", async () => {
+test("[SPM-193-AC8 helper] hold notices refuse an unusable hold ID or a missing expiry, and an unknown venue", async () => {
   const eventId = await createEvent();
   await rejects(run(eventId, "hold_expired", { hold: "bad id!", venue: VENUE }), "INVALID_HOLD_ID");
   await rejects(run(eventId, "hold_expiring", { hold: "h1", venue: VENUE, expiresAt: null }), "HOLD_EXPIRY_REQUIRED");
@@ -228,7 +228,7 @@ test("[SPM-193-TC-10] hold notices refuse an unusable hold ID or a missing expir
   assert.equal((await eventNotifications(eventId)).length, 0);
 });
 
-test("[SPM-193-TC-06] a venue block tells the coordinator an alternative venue is required, once per event", async () => {
+test("[SPM-193-AC5 helper] a stand-in block caller produces one alternative-venue notice per event", async () => {
   const eventId = await createEvent();
   const args = { block: "blk-6720aa01", venue: VENUE, reason: "EQUIPMENT_FAILURE" };
   await run(eventId, "venue_blocked", args);
@@ -242,7 +242,7 @@ test("[SPM-193-TC-06] a venue block tells the coordinator an alternative venue i
   await rejects(run(eventId, "venue_blocked", { ...args, reason: "WEATHER" }), "INVALID_BLOCK_REASON");
 });
 
-test("[SPM-193-TC-07] technical decisions reach the coordinator; a rejection carries its reason", async () => {
+test("[SPM-193-AC6 helper] a stand-in decision caller produces coordinator notices and includes rejection reasons", async () => {
   const approved = await createEvent();
   await run(approved, "technical", { request: "41", decision: "APPROVED" });
   const [approval] = await eventNotifications(approved);
@@ -262,7 +262,7 @@ test("[SPM-193-TC-07] technical decisions reach the coordinator; a rejection car
   await rejects(run(rejected, "technical", { request: "43", decision: "PARTIAL" }), "INVALID_TECHNICAL_DECISION");
 });
 
-test("[SPM-193-AC12] a failed action leaves no notice, and a retried one leaves one", async () => {
+test("[SPM-193-AC12 helper] a failed stand-in transaction leaves no notice, and a retried one leaves one", async () => {
   const eventId = await createEvent();
   const args = { request: "50", decision: "APPROVED" };
   await assert.rejects(run(eventId, "technical", args, "spm193-retry-1", true), /LATER_STEP_FAILED/);

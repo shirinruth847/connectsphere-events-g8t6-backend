@@ -77,8 +77,8 @@ const submitRequest = async (label, { start = inDays(650), end = inDays(650.1) }
   return eventId;
 };
 
-const assign = (eventId, coordinatorKey) =>
-  call("post", `/api/events/${eventId}/coordinator`, "coordinatorLead", { coordinatorId: userId(coordinatorKey) });
+const assign = (eventId, coordinatorKey, idempotencyKey) =>
+  call("post", `/api/events/${eventId}/coordinator`, "coordinatorLead", { coordinatorId: userId(coordinatorKey) }, idempotencyKey);
 
 beforeAll(async () => {
   if (!process.env.TEST_DATABASE_URL) throw new Error("TEST_DATABASE_URL is required for the coordinator notification tests.");
@@ -93,12 +93,16 @@ describe("a coordinator's event through its notifications (SPM-193)", () => {
   let eventId;
   let assignmentNotice;
 
-  test("[SPM-193-TC-01/TC-16] the assigned coordinator receives one assignment notice, even when the Lead retries", async () => {
+  test("[SPM-193-TC-01/TC-16] retrying assignment with the same request key leaves one assignment notice", async () => {
     eventId = await submitRequest("E1");
-    const first = await assign(eventId, "coordinator");
+    const key = newKey();
+    const first = await assign(eventId, "coordinator", key);
     expect(first.status).toBe(200);
-    const retry = await assign(eventId, "coordinator");
-    expect(retry.status).toBeGreaterThanOrEqual(400);
+    const retry = await assign(eventId, "coordinator", key);
+    // First assignment uses the SUBMITTED -> UNDER_REVIEW state guard, not
+    // stored command replay. The repeated request is refused and adds no notice.
+    expect(retry.status).toBe(404);
+    expect(retry.body.code).toBe("EVENT_NOT_FOUND");
 
     const notices = await noticesAbout("coordinator", eventId);
     expect(notices).toHaveLength(1);
