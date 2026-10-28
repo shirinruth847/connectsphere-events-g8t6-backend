@@ -150,9 +150,12 @@ describe("a coordinator's event through its notifications (SPM-193)", () => {
 
   test("[SPM-193-TC-02] reassignment notifies the new coordinator and tells the previous one it is no longer theirs", async () => {
     const body = { coordinatorId: userId("coordinatorTwo"), expectedCoordinatorId: userId("coordinator") };
-    expect((await call("patch", `/api/events/${eventId}/coordinator`, "coordinatorLead", body)).status).toBe(200);
-    const retry = await call("patch", `/api/events/${eventId}/coordinator`, "coordinatorLead", body);
-    expect(retry.status).toBe(409);
+    const key = newKey();
+    expect((await call("patch", `/api/events/${eventId}/coordinator`, "coordinatorLead", body, key)).status).toBe(200);
+    const retry = await call("patch", `/api/events/${eventId}/coordinator`, "coordinatorLead", body, key);
+    expect(retry.status).toBe(200);
+    expect(retry.headers["idempotent-replayed"]).toBe("true");
+    expect(retry.body.replayed).toBe(true);
 
     const incoming = await noticesAbout("coordinatorTwo", eventId);
     expect(incoming.map((notice) => notice.title)).toEqual(["New event coordination assignment"]);
