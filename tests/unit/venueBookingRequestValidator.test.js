@@ -60,6 +60,33 @@ describe("validateVenueBookingRequest (SPM-179 AC3-AC5)", () => {
     });
   });
 
+  test("[SPM-179-AC5] should_report_every_section's_errors_in_request_order", () => {
+    const { fields } = validate([
+      item({ venueId: 0, label: " ", end: "2030-03-10T09:00:00+08:00", expectedAttendance: "ten", isPrimary: "yes" }),
+      "not an object",
+      item({ venueId: 7, start: "2030-03-10T08:00:00+08:00", layout: "", accessibilityNeeds: "Ramp", specialRequirements: 5, isPrimary: true }),
+      item({ venueId: 8, start: "2030-03-10T10:00", end: undefined, expectedAttendance: null, requiredFacilities: [" "], isPrimary: true, id: 3 }),
+    ]);
+    expect(Object.entries(fields)).toEqual([
+      ["bookings.0.venueId", BOOKING_MESSAGES.venueRequired],
+      ["bookings.0.label", BOOKING_MESSAGES.labelRequired],
+      ["bookings.0.end", BOOKING_MESSAGES.endBeforeStart],
+      ["bookings.0.expectedAttendance", BOOKING_MESSAGES.attendanceInvalid],
+      ["bookings.0.isPrimary", BOOKING_MESSAGES.primaryInvalid],
+      ["bookings.1", "Each venue must be an object."],
+      ["bookings.2.start", BOOKING_MESSAGES.outsideEvent],
+      ["bookings.2.layout", BOOKING_MESSAGES.layoutRequired],
+      ["bookings.2.accessibilityNeeds", BOOKING_MESSAGES.listInvalid],
+      ["bookings.2.specialRequirements", BOOKING_MESSAGES.specialTooLong],
+      ["bookings.3.id", "This field cannot be set."],
+      ["bookings.3.start", BOOKING_MESSAGES.timeInvalid],
+      ["bookings.3.end", BOOKING_MESSAGES.endRequired],
+      ["bookings.3.expectedAttendance", BOOKING_MESSAGES.attendanceRequired],
+      ["bookings.3.requiredFacilities", BOOKING_MESSAGES.listInvalid],
+      ["bookings.primary", BOOKING_MESSAGES.onePrimary],
+    ]);
+  });
+
   test("[SPM-179-AC3] should_refuse_server_controlled_fields_and_bound_every_list", () => {
     const { fields } = validate([item({ status: "APPROVED", requiredFacilities: Array(21).fill("x"), layout: "x".repeat(51) })]);
     expect(fields).toEqual({
