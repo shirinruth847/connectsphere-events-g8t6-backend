@@ -63,7 +63,7 @@ describe("Safety Officer relationship and access (AC2)", () => {
       editableFields: [],
       historyAudiences: ["ORGANISER_SAFE", "STAFF_ONLY"],
     }));
-    expect(access.historyFields).toEqual(expect.arrayContaining(["expectedAttendance", "venuePreferences", "accessibilityNeeds", "equipmentRequirements"]));
+    expect(access.historyFields).toEqual(expect.arrayContaining(["expectedAttendance", "venuePreferences", "venueBookings", "accessibilityNeeds", "equipmentRequirements"]));
     expect(getEditDenial(access, row)).toBe("FORBIDDEN");
   });
 
@@ -123,6 +123,22 @@ describe("findEventHistory narrowed to the review (AC2)", () => {
     expect(calls).toEqual(expect.arrayContaining([
       ["or", "action.like.SAFETY_*,changes->expectedAttendance.not.is.null,changes->venuePreferences.not.is.null"],
     ]));
+  });
+
+  test("[SPM-179] should_show_a_safety_officer_the_venue_booking_request_entry", async () => {
+    const calls = [];
+    const chain = new Proxy({}, {
+      get: (_target, method) => method === "limit"
+        ? async () => ({ data: [], error: null })
+        : (...args) => { calls.push([method, ...args]); return chain; },
+    });
+    supabase.from.mockReturnValue(chain);
+
+    const access = getEventAccess(OFFICER, eventRow([round()]));
+    await activityModel.findEventHistory(42, { limit: 20, audiences: access.historyAudiences, fields: access.historyFields });
+    const filter = calls.find(([method]) => method === "or")[1];
+    expect(access.historyAudiences).toContain("STAFF_ONLY");
+    expect(filter.split(",")).toContain("changes->venueBookings.not.is.null");
   });
 
   test("should_not_narrow_the_history_of_other_readers", async () => {

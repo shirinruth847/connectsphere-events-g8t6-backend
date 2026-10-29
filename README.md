@@ -411,7 +411,7 @@ Actions that take a `version` also answer `403 TRANSITION_NOT_ALLOWED` with `cur
 
 A coordinator's submission for safety review (above) opens a round in `safety_reviews` for the event's current `arrangement_version`. Open rounds form one shared queue; a Safety Officer claims a round, works through a six-factor checklist and decides it (Master 5.9). Every change runs in a database function that locks the round, and the event when the event changes. A decided or superseded round, and a recorded booking rejection, never change afterwards: a trigger refuses it, and the backend's service role has no direct `UPDATE` on either table (`20261022123827`).
 
-Safety Officer routes (`403` for every other role). A Safety Officer sees an event (`GET /api/events/:id`, `/history`) only while it has an open unclaimed round, a round they hold or a round they decided; they see `registeredCount`, never participants, and `safetyReviewId`, the round to open (the open one in their scope, otherwise the latest they decided), history narrowed to attendance, timing, venue, layout, access, equipment and safety entries, and get `403 FORBIDDEN` on any edit or lifecycle action.
+Safety Officer routes (`403` for every other role). A Safety Officer sees an event (`GET /api/events/:id`, `/history`) only while it has an open unclaimed round, a round they hold or a round they decided; they see `registeredCount`, never participants, and `safetyReviewId`, the round to open (the open one in their scope, otherwise the latest they decided), history narrowed to attendance, timing, venue (including venue booking requests), layout, access, equipment and safety entries, and get `403 FORBIDDEN` on any edit or lifecycle action.
 
 | Route | Does | Refusals |
 | --- | --- | --- |
