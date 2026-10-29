@@ -1226,6 +1226,25 @@ const bookingWarnings = (item, range, venue, document) => {
   return messages;
 };
 
+// The MongoDB holds and blocks one booking's occupied range overlaps (Master
+// 5.4). The event's own hold never blocks its own booking, as on the venue
+// section; another event's active hold and every active block do.
+const findCalendarConflicts = (entries, { venueId, eventId, range, now }) =>
+  entries
+    .filter((entry) => entry.venueId === venueId)
+    .filter((entry) => (entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
+      ? entry.status === "ACTIVE"
+      : venueConflictModel.isHoldActive(entry, now) && String(entry.eventId) !== String(eventId)))
+    .filter((entry) => venueConflictModel.overlaps(range, { start: entry.occupiedStart, end: entry.occupiedEnd }))
+    .map((entry) => ({
+      type: entry.type,
+      occupiedStart: toIsoOrNull(entry.occupiedStart),
+      occupiedEnd: toIsoOrNull(entry.occupiedEnd),
+      ...(entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
+        ? { reasonLabel: venueConflictModel.BLOCK_REASON_LABELS[entry.reason] || entry.reason || null }
+        : { holdExpiresAt: toIsoOrNull(entry.holdExpiresAt) }),
+    }));
+
 // Runs while begin_venue_booking_request holds the event and venue locks
 // (Master 7.4 step 2): reads each venue's setup/turnaround minutes and its holds
 // and blocks from MongoDB, refuses overlaps with active holds and blocks, and
@@ -1266,22 +1285,7 @@ const checkVenueCalendar = async (eventId, bookings, venues) => {
     minutes[item.venueId] = { setupMinutes, turnaroundMinutes };
 
     const range = venueConflictModel.occupiedRange(item.start, item.end, setupMinutes, turnaroundMinutes);
-    // The event's own hold never blocks its own booking, as on the venue
-    // section; another event's active hold and every active block do.
-    const conflicts = entries
-      .filter((entry) => entry.venueId === item.venueId)
-      .filter((entry) => (entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
-        ? entry.status === "ACTIVE"
-        : venueConflictModel.isHoldActive(entry, now) && String(entry.eventId) !== String(eventId)))
-      .filter((entry) => venueConflictModel.overlaps(range, { start: entry.occupiedStart, end: entry.occupiedEnd }))
-      .map((entry) => ({
-        type: entry.type,
-        occupiedStart: toIsoOrNull(entry.occupiedStart),
-        occupiedEnd: toIsoOrNull(entry.occupiedEnd),
-        ...(entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
-          ? { reasonLabel: venueConflictModel.BLOCK_REASON_LABELS[entry.reason] || entry.reason || null }
-          : { holdExpiresAt: toIsoOrNull(entry.holdExpiresAt) }),
-      }));
+    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, eventId, range, now });
     if (conflicts.length) throw venueError("BOOKING_CONFLICT", { index, venueId: item.venueId, conflicts });
 
     const messages = bookingWarnings(item, range, venue, document);
@@ -1298,11 +1302,11 @@ const toBookingRequestResult = (result) => ({
   })),
 });
 
-// One transaction on one client of the venue lock connection (Master 7, 7.4,
-// T33): lock the event then the venues, check MongoDB holds and blocks under
-// those locks, then save the bookings, version, activity and notice. Nothing is
-// announced before COMMIT; any failure rolls everything back.
-const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey }) => {
+// Runs work(client) in one transaction on one client of the venue lock
+// connection (Master 7.4, T33), with a short lock_timeout. Commits only when
+// work resolves; otherwise rolls back and rethrows. A client whose rollback
+// fails is discarded, never returned to the pool.
+const withVenueLockTransaction = async (work) => {
   let pool;
   try {
     pool = getVenueLockPool();
@@ -1310,9 +1314,6 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
     console.error("[venue-booking-request] venue lock connection unavailable", { code: error.code });
     throw venueError("VENUE_BOOKINGS_UNAVAILABLE");
   }
-
-  const requestHash = hashRequest({ bookings }, {}, [eventId]);
-  const venueIds = [...new Set(bookings.map((item) => item.venueId))].sort((left, right) => left - right);
 
   let client;
   try {
@@ -1326,30 +1327,46 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
   try {
     await client.query("BEGIN");
     await client.query(`SET LOCAL lock_timeout = '${VENUE_LOCK_TIMEOUT}'`);
-    const started = (await client.query(
-      "SELECT public.begin_venue_booking_request($1, $2, $3::integer[], $4, $5) AS result",
-      [actorId, eventId, venueIds, idempotencyKey, requestHash]
-    )).rows[0].result;
-
-    let result = started.replay;
-    if (!result) {
-      const { minutes, warnings } = await checkVenueCalendar(eventId, bookings, started.venues || []);
-      result = (await client.query(
-        "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
-        [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
-      )).rows[0].result;
-    }
+    const result = await work(client);
     await client.query("COMMIT");
-    return toBookingRequestResult(result);
+    return result;
   } catch (error) {
     try {
       await client.query("ROLLBACK");
     } catch {
       discardClient = true;
     }
-    throw toBookingRequestError(error);
+    throw error;
   } finally {
     client.release(discardClient);
+  }
+};
+
+// Lock the event then the venues, check MongoDB holds and blocks under those
+// locks, then save the bookings, version, activity and notice, all in one
+// venue lock transaction (Master 7, 7.4). Nothing is announced before COMMIT;
+// any failure rolls everything back.
+const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey }) => {
+  const requestHash = hashRequest({ bookings }, {}, [eventId]);
+  const venueIds = [...new Set(bookings.map((item) => item.venueId))].sort((left, right) => left - right);
+
+  try {
+    const result = await withVenueLockTransaction(async (client) => {
+      const started = (await client.query(
+        "SELECT public.begin_venue_booking_request($1, $2, $3::integer[], $4, $5) AS result",
+        [actorId, eventId, venueIds, idempotencyKey, requestHash]
+      )).rows[0].result;
+      if (started.replay) return started.replay;
+
+      const { minutes, warnings } = await checkVenueCalendar(eventId, bookings, started.venues || []);
+      return (await client.query(
+        "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
+        [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
+      )).rows[0].result;
+    });
+    return toBookingRequestResult(result);
+  } catch (error) {
+    throw toBookingRequestError(error);
   }
 };
 
