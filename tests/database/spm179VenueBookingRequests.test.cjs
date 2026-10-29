@@ -183,6 +183,7 @@ before(async () => {
 
   await db.exec(read("20261028161211_spm179_venue_booking_venue_link.sql"));
   await db.exec(read("20261028162013_spm179_request_venue_bookings.sql"));
+  await db.exec(read("20261029080000_spm179_booking_range_hardening.sql"));
 });
 
 test("backfill: every booking gets its room's venue and only single-booking events get a primary", async () => {
@@ -372,6 +373,50 @@ test("TC-12: the event's own booking at another venue is not a conflict", async 
   await request(event.eventId, [booking(event, HALL, "10:00", "12:00")]);
   const result = await request(event.eventId, [booking(event, ANNEX, "10:00", "12:00")]);
   assert.equal(result.bookings.length, 1);
+});
+
+test("other bookings are checked by their stored occupied range; rows without one use the venue's minutes", async () => {
+  const day = await createEvent();
+  const stored = await createEvent();
+  const unstored = await createEvent();
+  for (const event of [stored, unstored]) {
+    await db.query("UPDATE public.event SET start_datetime = $2, end_datetime = $3 WHERE event_id = $1",
+      [event.eventId, day.at("07:00"), day.at("20:00")]);
+  }
+  // Stored wider than the Hall's 30/45 minutes would give (Master 5.4.1: the stored range counts).
+  await db.query(
+    `INSERT INTO public.venue_booking (room_id, venue_id, event_id, requested_by, start_datetime, end_datetime, status, occupied_range)
+     VALUES (100, $1, $2, $3, $4, $5, 'PENDING', tstzrange($6::timestamptz, $7::timestamptz, '[)'))`,
+    [HALL, stored.eventId, COORDINATOR, day.at("10:00"), day.at("12:00"), day.at("09:00"), day.at("14:00")]
+  );
+  // A row from before occupied_range existed: 15:00-15:30 occupies 14:30-16:15.
+  await db.query(
+    `INSERT INTO public.venue_booking (room_id, venue_id, event_id, requested_by, start_datetime, end_datetime, status)
+     VALUES (100, $1, $2, $3, $4, $5, 'PENDING')`,
+    [HALL, unstored.eventId, COORDINATOR, day.at("15:00"), day.at("15:30")]
+  );
+
+  // 14:00-14:30 occupies 13:30-15:15: it overlaps both.
+  const conflict = await refused(request(day.eventId, [booking(day, HALL, "14:00", "14:30")]), "BOOKING_CONFLICT");
+  const periods = conflict.conflicts.map((item) => [new Date(item.occupiedStart).toISOString(), new Date(item.occupiedEnd).toISOString()]);
+  assert.deepEqual(periods, [
+    [new Date(day.at("09:00")).toISOString(), new Date(day.at("14:00")).toISOString()],
+    [new Date(day.at("14:30")).toISOString(), new Date(day.at("16:15")).toISOString()],
+  ]);
+});
+
+test("SPM-179 SECURITY DEFINER functions search pg_temp last", async () => {
+  const settings = await rows(
+    `SELECT p.proname, array_to_string(p.proconfig, ',') AS config
+       FROM pg_proc AS p JOIN pg_namespace AS n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = ANY ($1)`,
+    [["begin_venue_booking_request", "request_venue_bookings", "_venue_booking_room", "_require_booking_coordinator",
+      "_venue_booking_fill_venue", "_venue_booking_window_check", "_event_primary_venue"]]
+  );
+  assert.equal(settings.length, 7);
+  for (const { proname, config } of settings) {
+    assert.equal(config, "search_path=pg_catalog, public, pg_temp", proname);
+  }
 });
 
 test("TC-14: venues out of service, inactive or without minutes are refused", async () => {

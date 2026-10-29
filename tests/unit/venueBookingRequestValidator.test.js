@@ -15,15 +15,22 @@ const validate = (bookings, now = NOW) => validateVenueBookingRequest({ bookings
 
 describe("validateVenueBookingRequest (SPM-179 AC3-AC5)", () => {
   test("[SPM-179-TC-01] should_normalise_a_valid_request", () => {
-    const { bookings, fields } = validate([item({ label: "  Main hall ", accessibilityNeeds: ["Ramp", "Ramp"], specialRequirements: " Vegetarian catering " })]);
+    const { bookings, fields } = validate([item({ label: "  Main hall ", accessibilityNeeds: ["Ramp", "ramp ", "Lift"], specialRequirements: " Vegetarian catering " })]);
     expect(fields).toBeUndefined();
     expect(bookings).toEqual([expect.objectContaining({
       label: "Main hall",
       start: "2030-03-10T02:00:00.000Z",
-      accessibilityNeeds: ["Ramp"],
+      accessibilityNeeds: ["Ramp", "Lift"],
       specialRequirements: "Vegetarian catering",
       isPrimary: false,
     })]);
+  });
+
+  test("[SPM-179-AC3] should_tell_special_requirements_that_are_not_text_from_ones_too_long", async () => {
+    expect(validate([item({ specialRequirements: 5 })]).fields)
+      .toEqual({ "bookings.0.specialRequirements": BOOKING_MESSAGES.specialInvalid });
+    expect(validate([item({ specialRequirements: "x".repeat(2001) })]).fields)
+      .toEqual({ "bookings.0.specialRequirements": BOOKING_MESSAGES.specialTooLong });
   });
 
   test("[SPM-179-TC-05] should_refuse_an_end_before_the_start_and_a_start_in_the_past", () => {
@@ -77,7 +84,7 @@ describe("validateVenueBookingRequest (SPM-179 AC3-AC5)", () => {
       ["bookings.2.start", BOOKING_MESSAGES.outsideEvent],
       ["bookings.2.layout", BOOKING_MESSAGES.layoutRequired],
       ["bookings.2.accessibilityNeeds", BOOKING_MESSAGES.listInvalid],
-      ["bookings.2.specialRequirements", BOOKING_MESSAGES.specialTooLong],
+      ["bookings.2.specialRequirements", BOOKING_MESSAGES.specialInvalid],
       ["bookings.3.id", "This field cannot be set."],
       ["bookings.3.start", BOOKING_MESSAGES.timeInvalid],
       ["bookings.3.end", BOOKING_MESSAGES.endRequired],

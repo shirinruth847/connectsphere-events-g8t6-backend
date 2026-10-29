@@ -9,6 +9,7 @@ jest.mock("../../model/venueCalendarModel", () => ({
   findEventHolds: jest.fn(),
 }));
 
+const { EventEmitter } = require("node:events");
 const { getVenueLockPool } = require("../../config/venueLockDatabase");
 const venueDetailModel = require("../../model/venueDetailModel");
 const venueCalendarModel = require("../../model/venueCalendarModel");
@@ -48,14 +49,15 @@ beforeEach(() => {
   jest.spyOn(console, "error").mockImplementation(() => {});
   started = { replay: null, event: { eventId: EVENT_ID }, venues: [venueRow(HALL), venueRow(ANNEX)] };
   saved = { eventId: EVENT_ID, requestId: "REQ-000042", replayed: false, warnings: [], bookings: [{ bookingId: 900, status: "PENDING" }] };
-  client = {
+  // An EventEmitter like pg's Client: emitting "error" with no listener throws.
+  client = Object.assign(new EventEmitter(), {
     release: jest.fn(),
     query: jest.fn(async (sql) => {
       if (sql.includes("begin_venue_booking_request")) return { rows: [{ result: started }] };
       if (sql.includes("request_venue_bookings")) return { rows: [{ result: saved }] };
       return { rows: [] };
     }),
-  };
+  });
   getVenueLockPool.mockReturnValue({ connect: jest.fn().mockResolvedValue(client) });
   venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([
     [String(HALL), { setupMinutes: 30, turnaroundMinutes: 45, supportedLayouts: ["Theatre"], facilities: ["Stage"], accessibilityFeatures: ["Wheelchair access"] }],
@@ -163,6 +165,40 @@ describe("requestVenueBookings (SPM-179)", () => {
       return { rows: [] };
     });
     await expect(requestBookings()).rejects.toMatchObject({ code: "VENUE_LOCK_TIMEOUT" });
+  });
+
+  test.each([
+    ["40P01", "VENUE_LOCK_TIMEOUT"],
+    ["40001", "VENUE_LOCK_TIMEOUT"],
+    ["57014", "VENUE_BOOKINGS_UNAVAILABLE"],
+    ["25P03", "VENUE_BOOKINGS_UNAVAILABLE"],
+    ["08006", "VENUE_BOOKINGS_UNAVAILABLE"],
+  ])("[SPM-179-AC16] should_answer_postgres_%s_with_a_retryable_%s", async (code, expected) => {
+    client.query.mockImplementation(async (sql) => {
+      if (sql.includes("request_venue_bookings")) throw pgError("stopped", null, code);
+      if (sql.includes("begin_venue_booking_request")) return { rows: [{ result: started }] };
+      return { rows: [] };
+    });
+    await expect(requestBookings()).rejects.toMatchObject({ name: "VenueError", code: expected });
+    expect(statements()).toContain("ROLLBACK");
+  });
+
+  test("[SPM-179-AC16] should_survive_a_connection_lost_during_the_mongodb_read", async () => {
+    venueCalendarModel.findCalendarEntries.mockImplementation(async () => {
+      // The pooler drops the idle-in-transaction connection while MongoDB is read.
+      client.emit("error", Object.assign(new Error("terminating connection due to idle-in-transaction timeout"), { code: "25P03" }));
+      return [];
+    });
+    client.query.mockImplementation(async (sql) => {
+      if (sql.includes("begin_venue_booking_request")) return { rows: [{ result: started }] };
+      if (sql.includes("request_venue_bookings")) throw new Error("Client has encountered a connection error and is not queryable");
+      return { rows: [] };
+    });
+
+    await expect(requestBookings()).rejects.toMatchObject({ name: "VenueError", code: "VENUE_BOOKINGS_UNAVAILABLE" });
+    expect(statements()).not.toContain("ROLLBACK");
+    expect(client.release).toHaveBeenCalledWith(true);
+    expect(client.listenerCount("error")).toBe(0);
   });
 
   test("[SPM-179-AC16] should_pass_unknown_failures_through_and_discard_a_broken_client", async () => {

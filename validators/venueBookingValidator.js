@@ -125,6 +125,7 @@ const BOOKING_MESSAGES = Object.freeze({
   layoutRequired: "Layout is required.",
   layoutTooLong: `Layout must be ${BOOKING_LIMITS.layout} characters or fewer.`,
   listInvalid: `List up to ${BOOKING_LIMITS.listItems} entries of ${BOOKING_LIMITS.listItemLength} characters or fewer.`,
+  specialInvalid: "Special requirements must be text.",
   specialTooLong: `Special requirements must be ${BOOKING_LIMITS.specialRequirements} characters or fewer.`,
   primaryInvalid: "Primary venue must be true or false.",
   onePrimary: "Choose one primary venue.",
@@ -135,10 +136,16 @@ const isMissing = (value) => value === undefined || value === null || (typeof va
 const parseTextList = (value) => {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > BOOKING_LIMITS.listItems) return null;
+  // Duplicates are dropped ignoring case, keeping the first spelling, as the form does.
   const items = [];
+  const seen = new Set();
   for (const item of value) {
     if (typeof item !== "string" || !item.trim() || item.trim().length > BOOKING_LIMITS.listItemLength) return null;
-    if (!items.includes(item.trim())) items.push(item.trim());
+    const text = item.trim();
+    if (!seen.has(text.toLowerCase())) {
+      seen.add(text.toLowerCase());
+      items.push(text);
+    }
   }
   return items;
 };
@@ -204,7 +211,9 @@ const validateBookingItem = (item, index, context) => {
 
   let specialRequirements = null;
   if (item.specialRequirements !== undefined && item.specialRequirements !== null) {
-    if (typeof item.specialRequirements !== "string" || item.specialRequirements.trim().length > BOOKING_LIMITS.specialRequirements) {
+    if (typeof item.specialRequirements !== "string") {
+      fields[at("specialRequirements")] = BOOKING_MESSAGES.specialInvalid;
+    } else if (item.specialRequirements.trim().length > BOOKING_LIMITS.specialRequirements) {
       fields[at("specialRequirements")] = BOOKING_MESSAGES.specialTooLong;
     } else {
       specialRequirements = item.specialRequirements.trim() || null;

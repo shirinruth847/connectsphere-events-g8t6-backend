@@ -1176,7 +1176,13 @@ const BOOKING_REQUEST_ERRORS = new Set([
   "PRIMARY_VENUE_REQUIRED",
   "PRIMARY_VENUE_ALREADY_SET",
 ]);
-const LOCK_NOT_AVAILABLE = "55P03";
+// Another transaction holds a lock this one needs (lock_timeout), or PostgreSQL
+// ended this one to break a deadlock or serialisation clash: the coordinator
+// can send the request again (Master 7.4: a retryable 409).
+const RETRYABLE_LOCK_CODES = new Set(["55P03", "40P01", "40001"]);
+// The statement ran past statement_timeout, or the server ended the session
+// (idle_in_transaction_session_timeout, shutdown). Nothing was saved.
+const SESSION_ENDED_CODES = new Set(["57014", "25P03", "57P01", "57P02", "57P03"]);
 const VENUE_LOCK_TIMEOUT = "5s";
 // MongoDB is read while the venue lock is held, so a slow read must not hold it
 // for long; a read that runs out answers AVAILABILITY_UNAVAILABLE.
@@ -1193,7 +1199,11 @@ const parseErrorDetail = (detail) => {
 
 const toBookingRequestError = (error) => {
   if (error?.name === "VenueError") return error;
-  if (error?.code === LOCK_NOT_AVAILABLE) return venueError("VENUE_LOCK_TIMEOUT");
+  if (RETRYABLE_LOCK_CODES.has(error?.code)) return venueError("VENUE_LOCK_TIMEOUT");
+  // Class 08 is a connection exception.
+  if (SESSION_ENDED_CODES.has(error?.code) || String(error?.code ?? "").startsWith("08")) {
+    return venueError("VENUE_BOOKINGS_UNAVAILABLE");
+  }
   if ((error?.code === "P0001" || error?.code === "P0002") && BOOKING_REQUEST_ERRORS.has(error.message)) {
     const { index, venueId, conflicts, capacity, expectedAttendance } = parseErrorDetail(error.detail);
     return venueError(error.message, { index, venueId, conflicts, capacity, expectedAttendance });
@@ -1305,7 +1315,9 @@ const toBookingRequestResult = (result) => ({
 // Runs work(client) in one transaction on one client of the venue lock
 // connection (Master 7.4, T33), with a short lock_timeout. Commits only when
 // work resolves; otherwise rolls back and rethrows. A client whose rollback
-// fails is discarded, never returned to the pool.
+// fails, or whose connection was lost, is discarded, never returned to the pool.
+// Every venue calendar writer (bookings here; holds and blocks in SPM-188 and
+// SPM-195) takes the venue lock through this function.
 const withVenueLockTransaction = async (work) => {
   let pool;
   try {
@@ -1323,6 +1335,16 @@ const withVenueLockTransaction = async (work) => {
     throw venueError("VENUE_BOOKINGS_UNAVAILABLE");
   }
 
+  // pg-pool removes its own error listener while a client is checked out, so a
+  // connection lost between queries (for example during the MongoDB read)
+  // would otherwise be an unhandled 'error' event that stops the process.
+  let connectionLost = false;
+  const onConnectionError = (error) => {
+    connectionLost = true;
+    console.error("[venue-booking-request] venue lock connection lost", { code: error.code });
+  };
+  client.on("error", onConnectionError);
+
   let discardClient = false;
   try {
     await client.query("BEGIN");
@@ -1331,13 +1353,22 @@ const withVenueLockTransaction = async (work) => {
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
+    if (connectionLost) {
       discardClient = true;
+    } else {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        discardClient = true;
+      }
     }
+    // PostgreSQL rolls back a transaction whose connection is gone. A COMMIT
+    // that was in flight may still have landed, so the answer is "try again":
+    // the same Idempotency-Key then replays a saved request.
+    if (connectionLost && error?.name !== "VenueError") throw venueError("VENUE_BOOKINGS_UNAVAILABLE");
     throw error;
   } finally {
+    client.removeListener("error", onConnectionError);
     client.release(discardClient);
   }
 };
@@ -1431,6 +1462,7 @@ const listEventVenueBookings = async (eventId) => {
 module.exports = {
   requestVenueBookings,
   listEventVenueBookings,
+  withVenueLockTransaction,
   getVenueCatalogue,
   listManagedVenues,
   listVenueOptions,
