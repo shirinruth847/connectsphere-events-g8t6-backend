@@ -115,6 +115,7 @@ const EVENT_FIELD_GROUPS = Object.freeze({
     "venuePreferences",
     "preferredLayoutType",
     "equipmentRequirements",
+    "technicalSupportNeeds",
     "accessibilityNeeds",
   ]),
   REGISTRATION: Object.freeze([

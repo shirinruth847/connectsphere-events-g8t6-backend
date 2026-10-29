@@ -209,3 +209,17 @@ describe("validateRequirements (venue and equipment preferences)", () => {
     );
   });
 });
+
+
+describe("[SPM-38] submitted technical support needs", () => {
+  test("allows omitted, empty and maximum-length optional support needs", () => {
+    for (const technicalSupportNeeds of [undefined, null, "", "a".repeat(2000)]) {
+      expect(validateDraft({ title: "Synthetic request", technicalSupportNeeds })).toEqual({});
+    }
+  });
+  test("rejects non-text and overlong support needs", () => {
+    for (const technicalSupportNeeds of [42, {}, [], "a".repeat(2001)]) {
+      expect(validateDraft({ title: "Synthetic request", technicalSupportNeeds })).toHaveProperty("technicalSupportNeeds");
+    }
+  });
+});

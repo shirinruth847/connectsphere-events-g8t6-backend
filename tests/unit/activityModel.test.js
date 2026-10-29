@@ -161,3 +161,11 @@ describe("history views (SPM-41 v2)", () => {
     expect(supabase.rpc).toHaveBeenCalledWith("mark_event_history_viewed", { p_event_id: 42, p_actor_id: 11 });
   });
 });
+
+
+test("[SPM-38] organiser history uses backend labels while staff retain detailed states", () => {
+  const row = { log_id: 1, changes: { status: { before: "PLANNING", after: "SAFETY_REVIEW" } } };
+  const change = activityModel.toHistoryEntry(row, { organiserView: true }).changes[0];
+  expect(change).toMatchObject({ beforeLabel: "Approved & Planning", afterLabel: "Approved & Planning" });
+  expect(activityModel.toHistoryEntry(row).changes[0]).not.toHaveProperty("afterLabel");
+});
