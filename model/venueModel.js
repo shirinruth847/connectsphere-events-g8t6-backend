@@ -162,6 +162,8 @@ const toVenueError = (error) => {
       firstStart: details.firstStart ?? null,
     });
   }
+  // The exclusion constraint lost a race for the same venue time (SPM-185 AC7).
+  if (code === "23P01") return venueError("VENUE_BOOKING_CONFLICT");
   const constraint = /constraint "([^"]+)"/.exec(message);
   if (constraint && CONSTRAINT_FIELDS[constraint[1]]) return venueError("VALIDATION_FAILED", { fields: CONSTRAINT_FIELDS[constraint[1]] });
   if (code.startsWith("22")) return venueError("VALIDATION_FAILED", { fields: {} });
@@ -716,6 +718,7 @@ const describeConflicts = (conflicts, entries) => conflicts.map((conflict) => {
     label: entry.label ?? conflict.type,
     occupiedStart: conflict.occupiedStart,
     occupiedEnd: conflict.occupiedEnd,
+    message: conflict.message ?? null,
     holdExpiresAt: entry.holdExpiresAt ?? null,
     reasonLabel: entry.reasonLabel ?? null,
   };
