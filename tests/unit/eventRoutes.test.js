@@ -1,6 +1,5 @@
 // Route-level unit tests for SPM-35/SPM-37: real Express app, routes, middleware,
 // controller and validator. Only the model functions that reach Supabase are mocked.
-process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 jest.mock("../../config/supabase", () => ({
   from: jest.fn(),
   rpc: jest.fn(),

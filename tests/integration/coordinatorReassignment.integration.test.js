@@ -27,6 +27,9 @@ const signIn = async (key) => {
 const call = async (method, path, key, body) => {
   const session = await signIn(key);
   const req = request(app)[method](path).set("Authorization", `Bearer ${session.access_token}`);
+  if (method === "patch" && body?.expectedCoordinatorId !== undefined) {
+    req.set("Idempotency-Key", require("node:crypto").randomUUID());
+  }
   return body === undefined ? req : req.send(body);
 };
 
