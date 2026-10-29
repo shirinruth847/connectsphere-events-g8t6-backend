@@ -4,7 +4,7 @@
 const { MIN_LEAD_TIME_HOURS, CLARIFICATION_TEXT_LIMIT } = require("../config/eventConstants");
 
 const MAX_INTEGER = 2147483647; // PostgreSQL integer columns
-const TEXT_LIMITS = Object.freeze({ title: 200, purpose: 2000, description: 5000 });
+const TEXT_LIMITS = Object.freeze({ title: 200, purpose: 2000, description: 5000, technicalSupportNeeds: 2000 });
 const MAX_ACCESSIBILITY_TEXT = 1000;
 const MAX_ACCESSIBILITY_ITEMS = 20;
 const MAX_ACCESSIBILITY_ITEM_LENGTH = 200;
@@ -18,6 +18,7 @@ const MESSAGES = Object.freeze({
   titleTooLong: `Event Title must be ${TEXT_LIMITS.title} characters or fewer.`,
   purposeTooLong: `Event Purpose must be ${TEXT_LIMITS.purpose} characters or fewer.`,
   descriptionTooLong: `Event Description must be ${TEXT_LIMITS.description} characters or fewer.`,
+  technicalSupportNeedsTooLong: `Technical support needs must be ${TEXT_LIMITS.technicalSupportNeeds} characters or fewer.`,
   startRequired: "Event start date and time is required.",
   endRequired: "Event end date and time is required.",
   invalidDate: "Please enter a valid date and time.",
@@ -43,6 +44,7 @@ const TOO_LONG_MESSAGES = Object.freeze({
   title: MESSAGES.titleTooLong,
   purpose: MESSAGES.purposeTooLong,
   description: MESSAGES.descriptionTooLong,
+  technicalSupportNeeds: MESSAGES.technicalSupportNeedsTooLong,
 });
 
 const isBlank = (value) =>

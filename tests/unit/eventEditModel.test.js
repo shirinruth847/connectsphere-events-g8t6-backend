@@ -182,7 +182,7 @@ describe("eventModel.findVisibleEvent (AC1)", () => {
     await expect(eventModel.findVisibleEvent(42, staff("COORDINATOR", 21))).resolves.toBeNull();
 
     expect(supabase.from).toHaveBeenCalledWith("event");
-    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("organiser:user!event_organiser_id_fkey(user_id,name)"));
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("organiser:user!event_organiser_id_fkey(user_id,name,email)"));
     expect(query.eq).toHaveBeenCalledWith("event_id", 42);
     expect(query.eq).toHaveBeenCalledWith("coordinator_id", 21);
     expect(query.neq).toHaveBeenCalledWith("status", "DRAFT");
