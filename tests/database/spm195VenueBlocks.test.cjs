@@ -216,6 +216,7 @@ before(async () => {
   await db.exec(read("20261029130000_spm195_resource_incidents.sql"));
   await db.exec(read("20261029140000_spm195_venue_blocks.sql"));
   await db.exec(read("20261029150000_spm195_block_change_notices.sql"));
+  await db.exec(read("20261029160000_spm195_close_ended_incidents.sql"));
 });
 
 test("[SPM-195-AC1][TC-03] only active Venue Staff can block, change or restore", async () => {
@@ -480,6 +481,77 @@ test("[SPM-195-AC10] restore refuses another venue, a released booking and a ven
   await block(WORKSHOP, other.at("13:00"), other.at("15:00"), { eventIds: [other.eventId] });
   const [workshopIncident] = await incidentsOf(other.eventId);
   await refused(restore(workshopIncident.incident_id, WORKSHOP), "VENUE_OUT_OF_SERVICE");
+});
+
+test("[SPM-195] a booking that ends closes its incident in the same transaction, naming who ended it", async () => {
+  const event = await createEvent();
+  const rejected = await addBooking(event, ANNEX, "14:00", "16:00", { status: "PENDING" });
+  const kept = await addBooking(event, HALL, "14:00", "16:00");
+  await block(ANNEX, event.at("13:00"), event.at("15:00"), { eventIds: [event.eventId] });
+  await block(HALL, event.at("13:00"), event.at("15:00"), { eventIds: [event.eventId] });
+
+  // As decide_venue_booking rejects: status and reviewer in one update.
+  await db.query("UPDATE public.venue_booking SET status = 'REJECTED', reviewed_by = $2 WHERE booking_id = $1", [rejected, VENUE_STAFF]);
+
+  const incidents = await incidentsOf(event.eventId);
+  assert.deepEqual(
+    incidents.map((incident) => [incident.booking_id, incident.status, incident.resolution]),
+    [[rejected, "RESOLVED", "RELEASED"], [kept, "OPEN", null]]
+  );
+  const closed = (await activityOf("event", event.eventId)).filter((entry) => entry.action === "VENUE_INCIDENT_CLOSED");
+  assert.deepEqual(closed.map((entry) => [entry.audience, entry.actor_role, entry.changes]), [
+    ["STAFF_ONLY", "VENUE_STAFF", { incident: { before: "OPEN", after: "RELEASED" } }],
+  ]);
+  const actor = await one(
+    "SELECT user_id, details FROM public.activity_log WHERE entity_id = $1 AND action = 'VENUE_INCIDENT_CLOSED'", [event.eventId]
+  );
+  assert.deepEqual(actor, { user_id: VENUE_STAFF, details: `Venue incident closed: booking #${rejected} was rejected by Venue Staff.` });
+
+  // A closed incident is never restored or reported as restored.
+  const [released] = incidents;
+  await refused(restore(released.incident_id, ANNEX), "INCIDENT_NOT_RESTORABLE");
+
+  // Any later status change of the ended booking writes nothing more.
+  await db.query("UPDATE public.venue_booking SET status = 'CANCELLED' WHERE booking_id = $1", [rejected]);
+  assert.equal((await activityOf("event", event.eventId)).filter((entry) => entry.action === "VENUE_INCIDENT_CLOSED").length, 1);
+});
+
+test("[SPM-195] cancelling or rejecting the event closes all its incidents as the system", async () => {
+  const cancelled = await createEvent();
+  await addBooking(cancelled, ANNEX, "14:00", "16:00");
+  await addBooking(cancelled, HALL, "14:00", "16:00");
+  await block(ANNEX, cancelled.at("13:00"), cancelled.at("15:00"), { eventIds: [cancelled.eventId] });
+  await block(HALL, cancelled.at("13:00"), cancelled.at("15:00"), { eventIds: [cancelled.eventId] });
+  await db.query("UPDATE public.event SET status = 'CANCELLED' WHERE event_id = $1", [cancelled.eventId]);
+  assert.deepEqual((await incidentsOf(cancelled.eventId)).map((incident) => [incident.status, incident.resolution]),
+    [["RESOLVED", "EVENT_CANCELLED"], ["RESOLVED", "EVENT_CANCELLED"]]);
+  const closed = (await activityOf("event", cancelled.eventId)).filter((entry) => entry.action === "VENUE_INCIDENT_CLOSED");
+  assert.deepEqual(closed.map((entry) => entry.actor_role), ["SYSTEM", "SYSTEM"]);
+
+  const rejected = await createEvent();
+  await addBooking(rejected, ANNEX, "14:00", "16:00");
+  await block(ANNEX, rejected.at("13:00"), rejected.at("15:00"), { eventIds: [rejected.eventId] });
+  await db.query("UPDATE public.event SET status = 'REJECTED' WHERE event_id = $1", [rejected.eventId]);
+  assert.deepEqual((await incidentsOf(rejected.eventId)).map((incident) => incident.resolution), ["RELEASED"]);
+});
+
+test("[SPM-195] the hold expiry and conversion flows close a hold's incident through the shared helper", async () => {
+  const event = await createEvent();
+  const holdId = "e".repeat(24);
+  await block(ANNEX, event.at("13:00"), event.at("15:00"), { eventIds: [event.eventId], holds: [{ holdId, eventId: event.eventId }] });
+  const closed = await one(
+    "SELECT public._close_venue_block_incidents($1, NULL, $2, 'RELEASED', NULL, 'the hold expired.') AS n", [event.eventId, holdId]
+  );
+  assert.equal(closed.n, 1);
+  assert.deepEqual((await incidentsOf(event.eventId)).map((incident) => [incident.calendar_hold_id, incident.resolution]),
+    [[holdId, "RELEASED"]]);
+});
+
+test("[SPM-195] a block is never refused because of how many events it covers", async () => {
+  const event = await createEvent();
+  const many = Array.from({ length: 1500 }, (_, index) => index + 100000).concat(event.eventId);
+  const { result } = await block(ANNEX, event.at("13:00"), event.at("15:00"), { eventIds: many });
+  assert.equal(result.block.status, "ACTIVE");
 });
 
 test("only the venue lock role may run the entry points", async () => {

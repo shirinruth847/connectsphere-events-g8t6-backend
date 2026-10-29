@@ -305,7 +305,7 @@ describe("changeVenueBlock (SPM-195 AC9)", () => {
     tables({ resource_incidents: [{
       incident_id: 1, event_id: 42, booking_id: 900, calendar_hold_id: null, calendar_block_id: BLOCK_ID, status: "OPEN",
       resolution: null, created_at: "2030-01-01T00:00:00Z", resolved_at: null, event: { title: "Gala" },
-      booking: { venue_id: HALL, start_datetime: "2030-03-10T06:00:00Z", end_datetime: "2030-03-10T08:00:00Z",
+      booking: { venue_id: HALL, status: "APPROVED", start_datetime: "2030-03-10T06:00:00Z", end_datetime: "2030-03-10T08:00:00Z",
         occupied_range: '["2030-03-10 06:00:00+00","2030-03-10 08:00:00+00")' },
     }] });
     const client = lockClient({
@@ -329,7 +329,7 @@ describe("changeVenueBlock (SPM-195 AC9)", () => {
     tables({ resource_incidents: [{
       incident_id: 1, event_id: 42, booking_id: 900, calendar_hold_id: null, calendar_block_id: BLOCK_ID, status: "OPEN",
       resolution: null, created_at: "2030-01-01T00:00:00Z", resolved_at: null, event: { title: "Gala" },
-      booking: { venue_id: HALL, start_datetime: "2030-03-10T06:00:00Z", end_datetime: "2030-03-10T08:00:00Z",
+      booking: { venue_id: HALL, status: "APPROVED", start_datetime: "2030-03-10T06:00:00Z", end_datetime: "2030-03-10T08:00:00Z",
         occupied_range: '["2030-03-10 06:00:00+00","2030-03-10 08:00:00+00")' },
     }] });
     lockClient({ begin_venue_block_change: { affectedEventIds: [42] }, record_venue_block_change: { openIncidents: [] } });
@@ -379,7 +379,7 @@ describe("restoreVenueIncident (SPM-195 AC10)", () => {
   const incidentRow = (overrides = {}) => ({
     incident_id: 5, event_id: 42, booking_id: 900, calendar_hold_id: null, calendar_block_id: BLOCK_ID, status: "OPEN",
     resolution: null, created_at: "2030-01-01T00:00:00Z", resolved_at: null, event: { title: "Gala" },
-    booking: { venue_id: HALL, start_datetime: "2030-03-10T06:00:00Z", end_datetime: "2030-03-10T08:00:00Z", occupied_range: null },
+    booking: { venue_id: HALL, status: "APPROVED", start_datetime: "2030-03-10T06:00:00Z", end_datetime: "2030-03-10T08:00:00Z", occupied_range: null },
     ...overrides,
   });
   const restore = () => venueModel.restoreVenueIncident({ actorId: VENUE_STAFF_ID, incidentId: 5, idempotencyKey: "spm195-key-0002" });
@@ -451,7 +451,7 @@ describe("incident cards on the booking lists (SPM-195 AC7, AC9)", () => {
   const incident = {
     incident_id: 1, event_id: 42, booking_id: 900, calendar_hold_id: null, calendar_block_id: BLOCK_ID, status: "OPEN",
     resolution: null, created_at: "2030-01-02T00:00:00Z", resolved_at: null, event: { title: "Gala" },
-    booking: { venue_id: HALL, start_datetime: bookingRow.start_datetime, end_datetime: bookingRow.end_datetime, occupied_range: bookingRow.occupied_range },
+    booking: { venue_id: HALL, status: "APPROVED", start_datetime: bookingRow.start_datetime, end_datetime: bookingRow.end_datetime, occupied_range: bookingRow.occupied_range },
   };
 
   test("[SPM-195-AC7] should_show_the_block_and_the_coordinator_options", async () => {
@@ -486,5 +486,43 @@ describe("incident cards on the booking lists (SPM-195 AC7, AC9)", () => {
     const [booking] = await venueModel.listEventVenueBookings(42);
     expect(booking.incident).toBeNull();
     expect(venueCalendarModel.findEntriesByIds).not.toHaveBeenCalled();
+  });
+
+  test("should_never_offer_restore_for_a_booking_that_has_ended", async () => {
+    tables({
+      venue_booking: [bookingRow],
+      resource_incidents: [{ ...incident, booking: { ...incident.booking, status: "REJECTED" } }],
+    });
+    venueCalendarModel.findEntriesByIds.mockResolvedValue(new Map([[BLOCK_ID, blockEntry({ status: "LIFTED" })]]));
+
+    const [booking] = await venueModel.listEventVenueBookings(42);
+
+    expect(booking.incident).toEqual(expect.objectContaining({
+      canBeRestored: false, restoreLabel: "The booking or hold has ended, so it cannot be restored.",
+    }));
+    expect(venueCalendarModel.findCalendarEntries).not.toHaveBeenCalled();
+  });
+});
+
+describe("listVenueBlocks (SPM-195 AC9)", () => {
+  const holdIncident = {
+    incident_id: 7, event_id: 55, booking_id: null, calendar_hold_id: HOLD_ID, calendar_block_id: BLOCK_ID, status: "OPEN",
+    resolution: null, created_at: "2030-01-02T00:00:00Z", resolved_at: null, event: { title: "Expo" }, booking: null,
+  };
+
+  test("should_show_an_expired_hold_as_never_restorable_and_report_a_cut_list", async () => {
+    tables({ venue: { venue_id: HALL, name: "Hall" }, resource_incidents: [holdIncident] });
+    venueCalendarModel.findVenueBlocks.mockResolvedValue({ blocks: [blockEntry({ status: "LIFTED" })], hasMore: true });
+    venueCalendarModel.findEntriesByIds.mockResolvedValue(new Map([
+      [BLOCK_ID, blockEntry({ status: "LIFTED" })],
+      [HOLD_ID, hold({ holdExpiresAt: "2020-01-01T00:00:00.000Z" })],
+    ]));
+
+    const result = await venueModel.listVenueBlocks(HALL);
+
+    expect(result.hasMore).toBe(true);
+    expect(result.blocks[0].incidents[0]).toEqual(expect.objectContaining({
+      incidentId: 7, canBeRestored: false, restoreLabel: "Booking or hold has ended",
+    }));
   });
 });

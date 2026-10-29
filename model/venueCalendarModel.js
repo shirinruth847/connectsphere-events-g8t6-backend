@@ -73,14 +73,15 @@ const findCalendarEntry = async (entryId, { maxTimeMS } = {}) => {
 };
 
 // The venue's blocks still in effect or yet to come (end after `from`), newest
-// start last; lifted ones are included so the venue page can show them.
+// start last; lifted ones are included so the venue page can show them. At most
+// `limit` are returned; hasMore says whether later ones were left out.
 const findVenueBlocks = async (venueId, from, { limit = 200 } = {}) => {
   const documents = await (await calendar())
     .find({ venueId: String(venueId), type: "BLOCK", end: { $gt: new Date(from) } })
     .sort({ start: 1, _id: 1 })
-    .limit(limit)
+    .limit(limit + 1)
     .toArray();
-  return documents.map(toEntry);
+  return { blocks: documents.slice(0, limit).map(toEntry), hasMore: documents.length > limit };
 };
 
 // Holds and blocks by ID, for incident cards and restorability.

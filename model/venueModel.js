@@ -1517,14 +1517,23 @@ const INCIDENT_RESOLUTION_LABELS = Object.freeze({
 });
 const BLOCK_STATUS_LABELS = Object.freeze({ ACTIVE: "Active", LIFTED: "Lifted" });
 // Whether an open incident's booking can be restored now, per audience (AC7, AC9).
+// "ended": the booking or hold no longer reserves the venue (an expired hold,
+// before the expiry job closes its incident), so it can never be restored.
 const RESTORE_LABELS = Object.freeze({
-  [INCIDENT_AUDIENCE.VENUE_STAFF]: { true: "Can be restored", false: "Venue still blocked", null: "Availability not checked" },
+  [INCIDENT_AUDIENCE.VENUE_STAFF]: {
+    true: "Can be restored",
+    false: "Venue still blocked",
+    null: "Availability not checked",
+    ended: "Booking or hold has ended",
+  },
   [INCIDENT_AUDIENCE.COORDINATOR]: {
     true: "The venue is free again. Waiting for Venue Staff to restore the booking.",
     false: "Waiting for the venue to become free.",
     null: "Availability not checked.",
+    ended: "The booking or hold has ended, so it cannot be restored.",
   },
 });
+const ACTIVE_HOLD_OR_BOOKING = new Set(ACTIVE_BOOKING_STATUSES);
 
 const toVenueBlockError = (error) => {
   if (error?.name === "VenueError") return error;
@@ -1695,7 +1704,7 @@ const createVenueBlock = async ({ actorId, venueId, block, idempotencyKey }) => 
 
 const INCIDENT_SELECT =
   "incident_id,event_id,booking_id,calendar_hold_id,calendar_block_id,status,resolution,created_at,resolved_at,"
-  + "booking:venue_booking(venue_id,start_datetime,end_datetime,occupied_range),event:event(title)";
+  + "booking:venue_booking(venue_id,status,start_datetime,end_datetime,occupied_range),event:event(title)";
 
 const findIncidents = async (filter) => {
   let query = supabase.from("resource_incidents").select(INCIDENT_SELECT).eq("type", "VENUE_BLOCK");
@@ -1713,6 +1722,7 @@ const findIncidents = async (filter) => {
 // the block is null and canBeRestored is null, never true.
 const describeIncidents = async (rows, audience) => {
   if (!rows.length) return [];
+  const now = new Date();
   const calendarIds = rows.flatMap((row) => [row.calendar_block_id, row.calendar_hold_id]).filter(Boolean);
   const venueIds = [...new Set(rows.map((row) => row.booking?.venue_id).filter(Number.isInteger))];
 
@@ -1744,10 +1754,15 @@ const describeIncidents = async (rows, audience) => {
     } else if (hold) {
       range = { start: toIsoOrNull(hold.occupiedStart), end: toIsoOrNull(hold.occupiedEnd) };
     }
-    return { row, venueId, range };
+    // A booking that is no longer active, or a hold that is expired, converted
+    // or gone, cannot be restored whatever the calendar says.
+    const ended = row.booking
+      ? !ACTIVE_HOLD_OR_BOOKING.has(row.booking.status)
+      : Boolean(row.calendar_hold_id && entriesById && !(hold && venueConflictModel.isHoldActive(hold, now)));
+    return { row, venueId, range, ended };
   });
 
-  const open = located.filter((item) => item.row.status === "OPEN" && item.venueId && item.range);
+  const open = located.filter((item) => item.row.status === "OPEN" && !item.ended && item.venueId && item.range);
   let calendarEntries = null;
   if (open.length && entriesById) {
     try {
@@ -1759,11 +1774,13 @@ const describeIncidents = async (rows, audience) => {
     }
   }
 
-  return located.map(({ row, venueId, range }) => {
+  return located.map(({ row, venueId, range, ended }) => {
     const block = entriesById?.get(row.calendar_block_id) || null;
-    const restorable = row.status === "OPEN" && calendarEntries
-      ? venueConflictModel.canBeRestored(range, calendarEntries.filter((entry) => entry.venueId === venueId))
-      : null;
+    let restorable = null;
+    if (row.status === "OPEN" && ended) restorable = false;
+    else if (row.status === "OPEN" && calendarEntries) {
+      restorable = venueConflictModel.canBeRestored(range, calendarEntries.filter((entry) => entry.venueId === venueId));
+    }
     return {
       incidentId: row.incident_id,
       eventId: row.event_id,
@@ -1783,7 +1800,7 @@ const describeIncidents = async (rows, audience) => {
       resolvedAt: row.resolved_at,
       block: block ? toBlock(block) : null,
       canBeRestored: row.status === "OPEN" ? restorable : null,
-      restoreLabel: row.status === "OPEN" ? RESTORE_LABELS[audience][String(restorable)] : null,
+      restoreLabel: row.status === "OPEN" ? RESTORE_LABELS[audience][ended ? "ended" : String(restorable)] : null,
     };
   });
 };
@@ -1816,13 +1833,14 @@ const attachBookingIncidents = async (eventId, bookings, audience) => {
 const listVenueBlocks = async (venueId) => {
   const venue = await findManagedVenueRow(venueId);
   if (!venue) throw venueError("VENUE_NOT_FOUND");
-  const blocks = await calendarCall(() => venueCalendarModel.findVenueBlocks(venueId, new Date()));
+  const { blocks, hasMore } = await calendarCall(() => venueCalendarModel.findVenueBlocks(venueId, new Date()));
   const incidents = blocks.length
     ? await describeIncidents(await findIncidents({ blockIds: blocks.map((block) => block.id) }), INCIDENT_AUDIENCE.VENUE_STAFF)
     : [];
   return {
     venueId,
     venueName: venue.name,
+    hasMore,
     blocks: blocks.map((block) => ({
       ...toBlock(block),
       incidents: incidents.filter((incident) => incident.calendarBlockId === block.id),
