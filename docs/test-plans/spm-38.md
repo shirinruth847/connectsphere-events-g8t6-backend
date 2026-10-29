@@ -1,5 +1,10 @@
 # SPM-38 submitted event review fixes
 
+Current deployment: backend merge `cf0c1ea` and frontend merge `61559a1` are on
+main. The SPM-38 migration was applied to development on 29 October 2026 and
+passed the hosted checks recorded at the end of this document. Earlier pending
+deployment statements below describe their execution-time state.
+
 Prepared on `fix/SPM-38-review-findings`, based on current backend main
 `a698852` and frontend main `41efd3c`. Integrates the PR's organiser contact and
 review requirements without replacing current safety, clarification, venue or
@@ -160,3 +165,34 @@ alongside the database suite then hit a MongoDB startup-hook timeout. The final
 complete rerun above passed after the database suite finished, without changing
 tests, timeouts, or application code. Hosted migration deployment remains
 pending, as documented in the read-only check above.
+
+## Development migration applied — 29 October 2026
+
+At the user's explicit request, applied the exact merged migration
+`20261028120000_spm38_submitted_support_needs.sql` to the configured development
+Supabase project. The target PostgreSQL connection was verified against the API
+project reference. Preflight confirmed no migration record/column existed and
+all four deployed function bodies matched the reviewed prior versions.
+
+The migration and its exact version/name/statements history record were
+committed atomically, with bounded lock and statement timeouts. Before commit,
+checks confirmed the nullable text column, validated 2,000-character constraint,
+all four function bodies, fixed search paths and browser/service-role grants.
+Existing event rows were retained with null support needs; no backfill or Auth
+changes were made. PostgREST schema reload was requested and the new column
+subsequently returned HTTP 200 through the actual Supabase REST client.
+
+All 12 hosted smoke checks passed: draft create/trim, idempotent draft replay,
+omitted-field preservation, clear/history, service-role save at 2,000 characters,
+invalid length/type rejection, stale-save rejection, ownership rejection,
+browser-role RPC rejection, existing-draft submission, direct submission/replay,
+and clarification amendments. These used SQL RPCs and database roles with
+synthetic profiles/events in one transaction that was rolled back. Follow-up
+queries confirmed no test profiles, events or idempotency commands remained.
+PostgreSQL sequence allocation may advance despite rollback. No real profiles
+were edited and no Auth accounts were created. Full authenticated HTTP journeys
+and separate-client concurrency were not run.
+
+MongoDB needed no migration and was not changed. Local credential-free summaries:
+`/private/tmp/spm38-applied-migration-results.json` and
+`/private/tmp/spm38-hosted-migration-smoke-results.json`.
