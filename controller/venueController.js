@@ -598,6 +598,12 @@ const listVenueBlocks = async (req, res, next) => {
   }
 };
 
+const blockRecordedMessage = (affected) => {
+  if (!affected) return "Block recorded. No bookings or holds are affected.";
+  const subject = affected === 1 ? "One booking or hold is" : `${affected} bookings or holds are`;
+  return `Block recorded. ${subject} affected; their coordinators have been told.`;
+};
+
 // POST /api/venues/:venueId/blocks — body { reason, start, end, note } plus an
 // Idempotency-Key header. 201 with the block and its incidents; 200 for a replay.
 const createVenueBlock = async (req, res, next) => {
@@ -611,13 +617,7 @@ const createVenueBlock = async (req, res, next) => {
 
   try {
     const result = await venueModel.createVenueBlock({ actorId: req.user.user_id, venueId, block, idempotencyKey });
-    const count = result.incidents.length;
-    return res.status(result.replayed ? 200 : 201).json({
-      message: count
-        ? `Block recorded. ${count === 1 ? "One booking or hold is" : `${count} bookings or holds are`} affected; their coordinators have been told.`
-        : "Block recorded. No bookings or holds are affected.",
-      ...result,
-    });
+    return res.status(result.replayed ? 200 : 201).json({ message: blockRecordedMessage(result.incidents.length), ...result });
   } catch (err) {
     return handleBlockError(err, res, next);
   }
