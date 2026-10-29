@@ -51,6 +51,12 @@ describe("findNotifications", () => {
     expect(detached.target).toBeNull();
   });
 
+  test("[SPM-193-TC-11][TC-12] a coordinator's notice, including 'assignment ended', opens the event workspace", () => {
+    const ended = notificationModel.toNotificationItem(row({ type: "ASSIGNMENT_ENDED" }), "COORDINATOR");
+    expect(ended.type).toBe("ASSIGNMENT_ENDED");
+    expect(ended.target).toEqual({ page: "EVENT_WORKSPACE", event_id: 8 });
+  });
+
   test("[SPM-155-AC8] returns a cursor for the next page that keeps microseconds", async () => {
     supabase.rpc.mockResolvedValue({
       data: [row({ notification_id: 3 }), row({ notification_id: 2 }), row({ notification_id: 1 })],

@@ -1,4 +1,3 @@
-process.env.ENABLE_COORDINATOR_WORKFLOWS = "true";
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/userModel");
 jest.mock("../../model/eventModel", () => {
@@ -22,14 +21,16 @@ const eventModel = require("../../model/eventModel");
 
 const leadId = 10;
 const coordinatorId = 20;
+const reassignmentKey = "spm192-reassign-command";
 
 const signedInAs = (userId, role) => {
   userModel.verifyAccessToken.mockResolvedValue("auth-uuid");
   userModel.findUserByAuthId.mockResolvedValue({ user_id: userId, role, organisation_ids: [] });
 };
 
-const send = (method, path, body) => {
+const send = (method, path, body, key = reassignmentKey) => {
   let req = request(app)[method](path).set("Authorization", "Bearer token");
+  if (key !== null) req = req.set("Idempotency-Key", key);
   return body === undefined ? req : req.send(body);
 };
 
@@ -69,7 +70,32 @@ describe("PATCH /api/events/:id/coordinator", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.coordinator).toEqual({ coordinatorId, name: "Coordinator Two" });
-    expect(eventModel.reassignCoordinator).toHaveBeenCalledWith({ eventId: 42, coordinatorId, expectedCoordinatorId: 19, leadId });
+    expect(eventModel.reassignCoordinator).toHaveBeenCalledWith({ eventId: 42, coordinatorId, expectedCoordinatorId: 19, leadId, idempotencyKey: reassignmentKey });
+  });
+
+  test.each([null, "bad", "invalid key"])("[SPM-192 AC10] refuses a reassignment without a valid command key: %p", async (key) => {
+    signedInAs(leadId, "COORDINATOR_LEAD");
+    const res = await send("patch", "/api/events/42/coordinator", { coordinatorId, expectedCoordinatorId: 19 }, key);
+    expect(res.status).toBe(400);
+    expect(res.body.fields).toHaveProperty("idempotencyKey");
+    expect(eventModel.reassignCoordinator).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-192 AC10] exposes a confirmed replay without reporting another change", async () => {
+    signedInAs(leadId, "COORDINATOR_LEAD");
+    eventModel.reassignCoordinator.mockResolvedValue({ event: { eventId: 42 }, coordinator: { coordinatorId }, replayed: true });
+    const res = await send("patch", "/api/events/42/coordinator", { coordinatorId, expectedCoordinatorId: 19 });
+    expect(res.status).toBe(200);
+    expect(res.headers["idempotent-replayed"]).toBe("true");
+    expect(res.body.replayed).toBe(true);
+  });
+
+  test.each(["IDEMPOTENCY_KEY_REUSED", "IDEMPOTENCY_IN_PROGRESS"])("[SPM-192 AC10] returns a safe conflict for %s", async (code) => {
+    signedInAs(leadId, "COORDINATOR_LEAD");
+    eventModel.reassignCoordinator.mockRejectedValue(Object.assign(new Error(code), { name: "EventRequestError", code }));
+    const res = await send("patch", "/api/events/42/coordinator", { coordinatorId, expectedCoordinatorId: 19 });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe(code);
   });
 
   test("[SPM-180-AC6] should_reject_reassignment_when_the_actor_is_not_a_lead", async () => {

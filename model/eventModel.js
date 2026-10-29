@@ -23,6 +23,7 @@ const FIELD_MAP = Object.freeze({
   title: "title",
   purpose: "purpose",
   description: "description",
+  technicalSupportNeeds: "technical_support_needs",
   startDatetime: "start_datetime",
   endDatetime: "end_datetime",
   expectedAttendance: "expected_attendance",
@@ -40,6 +41,7 @@ const EVENT_SELECT =
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
+const ASSIGNED_COORDINATOR_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name,email)`;
 // A Safety Officer's view: the rounds that put the event in their scope and the
 // number of registered attendees, never who they are (SPM-243 AC2).
 const SAFETY_OFFICER_SELECT = `${EVENT_SELECT},registration(count),safety_reviews!inner(review_id,status,claimed_by,decided_by)`;
@@ -177,6 +179,7 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
     title: row.title,
     purpose: row.purpose,
     description: row.description,
+    technicalSupportNeeds: row.technical_support_needs ?? null,
     startDatetime: row.start_datetime,
     endDatetime: row.end_datetime,
     expectedAttendance: row.expected_attendance,
@@ -240,7 +243,12 @@ const toEventView = (row, user, access) => ({
   ...(COORDINATION_RELATIONSHIPS.has(access.relationship)
     ? {
         coordinatorId: row.coordinator_id,
-        organiser: row.organiser ? { userId: row.organiser.user_id, name: row.organiser.name } : null,
+        organiser: row.organiser ? {
+          userId: row.organiser.user_id,
+          name: row.organiser.name,
+          ...(access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR
+            ? { email: row.organiser.email ?? null } : {}),
+        } : null,
         ...(row.arrangement_version === undefined ? {} : { arrangementVersion: row.arrangement_version }),
       }
     : {}),
@@ -641,7 +649,7 @@ const findVisibleEvent = async (eventId, user) => {
     return data && isSupervisedBy(data, user.user_id) ? { ...data, supervising_lead_id: user.user_id } : null;
   }
   const select = {
-    COORDINATOR: COORDINATION_SELECT,
+    COORDINATOR: ASSIGNED_COORDINATOR_SELECT,
     SAFETY_OFFICER: SAFETY_OFFICER_SELECT,
   }[user.role] || EVENT_SELECT;
   let query = supabase.from("event").select(select).eq("event_id", eventId);
@@ -787,12 +795,14 @@ const assignCoordinator = async ({ eventId, coordinatorId, leadId }) => {
   return data.event;
 };
 
-const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinatorId, leadId }) => {
-  const { data, error } = await supabase.rpc("reassign_event_coordinator", {
+const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinatorId, leadId, idempotencyKey }) => {
+  const { data, error } = await supabase.rpc("reassign_event_coordinator_idempotent", {
     p_event_id: eventId,
     p_coordinator_id: coordinatorId,
     p_expected_coordinator_id: expectedCoordinatorId,
     p_lead_id: leadId,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({ coordinatorId, expectedCoordinatorId }, {}, [eventId]),
   });
   if (error) {
     const code = error.message;
@@ -807,7 +817,7 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
     throw toEventRequestError(error);
   }
   if (!data || !data.event || !data.coordinator) {
-    throw new Error("reassign_event_coordinator returned an incomplete result.");
+    throw new Error("reassign_event_coordinator_idempotent returned an incomplete result.");
   }
   return {
     event: {
@@ -821,6 +831,7 @@ const reassignCoordinator = async ({ eventId, coordinatorId, expectedCoordinator
       coordinatorId: data.coordinator.user_id,
       name: data.coordinator.name,
     },
+    replayed: data.replayed === true,
   };
 };
 

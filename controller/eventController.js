@@ -451,6 +451,7 @@ const getEventHistory = async (req, res, next) => {
       activityModel.findEventHistory(eventId, {
         ...req.pagination,
         audiences: access.historyAudiences,
+        ...(req.user.role === "ORGANISER" ? { organiserView: true } : {}),
         ...(access.historyFields ? { fields: access.historyFields } : {}),
       }),
       activityModel.findLastHistoryView(eventId, req.user.user_id),
@@ -570,16 +571,22 @@ const patchCoordinator = async (req, res, next) => {
             "Send the coordinatorId currently shown as assigned.",
         });
       }
+      const errors = {};
+      const idempotencyKey = readRequestIdempotencyKey(req, true, errors);
+      if (hasErrors(errors)) return validationFailed(res, errors);
       const result = await eventModel.reassignCoordinator({
         eventId,
         coordinatorId: body.coordinatorId,
         expectedCoordinatorId: body.expectedCoordinatorId,
         leadId: req.user.user_id,
+        idempotencyKey,
       });
+      markReplay(res, result);
       return res.status(200).json({
         message: "Event coordinator reassigned successfully.",
         event: result.event,
         coordinator: result.coordinator,
+        replayed: result.replayed,
       });
     }
 

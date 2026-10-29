@@ -711,17 +711,20 @@ describe("SPM-180 reassignment RPC", () => {
       error: null,
     });
 
-    const result = await eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, expectedCoordinatorId: 21, leadId: 10 });
+    const result = await eventModel.reassignCoordinator({ eventId: 42, coordinatorId: 29, expectedCoordinatorId: 21, leadId: 10, idempotencyKey: "spm192-reassignment" });
 
-    expect(supabase.rpc).toHaveBeenCalledWith("reassign_event_coordinator", {
+    expect(supabase.rpc).toHaveBeenCalledWith("reassign_event_coordinator_idempotent", {
       p_event_id: 42,
       p_coordinator_id: 29,
       p_expected_coordinator_id: 21,
       p_lead_id: 10,
+      p_idempotency_key: "spm192-reassignment",
+      p_request_hash: eventModel.hashRequest({ coordinatorId: 29, expectedCoordinatorId: 21 }, {}, [42]),
     });
     expect(result).toEqual({
       event: { eventId: 42, requestId: "REQ-000042", title: "Conference", status: "SUBMITTED", coordinatorId: 29 },
       coordinator: { coordinatorId: 29, name: "Coordinator Two" },
+      replayed: false,
     });
   });
 
@@ -958,5 +961,28 @@ describe("An attendee's own registered event (SPM-155 AC4, AC5)", () => {
   test("[SPM-155] should_return_null_when_the_event_row_is_gone", async () => {
     tables({ registrations: [registered], event: null });
     await expect(eventModel.findRegisteredAttendeeEvent(7, 21)).resolves.toBeNull();
+  });
+});
+
+
+describe("[SPM-38] support needs and organiser contact", () => {
+  test("normalises support needs for the existing atomic RPC and returns the saved text", async () => {
+    supabase.rpc.mockResolvedValue({ data: { event: { event_id: 42, technical_support_needs: "AV setup" } }, error: null });
+    const saved = await eventModel.saveDraft({ organiserId: 5, input: { title: "Synthetic request", technicalSupportNeeds: "  AV setup  " }, idempotencyKey: "spm38-draft" });
+    expect(supabase.rpc.mock.calls[0][1].p_event.technical_support_needs).toBe("AV setup");
+    expect(eventModel.toApi(saved.event).technicalSupportNeeds).toBe("AV setup");
+    expect(eventModel.toApi({ event_id: 1 }).technicalSupportNeeds).toBeNull();
+  });
+  test("loads organiser email only for the assigned coordinator and does not serialize it for a Lead", async () => {
+    const row = { event_id: 42, organiser_id: 5, coordinator_id: 11, status: "UNDER_REVIEW", technical_support_needs: "Presentation assistance", organiser: { user_id: 5, name: "Synthetic Organiser", email: "synthetic@example.test" } };
+    const query = queryReturning({ data: row, error: null });
+    supabase.from.mockReturnValue(query);
+    await eventModel.findVisibleEvent(42, { user_id: 11, role: "COORDINATOR" });
+    expect(query.eq).toHaveBeenCalledWith("coordinator_id", 11);
+    expect(query.select).toHaveBeenCalledWith(expect.stringContaining("user_id,name,email"));
+    const access = { relationship: "ASSIGNED_COORDINATOR", canEdit: false, editableFields: [], historyAudiences: [] };
+    expect(eventModel.toEventView(row, { user_id: 11 }, access).organiser.email).toBe("synthetic@example.test");
+    expect(eventModel.toEventView(row, { user_id: 10 }, { ...access, relationship: "SUPERVISING_LEAD" }).organiser).not.toHaveProperty("email");
+    expect(eventModel.toEventView(row, { user_id: 5 }, { ...access, relationship: "OWNER" })).not.toHaveProperty("organiser");
   });
 });

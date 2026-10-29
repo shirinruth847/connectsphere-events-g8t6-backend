@@ -133,7 +133,7 @@ describe("GET /api/events/:id (AC1)", () => {
       expect.objectContaining({
         viewerRelationship: "ASSIGNED_COORDINATOR",
         coordinatorId: COORDINATOR_ID,
-        organiser: { userId: ORGANISER_ID, name: "Organiser A" },
+        organiser: { userId: ORGANISER_ID, name: "Organiser A", email: null },
         permissions: {
           canEdit: true,
           editableFields: ["title", "purpose", "description"],
@@ -563,6 +563,7 @@ describe("GET /api/events/:id/history (AC8)", () => {
       limit: 20,
       cursor: null,
       audiences: ["OWNER_ONLY", "ORGANISER_SAFE"],
+      organiserView: true,
     });
   });
 
