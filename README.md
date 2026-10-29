@@ -91,10 +91,13 @@ The attendee discovery routes, `GET /api/events/discovery` and `GET /api/events/
 - **Status label and note:** organiser-facing responses carry `statusLabel`, one of the eight Master section 3.5 labels, and `statusNote`: "Waiting for a coordinator" while a submitted request has no coordinator (added by SPM-33; not yet listed in the Master), "Returned – action required" while awaiting clarification, "Reconfirmation pending" when a previously confirmed event is back in `PLANNING` or `SAFETY_REVIEW` (SPM-173), otherwise `null`. Organiser event responses expose the label and note rather than stored `status`; staff responses continue to include stored status.
 - **List filters:** `GET /api/events/mine` takes either `status` (a stored state) or `label` (one of the eight labels, expanded to its states on the backend, e.g. `label=Approved%20%26%20Planning` returns `PLANNING` and `SAFETY_REVIEW`), not both.
 - **`Idempotency-Key`:** 8–128 characters from `A-Z a-z 0-9 . _ : -`; a UUID per form submission works. Re-sending the same key and body returns the original result with an `Idempotent-Replayed: true` header and creates nothing new. Reusing a key with a different body returns `409 IDEMPOTENCY_KEY_REUSED`.
+- **Submitted support needs (SPM-38):** `technicalSupportNeeds` is optional plain text (up to 2,000 characters; blank becomes `null`). Draft create/save and submit accept it; event detail returns it. It may be amended by the owner during an open clarification, but cannot be directly edited by a coordinator. It describes the organiser's requested assistance, not a technical arrangement created during Planning. Deploy `20261028120000_spm38_submitted_support_needs.sql` before the supporting backend/frontend. See `docs/test-plans/spm-38.md`.
 - **Drafts** need only a title. Other supplied values must still be valid, so a draft may enable registration before entering a capacity.
 - **Submission** leaves the request unassigned in the Leads' queue (SPM-174) and writes the event, its activity record and the receipt notification for the organiser and active Coordinator Leads in one database transaction (`submit_event_request`, which changes the state through the shared lifecycle function since SPM-173). A new request's `version` is 2 after submission, because it is created as a draft and then submitted. The database files the request under the organiser's organisation (see SPM-33). If the database rejects a submission, the `400` still carries field-level `fields`.
 - **Assignment** (`POST /api/events/:id/coordinator`, Coordinator Lead only) takes a request from the queue: in one transaction (`assign_event_coordinator`) it sets the coordinator, moves the request from `SUBMITTED` to `UNDER_REVIEW` (Master section 5.2), records the staff-only history entry `COORDINATOR_ASSIGNED` and notifies the organiser and the coordinator.
 - **Paging:** pass `nextCursor` back as `cursor`; it is `null` on the last page.
+
+Organiser history status changes additionally return `beforeLabel` and `afterLabel` from the same backend mapping as `statusLabel`. Staff history retains detailed states. Stored audit entries are unchanged.
 
 ### Choosing a Venue (SPM-72, SPM-74, SPM-75)
 
@@ -305,7 +308,7 @@ Same-organisation viewing relies on `event.organisation_id`. The database fills 
 
 | Method & path | Input | Success | Errors |
 | --- | --- | --- | --- |
-| `GET /api/events/:id` | — | `200 { event }`. Adds `version`, `viewerRelationship` (`OWNER`, `ORGANISATION_MEMBER`, `ASSIGNED_COORDINATOR`) and `permissions: { canEdit, editableFields, canViewDraftHistory, canViewStaffHistory }`. The assigned coordinator also gets `coordinatorId` and `organiser: { userId, name }` | `401`, `404` |
+| `GET /api/events/:id` | — | `200 { event }`. Adds `version`, `viewerRelationship` (`OWNER`, `ORGANISATION_MEMBER`, `ASSIGNED_COORDINATOR`) and `permissions: { canEdit, editableFields, canViewDraftHistory, canViewStaffHistory }`. The assigned coordinator also gets `coordinatorId` and `organiser: { userId, name, email }` | `401`, `404` |
 | `PUT /api/events/:id` | Changed fields, `version` (the one loaded) and an `Idempotency-Key` header | `200 { message, event }`, plus `savedAt` for a draft | See below |
 | `GET /api/events/:id/history` | `?limit=1..100` (default 50), `?cursor=<nextCursor>` | `200 { history: [{ historyId, action, actor: { userId, name, role }, occurredAt, summary, changes: [{ field, before, after }], audience }], nextCursor }`, newest first | `400`, `401`, `404` |
 
