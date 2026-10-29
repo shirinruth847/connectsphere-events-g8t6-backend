@@ -111,12 +111,41 @@ const activityFor = async (registrationIds) => {
   return data;
 };
 
+// Registration activity written by this run's attendees. Tests in this file run
+// one at a time, so a change in the count belongs to the test that made it.
+const ATTENDEE_KEYS = ["attendee", "deactivatable", "racer"];
+const registrationActivityCount = async () => {
+  const { count, error } = await supabase
+    .from("activity_log")
+    .select("log_id", { count: "exact", head: true })
+    .eq("entity_name", "registration")
+    .in("user_id", ATTENDEE_KEYS.map((key) => fixtures.accounts[key].userId));
+  if (error) throw error;
+  return count;
+};
+
 // A refused attempt must leave no registration, confirmation or activity.
 const expectNothingWritten = async (eventId, before) => {
   expect(await registrationsFor(eventId)).toEqual(before.registrations);
   expect(await confirmationsFor(eventId)).toEqual(before.confirmations);
+  expect(await registrationActivityCount()).toBe(before.activity);
 };
-const snapshot = async (eventId) => ({ registrations: await registrationsFor(eventId), confirmations: await confirmationsFor(eventId) });
+const snapshot = async (eventId) => ({
+  registrations: await registrationsFor(eventId),
+  confirmations: await confirmationsFor(eventId),
+  activity: await registrationActivityCount(),
+});
+
+const discoveryAvailability = async (key, eventId) => {
+  const res = await request(app).get(`/api/events/discovery/${eventId}`).set("Authorization", await bearer(key));
+  expect(res.status).toBe(200);
+  return res.body.event.registrationAvailability;
+};
+
+const updateEvent = async (eventId, changes) => {
+  const { error } = await supabase.from("event").update(changes).eq("event_id", eventId).like("title", `spm134-${runId}-%`);
+  if (error) throw error;
+};
 
 // Only what registration reads: the attendees, one account per other role, and
 // the organiser's organisation for the confirmation. No venue or booking data.
@@ -131,7 +160,15 @@ beforeAll(async () => {
     { key: "venueStaff", role: "VENUE_STAFF" },
     { key: "techSupport", role: "TECH_SUPPORT" },
     { key: "safetyOfficer", role: "SAFETY_OFFICER" },
+    { key: "inactiveAttendee", role: "ATTENDEE" },
   ]);
+  // Trusted setup on this run's own row: an attendee whose account was deactivated.
+  const { error } = await supabase
+    .from("user")
+    .update({ is_active: false })
+    .eq("user_id", fixtures.accounts.inactiveAttendee.userId)
+    .like("email", `spm32-${runId}-%`);
+  if (error) throw error;
 });
 
 // Runs even when setup stopped part-way: the manifest lists what was created.
@@ -140,7 +177,7 @@ afterAll(async () => {
 });
 
 describe("[SPM-134] authentication and role", () => {
-  test("[SPM-134] should_return_401_and_register_nothing_when_there_is_no_token", async () => {
+  test("[TC-REG-023] should_return_401_and_register_nothing_when_there_is_no_token", async () => {
     const eventId = await insertEvent();
     const res = await request(app).post(`/api/registrations/mine/${eventId}`).send(answers());
     expect(res.status).toBe(401);
@@ -155,7 +192,7 @@ describe("[SPM-134] authentication and role", () => {
     expect(await registrationsFor(eventId)).toEqual([]);
   });
 
-  test("[SPM-134] should_register_only_the_signed_in_attendee_when_the_body_names_another_user", async () => {
+  test("[TC-REG-005] should_register_only_the_signed_in_attendee_when_the_body_names_another_user", async () => {
     const eventId = await insertEvent();
     const forged = await registerAs("attendee", eventId, { ...answers(), userId: fixtures.accounts.racer.userId, attendeeId: 1 });
     expect(forged.status).toBe(400);
@@ -165,7 +202,7 @@ describe("[SPM-134] authentication and role", () => {
 });
 
 describe("[SPM-134] successful registration", () => {
-  test("[SPM-134] should_register_with_event_specific_answers_and_leave_the_saved_profile_unchanged", async () => {
+  test("[TC-REG-003] [TC-REG-006] [TC-REG-007] [TC-REG-011] [TC-REG-012] [TC-REG-013] [TC-REG-016] should_register_with_event_specific_answers_and_leave_the_saved_profile_unchanged", async () => {
     const savedProfile = await request(app)
       .put("/api/attendee-profile/mine")
       .set("Authorization", await bearer("attendee"))
@@ -180,6 +217,11 @@ describe("[SPM-134] successful registration", () => {
     const res = await registerAs("attendee", eventId, answers("Vegetarian, no peanuts", "Step-free access"));
     recordRegistrations([res]);
     expect(res.status).toBe(201);
+    expect(Object.keys(res.body.registration).sort()).toEqual([
+      "accessibilityRequirements", "confirmationNumber", "dietaryRestrictions", "event", "registeredAt", "registrationId", "status",
+    ]);
+    expect(Object.keys(res.body.registration.event).sort()).toEqual(["endDatetime", "eventId", "organisationName", "startDatetime", "title"]);
+    expect(res.body.registration.event.startDatetime).toEqual(expect.any(String));
     expect(res.body.registration).toMatchObject({
       status: "REGISTERED",
       dietaryRestrictions: "Vegetarian, no peanuts",
@@ -197,6 +239,11 @@ describe("[SPM-134] successful registration", () => {
       accessibility_requirements: "Step-free access",
     }]);
     expect(await confirmationsFor(eventId)).toEqual([{ type: "REGISTRATION_CONFIRMED", recipients: [fixtures.accounts.attendee.userId] }]);
+    const { data: notices, error: noticeError } = await supabase.from("notification").select("title, message").eq("event_id", eventId);
+    if (noticeError) throw noticeError;
+    expect(notices).toHaveLength(1);
+    expect(notices[0].title).toBe("Registration confirmed");
+    expect(notices[0].message).toContain(`spm134-${runId}-event-${eventOffset}`);
     const activity = await activityFor([registrationId]);
     expect(activity).toEqual([{
       user_id: fixtures.accounts.attendee.userId,
@@ -221,7 +268,7 @@ describe("[SPM-134] successful registration", () => {
     expect(mine.body.myRegistration.status).toBe("REGISTERED");
   });
 
-  test("[SPM-134] should_register_with_blank_answers_when_the_attendee_has_no_saved_profile", async () => {
+  test("[TC-REG-004] should_register_with_blank_answers_when_the_attendee_has_no_saved_profile", async () => {
     const eventId = await insertEvent();
     const res = await registerAs("racer", eventId, answers("", "  "));
     recordRegistrations([res]);
@@ -248,12 +295,13 @@ describe("[SPM-134] successful registration", () => {
     "[SPM-134] should_return_404_and_register_nothing_when_the_event_is_in_%s_previously_confirmed_%s",
     async (status, previouslyConfirmed) => {
       const eventId = await insertEvent({ status, previously_confirmed: previouslyConfirmed });
+      const before = await snapshot(eventId);
       const res = await registerAs("racer", eventId);
       recordRegistrations([res]);
       expect(res.status).toBe(404);
       expect(res.body.code).toBe("EVENT_NOT_FOUND");
-      expect(await registrationsFor(eventId)).toEqual([]);
-      expect(await confirmationsFor(eventId)).toEqual([]);
+      await expectNothingWritten(eventId, before);
+      expect(before.registrations).toEqual([]);
     }
   );
 
@@ -272,7 +320,7 @@ describe("[SPM-134] successful registration", () => {
 });
 
 describe("[SPM-134] duplicate registration", () => {
-  test("[SPM-134] should_return_409_already_registered_and_write_nothing_when_the_attendee_registers_again", async () => {
+  test("[TC-REG-020] should_return_409_already_registered_and_write_nothing_when_the_attendee_registers_again", async () => {
     const eventId = await insertEvent();
     const first = await registerAs("racer", eventId, answers("Vegan"));
     recordRegistrations([first]);
@@ -283,7 +331,8 @@ describe("[SPM-134] duplicate registration", () => {
     await expectNothingWritten(eventId, before);
   });
 
-  test("[SPM-134] should_create_exactly_one_registration_when_the_same_attendee_registers_in_parallel", async () => {
+  test.each(Array.from({ length: RACE_ROUNDS }, (_, round) => [round + 1]))(
+    "[TC-REG-020] should_create_exactly_one_registration_when_the_same_attendee_registers_in_parallel_round_%i", async () => {
     const eventId = await insertEvent();
     await signIn("deactivatable");
     const results = await Promise.all([1, 2, 3].map(() => registerAs("deactivatable", eventId)));
@@ -304,7 +353,7 @@ describe("[SPM-134] duplicate registration", () => {
 });
 
 describe("[SPM-134] capacity", () => {
-  test("[SPM-134] should_return_409_registration_full_without_a_waitlist_row_when_capacity_is_reached", async () => {
+  test("[TC-REG-017] should_return_409_registration_full_without_a_waitlist_row_when_capacity_is_reached", async () => {
     const eventId = await insertEvent({ registration_capacity: 1 });
     await insertRegistration(eventId, "deactivatable", "REGISTERED");
     const before = await snapshot(eventId);
@@ -313,10 +362,11 @@ describe("[SPM-134] capacity", () => {
     expect(res.body.code).toBe("REGISTRATION_FULL");
     await expectNothingWritten(eventId, before);
     expect((await registrationsFor(eventId)).filter((row) => row.registration_status === "WAITLISTED")).toEqual([]);
+    expect(await discoveryAvailability("racer", eventId)).toBe("FULL_WAITLIST");
   });
 
   test.each(Array.from({ length: RACE_ROUNDS }, (_, round) => [round + 1]))(
-    "[SPM-134] should_give_the_last_place_to_exactly_one_attendee_when_two_register_in_parallel_round_%i",
+    "[TC-REG-021] should_give_the_last_place_to_exactly_one_attendee_when_two_register_in_parallel_round_%i",
     async () => {
       const eventId = await insertEvent({ registration_capacity: 2 });
       await insertRegistration(eventId, "attendee", "REGISTERED");
@@ -341,28 +391,32 @@ describe("[SPM-134] registration window and enablement", () => {
   test.each([
     ["the_window_has_closed", { registration_close_at: new Date(Date.now() - 60 * 1000).toISOString() }],
     ["the_window_has_not_opened", { registration_open_at: new Date(Date.now() + DAY).toISOString() }],
-  ])("[SPM-134] should_return_409_registration_closed_and_write_nothing_when_%s", async (label, overrides) => {
+  ])("[TC-REG-018] should_return_409_registration_closed_and_write_nothing_when_%s", async (label, overrides) => {
     const eventId = await insertEvent(overrides);
     const before = await snapshot(eventId);
     const res = await registerAs("racer", eventId);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("REGISTRATION_CLOSED");
     await expectNothingWritten(eventId, before);
+    expect(await discoveryAvailability("racer", eventId)).toBe("CLOSED");
   });
 
   test("[SPM-134] should_return_registration_closed_not_full_when_the_window_has_closed_on_a_full_event", async () => {
     const eventId = await insertEvent({ registration_capacity: 1, registration_close_at: new Date(Date.now() - 60 * 1000).toISOString() });
     await insertRegistration(eventId, "deactivatable", "REGISTERED");
     const res = await registerAs("racer", eventId);
+    expect(res.status).toBe(409);
     expect(res.body.code).toBe("REGISTRATION_CLOSED");
+    expect(await discoveryAvailability("racer", eventId)).toBe("CLOSED");
   });
 
-  test("[SPM-134] should_return_409_registration_not_enabled_when_the_organiser_has_not_enabled_registration", async () => {
+  test("[TC-REG-019] should_return_409_registration_not_enabled_when_the_organiser_has_not_enabled_registration", async () => {
     const eventId = await insertEvent({ is_registration_enabled: false, registration_capacity: null });
     const res = await registerAs("racer", eventId);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("REGISTRATION_NOT_ENABLED");
     expect(await registrationsFor(eventId)).toEqual([]);
+    expect(await discoveryAvailability("racer", eventId)).toBe("NOT_ENABLED");
   });
 
   test("[SPM-134] should_return_404_when_the_event_is_unpublished_closed_out_or_missing", async () => {
@@ -384,11 +438,180 @@ describe("[SPM-134] validation", () => {
     ["a_missing_answer", { dietaryRestrictions: "Vegan" }],
     ["over_long_text", answers("x".repeat(1001))],
     ["a_nul_character", answers("Vegan\u0000")],
-  ])("[SPM-134] should_return_400_and_register_nothing_when_the_body_has_%s", async (label, body) => {
+  ])("[TC-REG-009] [TC-REG-010] should_return_400_and_register_nothing_when_the_body_has_%s", async (label, body) => {
     const eventId = await insertEvent();
     const res = await registerAs("racer", eventId, body);
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("VALIDATION_FAILED");
     expect(await registrationsFor(eventId)).toEqual([]);
+  });
+});
+
+// Same header and signature as a real token, with a payload claiming more.
+const tamperedToken = (accessToken) => {
+  const [header, payload, signature] = accessToken.split(".");
+  const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  const forged = { ...claims, sub: "00000000-0000-0000-0000-000000000000", role: "service_role", user_role: "ATTENDEE" };
+  return [header, Buffer.from(JSON.stringify(forged)).toString("base64url"), signature].join(".");
+};
+
+describe("[SPM-134] authentication edge cases (AC18)", () => {
+  test("[TC-REG-023] should_return_401_and_register_nothing_when_the_token_is_malformed_or_tampered", async () => {
+    const eventId = await insertEvent();
+    const session = await signIn("attendee");
+    const malformed = await request(app).post(`/api/registrations/mine/${eventId}`).set("Authorization", "Bearer not-a-jwt").send(answers());
+    const tampered = await request(app)
+      .post(`/api/registrations/mine/${eventId}`)
+      .set("Authorization", `Bearer ${tamperedToken(session.access_token)}`)
+      .send(answers());
+    expect([malformed.status, tampered.status]).toEqual([401, 401]);
+    expect(await registrationsFor(eventId)).toEqual([]);
+  });
+
+  test("[TC-REG-023] should_return_401_and_register_nothing_when_the_attendee_account_is_inactive", async () => {
+    const eventId = await insertEvent();
+    const res = await registerAs("inactiveAttendee", eventId);
+    expect(res.status).toBe(401);
+    expect(await registrationsFor(eventId)).toEqual([]);
+  });
+});
+
+describe("[SPM-134] form starting values (AC3, AC5)", () => {
+  test("[TC-REG-003] should_offer_trusted_name_email_and_saved_preferences_when_the_attendee_has_a_profile", async () => {
+    const profile = await request(app).put("/api/attendee-profile/mine").set("Authorization", await bearer("deactivatable"))
+      .send({ dietaryRestrictions: "Halal", accessibilityRequirements: "Ramp access", version: null });
+    expect([201, 409]).toContain(profile.status);
+    const res = await request(app).get("/api/attendee-profile/mine").set("Authorization", await bearer("deactivatable"));
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toMatchObject({
+      name: "spm32 deactivatable",
+      email: fixtures.accounts.deactivatable.email,
+      dietaryRestrictions: "Halal",
+      accessibilityRequirements: "Ramp access",
+    });
+  });
+
+  test("[TC-REG-004] should_offer_blank_preferences_when_the_attendee_has_no_saved_profile", async () => {
+    const res = await request(app).get("/api/attendee-profile/mine").set("Authorization", await bearer("racer"));
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toMatchObject({
+      name: "spm32 racer",
+      email: fixtures.accounts.racer.email,
+      attendeeId: null,
+      dietaryRestrictions: null,
+      accessibilityRequirements: null,
+    });
+  });
+});
+
+describe("[SPM-134] registered state after registration (AC10)", () => {
+  test("[TC-REG-014] [TC-REG-015] should_show_the_registered_place_in_the_attendee_views_when_registration_succeeds", async () => {
+    const eventId = await insertEvent();
+    const res = await registerAs("racer", eventId);
+    recordRegistrations([res]);
+    expect(res.status).toBe(201);
+
+    const own = await request(app).get(`/api/registrations/mine/${eventId}`).set("Authorization", await bearer("racer"));
+    expect(own.status).toBe(200);
+    expect(own.body.myRegistration.status).toBe("REGISTERED");
+
+    const list = await request(app).get("/api/registrations/mine?limit=100").set("Authorization", await bearer("racer"));
+    expect(list.status).toBe(200);
+    expect(list.body.registrations.find((row) => row.event.event_id === eventId)).toMatchObject({ registration_status: "REGISTERED" });
+
+    // Another attendee holds no place on the same event.
+    expect((await request(app).get(`/api/registrations/mine/${eventId}`).set("Authorization", await bearer("deactivatable"))).status).toBe(404);
+  });
+});
+
+describe("[SPM-134] availability changes after the form opens (AC16)", () => {
+  test("[TC-REG-021] should_return_409_registration_full_when_the_last_place_is_taken_before_submission", async () => {
+    const eventId = await insertEvent({ registration_capacity: 1 });
+    expect(await discoveryAvailability("racer", eventId)).toBe("OPEN");
+    const taken = await registerAs("deactivatable", eventId);
+    recordRegistrations([taken]);
+    expect(taken.status).toBe(201);
+    const before = await snapshot(eventId);
+    const late = await registerAs("racer", eventId, answers("Vegan"));
+    expect(late.status).toBe(409);
+    expect(late.body.code).toBe("REGISTRATION_FULL");
+    expect(late.body.registration).toBeUndefined();
+    await expectNothingWritten(eventId, before);
+  });
+
+  test("[TC-REG-021] should_return_409_registration_closed_when_the_window_closes_before_submission", async () => {
+    const eventId = await insertEvent();
+    expect(await discoveryAvailability("racer", eventId)).toBe("OPEN");
+    await updateEvent(eventId, { registration_close_at: new Date(Date.now() - 1000).toISOString() });
+    const before = await snapshot(eventId);
+    const res = await registerAs("racer", eventId);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("REGISTRATION_CLOSED");
+    await expectNothingWritten(eventId, before);
+  });
+
+  test.each([
+    ["unpublished", { is_published: false }],
+    ["moved_back_to_planning", { status: "PLANNING", previously_confirmed: true }],
+  ])("[TC-REG-021] should_return_404_when_the_event_is_%s_before_submission", async (label, changes) => {
+    const eventId = await insertEvent();
+    expect(await discoveryAvailability("racer", eventId)).toBe("OPEN");
+    await updateEvent(eventId, changes);
+    const before = await snapshot(eventId);
+    const res = await registerAs("racer", eventId);
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe("EVENT_NOT_FOUND");
+    await expectNothingWritten(eventId, before);
+  });
+});
+
+describe("[SPM-134] idempotent retries (Master 6.3)", () => {
+  test("[SPM-134] should_return_409_idempotency_key_reused_and_write_nothing_when_a_key_is_reused_for_different_answers", async () => {
+    const eventId = await insertEvent();
+    const key = { "Idempotency-Key": `spm134-${runId}-reuse` };
+    const first = await registerAs("racer", eventId, answers("Vegan"), key);
+    recordRegistrations([first]);
+    expect(first.status).toBe(201);
+    const before = await snapshot(eventId);
+    const reused = await registerAs("racer", eventId, answers("Halal"), key);
+    expect(reused.status).toBe(409);
+    expect(reused.body.code).toBe("IDEMPOTENCY_KEY_REUSED");
+    await expectNothingWritten(eventId, before);
+  });
+
+  test("[SPM-134] should_create_one_registration_and_one_notice_when_the_same_key_is_sent_in_parallel", async () => {
+    const eventId = await insertEvent();
+    const key = { "Idempotency-Key": `spm134-${runId}-parallel` };
+    await signIn("deactivatable");
+    const activityBefore = await registrationActivityCount();
+    const results = await Promise.all([1, 2, 3].map(() => registerAs("deactivatable", eventId, answers("Halal"), key)));
+    recordRegistrations(results);
+    expect(results.map((res) => res.status)).toEqual([201, 201, 201]);
+    expect(results.filter((res) => res.headers["idempotent-replayed"] === "true")).toHaveLength(2);
+    expect(new Set(results.map((res) => res.body.registration.registrationId)).size).toBe(1);
+    expect(await registrationsFor(eventId)).toHaveLength(1);
+    expect(await confirmationsFor(eventId)).toHaveLength(1);
+    expect(await registrationActivityCount()).toBe(activityBefore + 1);
+  });
+});
+
+describe("[SPM-134] re-entry after withdrawal (Master 5.6, D05)", () => {
+  test("[SPM-134] should_re_enter_the_same_record_with_a_new_confirmation_when_the_attendee_had_withdrawn", async () => {
+    const eventId = await insertEvent();
+    const registrationId = await insertRegistration(eventId, "racer", "WITHDRAWN");
+    const activityBefore = await registrationActivityCount();
+    const res = await registerAs("racer", eventId, answers("Kosher"));
+    expect(res.status).toBe(201);
+    expect(res.body.registration).toMatchObject({ registrationId, status: "REGISTERED", dietaryRestrictions: "Kosher" });
+    expect(await registrationsFor(eventId)).toEqual([{
+      registration_id: registrationId,
+      attendee_id: fixtures.accounts.racer.userId,
+      registration_status: "REGISTERED",
+      dietary_restrictions: "Kosher",
+      accessibility_requirements: null,
+    }]);
+    expect(await confirmationsFor(eventId)).toEqual([{ type: "REGISTRATION_CONFIRMED", recipients: [fixtures.accounts.racer.userId] }]);
+    expect((await activityFor([registrationId])).map((row) => row.action)).toEqual(["REGISTRATION_REENTERED"]);
+    expect(await registrationActivityCount()).toBe(activityBefore + 1);
   });
 });

@@ -95,6 +95,20 @@ describe("POST /api/registrations/mine/:eventId (SPM-134)", () => {
     expect(registrationModel.registerForEvent).not.toHaveBeenCalled();
   });
 
+  test("[TC-REG-009] [TC-REG-010] should_return_the_message_for_each_missing_or_invalid_answer_and_register_nothing", async () => {
+    const res = await post("/api/registrations/mine/7", { dietaryRestrictions: "x".repeat(1001) });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: "Please correct the highlighted fields.",
+      code: "VALIDATION_FAILED",
+      fields: {
+        dietaryRestrictions: "Enter text of 1000 characters or fewer, without control characters such as NUL.",
+        accessibilityRequirements: "Send this field, as text or null to leave it blank.",
+      },
+    });
+    expect(registrationModel.registerForEvent).not.toHaveBeenCalled();
+  });
+
   test("[SPM-134] should_return_400_when_an_answer_contains_a_nul_character", async () => {
     const res = await post("/api/registrations/mine/7", { ...BODY, dietaryRestrictions: "Vegan\u0000" });
     expect(res.status).toBe(400);

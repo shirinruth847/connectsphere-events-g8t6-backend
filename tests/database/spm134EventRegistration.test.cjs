@@ -130,6 +130,7 @@ before(async () => {
 after(async () => { if (db) await db.close(); });
 beforeEach(async () => {
   await db.exec("DROP TRIGGER IF EXISTS spm134_fail_notification ON public.notification");
+  await db.exec("DROP TRIGGER IF EXISTS spm134_fail_activity ON public.activity_log");
 });
 
 test("[SPM-134] should_create_one_registered_record_with_the_submitted_answers_when_registration_is_open", async () => {
@@ -382,4 +383,87 @@ test("[SPM-134] should_allow_only_the_backend_role_to_run_the_registration_funct
       has_function_privilege('anon', '${signature}', 'EXECUTE') AS anon,
       has_function_privilege('authenticated', '${signature}', 'EXECUTE') AS authenticated`);
   assert.deepEqual(privileges, { service_role: true, anon: false, authenticated: false });
+});
+
+// ---------- exact window boundaries (Master 5.6: [registration_open_at, registration_close_at)) ----------
+
+// Inside one transaction now() is a single instant, so an event created there
+// with "0 seconds" opens or closes exactly when register_for_event checks it.
+const atOneInstant = async (window) => {
+  await db.exec("BEGIN");
+  try {
+    const eventId = await createEvent(window);
+    return await register(ATTENDEE, eventId);
+  } finally {
+    await db.exec("ROLLBACK");
+  }
+};
+
+test("[SPM-134] should_accept_the_registration_when_database_time_is_exactly_registration_open_at", async () => {
+  assert.equal((await atOneInstant({ open: "0 seconds", close: "5 days" })).registration.registration_status, "REGISTERED");
+});
+
+test("[SPM-134] should_refuse_with_registration_closed_when_database_time_is_one_microsecond_before_open", async () => {
+  await assert.rejects(atOneInstant({ open: "1 microsecond", close: "5 days" }), hasCode("REGISTRATION_CLOSED"));
+});
+
+test("[SPM-134] should_accept_the_registration_when_database_time_is_one_microsecond_before_close", async () => {
+  assert.equal((await atOneInstant({ open: "-5 days", close: "1 microsecond" })).registration.registration_status, "REGISTERED");
+});
+
+test("[SPM-134] should_refuse_with_registration_closed_when_database_time_is_exactly_registration_close_at", async () => {
+  await assert.rejects(atOneInstant({ open: "-5 days", close: "0 seconds" }), hasCode("REGISTRATION_CLOSED"));
+});
+
+test("[TC-REG-017] should_refuse_with_registration_full_not_closed_when_capacity_is_reached_one_microsecond_before_close", async () => {
+  await db.exec("BEGIN");
+  try {
+    const eventId = await createEvent({ registration_capacity: 1, open: "-5 days", close: "1 microsecond" });
+    await seed(OTHER_ATTENDEE, eventId, "REGISTERED");
+    await assert.rejects(register(ATTENDEE, eventId), hasCode("REGISTRATION_FULL"));
+  } finally {
+    await db.exec("ROLLBACK");
+  }
+});
+
+// ---------- atomicity at the activity stage ----------
+
+test("[SPM-134] should_roll_back_the_registration_answers_notice_and_key_when_the_activity_entry_cannot_be_written", async () => {
+  const eventId = await createEvent();
+  await db.exec(`
+    CREATE OR REPLACE FUNCTION public.spm134_fail_activity() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'ACTIVITY_WRITE_FAILED'; END; $$;
+    CREATE TRIGGER spm134_fail_activity BEFORE INSERT ON public.activity_log
+      FOR EACH ROW EXECUTE FUNCTION public.spm134_fail_activity();`);
+  await refusesWithoutWriting(
+    () => register(ATTENDEE, eventId, "Vegan", "Ramp", "spm134-key-0004", "e".repeat(64)),
+    eventId,
+    "ACTIVITY_WRITE_FAILED"
+  );
+  await db.exec("DROP TRIGGER spm134_fail_activity ON public.activity_log");
+  // Nothing was consumed: the same key now succeeds once.
+  assert.equal((await register(ATTENDEE, eventId, "Vegan", "Ramp", "spm134-key-0004", "e".repeat(64))).replayed, false);
+});
+
+test("[TC-REG-020] should_roll_back_a_re_entry_to_its_withdrawn_state_when_the_confirmation_cannot_be_written", async () => {
+  const eventId = await createEvent();
+  const registrationId = await seed(ATTENDEE, eventId, "WITHDRAWN");
+  await db.exec(`
+    CREATE OR REPLACE FUNCTION public.spm134_fail_notification() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'NOTIFICATION_WRITE_FAILED'; END; $$;
+    CREATE TRIGGER spm134_fail_notification BEFORE INSERT ON public.notification
+      FOR EACH ROW EXECUTE FUNCTION public.spm134_fail_notification();`);
+  await refusesWithoutWriting(() => register(ATTENDEE, eventId, "Halal", null), eventId, "NOTIFICATION_WRITE_FAILED");
+  const row = await one("SELECT registration_status, dietary_restrictions FROM public.registration WHERE registration_id = $1", [registrationId]);
+  assert.deepEqual(row, { registration_status: "WITHDRAWN", dietary_restrictions: null });
+});
+
+test("[TC-REG-013] should_keep_the_submitted_answers_when_the_attendee_profile_changes_afterwards", async () => {
+  // The function stores the request's answers; nothing reads attendee_profile.
+  const source = (await one("SELECT prosrc FROM pg_proc WHERE proname = 'register_for_event'")).prosrc;
+  assert.ok(!source.includes("attendee_profile"), "register_for_event must not read or write attendee_profile");
+  const eventId = await createEvent();
+  const { registration } = await register(ATTENDEE, eventId, "Vegetarian, no peanuts", "Step-free access");
+  const stored = await one("SELECT dietary_restrictions, accessibility_requirements FROM public.registration WHERE registration_id = $1", [registration.registration_id]);
+  assert.deepEqual(stored, { dietary_restrictions: "Vegetarian, no peanuts", accessibility_requirements: "Step-free access" });
 });
