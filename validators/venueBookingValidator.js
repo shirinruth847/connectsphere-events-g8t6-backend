@@ -143,6 +143,90 @@ const parseTextList = (value) => {
   return items;
 };
 
+// A booking's window: both times readable (with a time zone), the end after the
+// start, a start in the future and the window within the event (Master 6.3).
+// Returns the parsed times and the error for each field that has one.
+const readBookingTimes = (item, { eventStart, eventEnd, now }) => {
+  const start = parseDate(item.start);
+  const end = parseDate(item.end);
+  const errors = {};
+  // A value that is present but unreadable (e.g. no time zone) is not "missing".
+  if (!start) errors.start = isMissing(item.start) ? BOOKING_MESSAGES.startRequired : BOOKING_MESSAGES.timeInvalid;
+  if (!end) errors.end = isMissing(item.end) ? BOOKING_MESSAGES.endRequired : BOOKING_MESSAGES.timeInvalid;
+  if (start && end) {
+    if (end <= start) errors.end = BOOKING_MESSAGES.endBeforeStart;
+    else if (start <= now) errors.start = BOOKING_MESSAGES.startInPast;
+    else if (eventStart && eventEnd && (start < eventStart || end > eventEnd)) errors.start = BOOKING_MESSAGES.outsideEvent;
+  }
+  return { start, end, errors };
+};
+
+// One venue section. Errors go into context.fields under "bookings.<index>.<field>";
+// context.seenVenues refuses a venue listed twice. Returns the normalised booking,
+// or null when the section is not an object.
+const validateBookingItem = (item, index, context) => {
+  const { fields, seenVenues } = context;
+  const at = (field) => `bookings.${index}.${field}`;
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    fields[`bookings.${index}`] = "Each venue must be an object.";
+    return null;
+  }
+  for (const key of Object.keys(item)) {
+    if (!BOOKING_ITEM_FIELDS.has(key)) fields[at(key.slice(0, 60))] = "This field cannot be set.";
+  }
+
+  const venueId = Number.isInteger(item.venueId) && item.venueId > 0 && item.venueId <= MAX_INTEGER ? item.venueId : null;
+  if (!venueId) fields[at("venueId")] = BOOKING_MESSAGES.venueRequired;
+  else if (seenVenues.has(venueId)) fields[at("venueId")] = BOOKING_MESSAGES.venueTwice;
+  else seenVenues.add(venueId);
+
+  const label = typeof item.label === "string" ? item.label.trim() : "";
+  if (!label) fields[at("label")] = BOOKING_MESSAGES.labelRequired;
+  else if (label.length > BOOKING_LIMITS.label) fields[at("label")] = BOOKING_MESSAGES.labelTooLong;
+
+  const { start, end, errors: timeErrors } = readBookingTimes(item, context);
+  for (const [field, message] of Object.entries(timeErrors)) fields[at(field)] = message;
+
+  const attendance = item.expectedAttendance;
+  if (isMissing(attendance)) fields[at("expectedAttendance")] = BOOKING_MESSAGES.attendanceRequired;
+  else if (!Number.isInteger(attendance) || attendance < 1 || attendance > MAX_INTEGER) {
+    fields[at("expectedAttendance")] = BOOKING_MESSAGES.attendanceInvalid;
+  }
+
+  const layout = typeof item.layout === "string" ? item.layout.trim() : "";
+  if (!layout) fields[at("layout")] = BOOKING_MESSAGES.layoutRequired;
+  else if (layout.length > BOOKING_LIMITS.layout) fields[at("layout")] = BOOKING_MESSAGES.layoutTooLong;
+
+  const requiredFacilities = parseTextList(item.requiredFacilities);
+  if (!requiredFacilities) fields[at("requiredFacilities")] = BOOKING_MESSAGES.listInvalid;
+  const accessibilityNeeds = parseTextList(item.accessibilityNeeds);
+  if (!accessibilityNeeds) fields[at("accessibilityNeeds")] = BOOKING_MESSAGES.listInvalid;
+
+  let specialRequirements = null;
+  if (item.specialRequirements !== undefined && item.specialRequirements !== null) {
+    if (typeof item.specialRequirements !== "string" || item.specialRequirements.trim().length > BOOKING_LIMITS.specialRequirements) {
+      fields[at("specialRequirements")] = BOOKING_MESSAGES.specialTooLong;
+    } else {
+      specialRequirements = item.specialRequirements.trim() || null;
+    }
+  }
+
+  if (item.isPrimary !== undefined && typeof item.isPrimary !== "boolean") fields[at("isPrimary")] = BOOKING_MESSAGES.primaryInvalid;
+
+  return {
+    venueId,
+    label,
+    start: start ? start.toISOString() : null,
+    end: end ? end.toISOString() : null,
+    expectedAttendance: attendance,
+    layout,
+    requiredFacilities: requiredFacilities || [],
+    accessibilityNeeds: accessibilityNeeds || [],
+    specialRequirements,
+    isPrimary: item.isPrimary === true,
+  };
+};
+
 // event: the visible event row (start_datetime, end_datetime); now: injectable for tests.
 const validateVenueBookingRequest = (body, { event, now = new Date() } = {}) => {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -158,81 +242,15 @@ const validateVenueBookingRequest = (body, { event, now = new Date() } = {}) => 
     return { fields };
   }
 
-  const eventStart = event?.start_datetime ? new Date(event.start_datetime) : null;
-  const eventEnd = event?.end_datetime ? new Date(event.end_datetime) : null;
-  const seenVenues = new Set();
-  let primaryMarks = 0;
-  const bookings = list.map((item, index) => {
-    const at = (field) => `bookings.${index}.${field}`;
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      fields[`bookings.${index}`] = "Each venue must be an object.";
-      return null;
-    }
-    for (const key of Object.keys(item)) {
-      if (!BOOKING_ITEM_FIELDS.has(key)) fields[at(key.slice(0, 60))] = "This field cannot be set.";
-    }
-
-    const venueId = Number.isInteger(item.venueId) && item.venueId > 0 && item.venueId <= MAX_INTEGER ? item.venueId : null;
-    if (!venueId) fields[at("venueId")] = BOOKING_MESSAGES.venueRequired;
-    else if (seenVenues.has(venueId)) fields[at("venueId")] = BOOKING_MESSAGES.venueTwice;
-    else seenVenues.add(venueId);
-
-    const label = typeof item.label === "string" ? item.label.trim() : "";
-    if (!label) fields[at("label")] = BOOKING_MESSAGES.labelRequired;
-    else if (label.length > BOOKING_LIMITS.label) fields[at("label")] = BOOKING_MESSAGES.labelTooLong;
-
-    const start = parseDate(item.start);
-    const end = parseDate(item.end);
-    // A value that is present but unreadable (e.g. no time zone) is not "missing".
-    if (!start) fields[at("start")] = isMissing(item.start) ? BOOKING_MESSAGES.startRequired : BOOKING_MESSAGES.timeInvalid;
-    if (!end) fields[at("end")] = isMissing(item.end) ? BOOKING_MESSAGES.endRequired : BOOKING_MESSAGES.timeInvalid;
-    if (start && end) {
-      if (end <= start) fields[at("end")] = BOOKING_MESSAGES.endBeforeStart;
-      else if (start <= now) fields[at("start")] = BOOKING_MESSAGES.startInPast;
-      else if (eventStart && eventEnd && (start < eventStart || end > eventEnd)) fields[at("start")] = BOOKING_MESSAGES.outsideEvent;
-    }
-
-    const attendance = item.expectedAttendance;
-    if (isMissing(attendance)) fields[at("expectedAttendance")] = BOOKING_MESSAGES.attendanceRequired;
-    else if (!Number.isInteger(attendance) || attendance < 1 || attendance > MAX_INTEGER) {
-      fields[at("expectedAttendance")] = BOOKING_MESSAGES.attendanceInvalid;
-    }
-
-    const layout = typeof item.layout === "string" ? item.layout.trim() : "";
-    if (!layout) fields[at("layout")] = BOOKING_MESSAGES.layoutRequired;
-    else if (layout.length > BOOKING_LIMITS.layout) fields[at("layout")] = BOOKING_MESSAGES.layoutTooLong;
-
-    const requiredFacilities = parseTextList(item.requiredFacilities);
-    if (!requiredFacilities) fields[at("requiredFacilities")] = BOOKING_MESSAGES.listInvalid;
-    const accessibilityNeeds = parseTextList(item.accessibilityNeeds);
-    if (!accessibilityNeeds) fields[at("accessibilityNeeds")] = BOOKING_MESSAGES.listInvalid;
-
-    let specialRequirements = null;
-    if (item.specialRequirements !== undefined && item.specialRequirements !== null) {
-      if (typeof item.specialRequirements !== "string" || item.specialRequirements.trim().length > BOOKING_LIMITS.specialRequirements) {
-        fields[at("specialRequirements")] = BOOKING_MESSAGES.specialTooLong;
-      } else {
-        specialRequirements = item.specialRequirements.trim() || null;
-      }
-    }
-
-    if (item.isPrimary !== undefined && typeof item.isPrimary !== "boolean") fields[at("isPrimary")] = BOOKING_MESSAGES.primaryInvalid;
-    if (item.isPrimary === true) primaryMarks += 1;
-
-    return {
-      venueId,
-      label,
-      start: start ? start.toISOString() : null,
-      end: end ? end.toISOString() : null,
-      expectedAttendance: attendance,
-      layout,
-      requiredFacilities: requiredFacilities || [],
-      accessibilityNeeds: accessibilityNeeds || [],
-      specialRequirements,
-      isPrimary: item.isPrimary === true,
-    };
-  });
-  if (primaryMarks > 1) fields["bookings.primary"] = BOOKING_MESSAGES.onePrimary;
+  const context = {
+    fields,
+    seenVenues: new Set(),
+    eventStart: event?.start_datetime ? new Date(event.start_datetime) : null,
+    eventEnd: event?.end_datetime ? new Date(event.end_datetime) : null,
+    now,
+  };
+  const bookings = list.map((item, index) => validateBookingItem(item, index, context));
+  if (bookings.filter((booking) => booking?.isPrimary).length > 1) fields["bookings.primary"] = BOOKING_MESSAGES.onePrimary;
 
   return Object.keys(fields).length ? { fields } : { bookings };
 };
