@@ -50,6 +50,7 @@ test("[SPM-39] feasibility transaction", async (t) => {
   await t.test("approves to PLANNING once with organiser-safe history and one owner notification", async () => {
     const db = await setup();
     try {
+      const beforeApproval = Date.now();
       const first = await accept(db);
       assert.equal(first.event.status, "PLANNING");
       assert.equal(first.event.version, 2);
@@ -58,6 +59,9 @@ test("[SPM-39] feasibility transaction", async (t) => {
       assert.deepEqual(await counts(db), { activity: 1, notifications: 1, replays: 1 });
       const history = (await db.query("SELECT user_id,actor_role,action,audience,changes FROM activity_log")).rows[0];
       assert.deepEqual(history, { user_id: 2, actor_role: "COORDINATOR", action: "FEASIBILITY_ACCEPTED", audience: "ORGANISER_SAFE", changes: { status: { before: "UNDER_REVIEW", after: "PLANNING" } } });
+      const auditTime = (await db.query('SELECT "timestamp" FROM activity_log')).rows[0].timestamp;
+      assert.ok(new Date(auditTime).getTime() >= beforeApproval, "audit timestamp records the approval time");
+      assert.ok(new Date(auditTime).getTime() <= Date.now(), "audit timestamp is not in the future");
       assert.equal((await db.query("SELECT recipient_id FROM notification_recipient")).rows[0].recipient_id, 1);
       await assert.rejects(accept(db, { hash: "b".repeat(64) }), /IDEMPOTENCY_KEY_REUSED/);
       await db.exec("UPDATE event SET coordinator_id=3 WHERE event_id=1");
@@ -67,7 +71,7 @@ test("[SPM-39] feasibility transaction", async (t) => {
 
   const invalid = [
     ["title", "UPDATE event SET title=' '"], ["purpose", "UPDATE event SET purpose=NULL"],
-    ["description", "UPDATE event SET description=NULL"], ["startDatetime", "UPDATE event SET start_datetime=NULL"],
+    ["description", "UPDATE event SET description=NULL"], ["description", "UPDATE event SET description='   '"], ["startDatetime", "UPDATE event SET start_datetime=NULL"],
     ["endDatetime", "UPDATE event SET end_datetime=NULL"],
     ["expectedAttendance", "UPDATE event SET expected_attendance=NULL"],
     ["preferredLayoutType", "UPDATE event SET preferred_layout_type=NULL"],
