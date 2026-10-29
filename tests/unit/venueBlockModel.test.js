@@ -262,6 +262,32 @@ describe("createVenueBlock (SPM-195)", () => {
     lockClient({ begin_venue_block: () => { throw Object.assign(new Error("FORBIDDEN"), { code: "P0001" }); } });
     await expect(create()).rejects.toMatchObject({ name: "VenueError", code: "FORBIDDEN" });
   });
+
+  test.each([
+    ["40P01", "VENUE_LOCK_TIMEOUT"],
+    ["40001", "VENUE_LOCK_TIMEOUT"],
+    ["57014", "VENUE_BOOKINGS_UNAVAILABLE"],
+    ["57P01", "VENUE_BOOKINGS_UNAVAILABLE"],
+    ["08006", "VENUE_BOOKINGS_UNAVAILABLE"],
+  ])("should_map_database_failure_%s", async (code, expected) => {
+    lockClient({ begin_venue_block: () => { throw Object.assign(new Error("failed"), { code }); } });
+    await expect(create()).rejects.toMatchObject({ name: "VenueError", code: expected });
+  });
+
+  test("should_pass_an_unknown_database_refusal_through_unchanged", async () => {
+    const refusal = Object.assign(new Error("SOMETHING_ELSE"), { code: "P0001" });
+    lockClient({ begin_venue_block: () => { throw refusal; } });
+    await expect(create()).rejects.toBe(refusal);
+  });
+
+  test("should_label_an_unknown_reason_with_its_code", async () => {
+    lockClient({
+      begin_venue_block: { replay: null, affectedEventIds: [42] },
+      record_venue_block: recorded({ block: { ...recorded().block, reason: "FLOOD" } }),
+    });
+    const result = await create();
+    expect(result.block).toEqual(expect.objectContaining({ reason: "FLOOD", reasonLabel: "FLOOD", statusLabel: "Active", version: 1 }));
+  });
 });
 
 describe("changeVenueBlock (SPM-195 AC9)", () => {

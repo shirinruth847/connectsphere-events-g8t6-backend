@@ -101,6 +101,12 @@ describe("POST /api/venues/:venueId/blocks", () => {
     expect(response.body.message).toMatch(/No bookings or holds are affected/);
   });
 
+  test("should_count_several_affected_bookings_and_holds", async () => {
+    venueModel.createVenueBlock.mockResolvedValue(savedBlock({ incidents: [{ incidentId: 1 }, { incidentId: 2 }] }));
+    const response = await send("post", "/api/venues/7/blocks", blockBody());
+    expect(response.body.message).toBe("Block recorded. 2 bookings or holds are affected; their coordinators have been told.");
+  });
+
   test("[SPM-195-TC-02] should_refuse_missing_and_invalid_fields_without_saving", async () => {
     const response = await send("post", "/api/venues/7/blocks", {
       reason: "", note: " ", start: "2030-03-10T15:00:00+08:00", end: "2030-03-10T13:00:00+08:00", status: "LIFTED",
