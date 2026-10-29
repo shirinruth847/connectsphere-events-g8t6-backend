@@ -465,6 +465,23 @@ An attendee keeps reusable details for event registration. Name, email and phone
 
 ---
 
+### Event Registration (SPM-134)
+
+An attendee registers themselves for an event. The form starts from `GET /api/attendee-profile/mine` (name and email from the user record, saved dietary restrictions and accessibility requirements), and the attendee may change the two answers for this event only. Registering never changes the saved profile. Every other role gets `403 FORBIDDEN`.
+
+| Method & path | Input | Success | Errors |
+| --- | --- | --- | --- |
+| `POST /api/registrations/mine/:eventId` | `{ "dietaryRestrictions", "accessibilityRequirements" }`: both required, each text of up to 1,000 characters or `null` (blank becomes `null`, NUL refused). Optional `Idempotency-Key` header | `201 { registration: { registrationId, confirmationNumber, status: "REGISTERED", registeredAt, dietaryRestrictions, accessibilityRequirements, event: { eventId, title, startDatetime, endDatetime, organisationName } } }`. A repeated key returns the same body with `Idempotent-Replayed: true` | `400 VALIDATION_FAILED` (any other field, including identity, status, capacity, window, confirmation number and `responses`), `401`, `403`, `404 EVENT_NOT_FOUND` (bad ID; unpublished or ended event; any event whose status is not exactly `CONFIRMED`), `409` with `REGISTRATION_NOT_ENABLED`, `REGISTRATION_CLOSED`, `REGISTRATION_FULL`, `ALREADY_REGISTERED`, `ALREADY_WAITLISTED`, `IDEMPOTENCY_KEY_REUSED` or `IDEMPOTENCY_IN_PROGRESS`, `500 INTERNAL_ERROR` |
+
+- **Availability** (Master 5.6) is decided by database time when the attendee registers: `NOT_ENABLED`, then `CLOSED` outside `[registration_open_at, registration_close_at)`, then `FULL` when `REGISTERED` places have reached `registration_capacity`. A full event is refused, never waitlisted, and never reported as closed. Only events whose status is exactly `CONFIRMED` accept registrations, the same events discovery shows. `PREPARATION` and every other state, including a confirmed event moved back to planning, answer `404 EVENT_NOT_FOUND`, so the API never reveals a hidden event. `REGISTRATION_CLOSED` means only that a `CONFIRMED` event's window is closed.
+- **One transaction:** `register_for_event` locks the event, recounts places, checks for an existing record, stores the registration and the submitted answers, writes a `STAFF_ONLY` activity entry (no personal text) and the attendee's `REGISTRATION_CONFIRMED` notice. Any failure leaves none of them. Parallel registrations for the last place or by the same attendee give one success.
+- **Already registered:** `GET /api/registrations/mine/:eventId` returns the attendee's place (`myRegistration.status`), or `404` when they hold none, so the event page can hide Register Now.
+- **Withdrawn attendees** re-enter their existing record with a new registration time and a new confirmation.
+- **Not built:** email confirmation (Master M5: in-app only), organiser-configured registration fields (no schema yet) and organiser contact details in the confirmation.
+- **Schema:** migrations `20261029055940_spm134_event_registration` and `20261029061336_spm134_confirmed_only_registration` (registration limited to `CONFIRMED`) and `20261029061913_spm134_hidden_events_not_found` (every other state is `404 EVENT_NOT_FOUND`). **Tests:** `tests/database/spm134EventRegistration.test.cjs` (PGlite) and `tests/integration/eventRegistration.integration.test.js` (live). The live suite builds only what registration reads, with `tests/fixtures/registrationFixtures.js`: one account per role and one organisation, no venue, booking or equipment data; each test creates its own events. Registering writes append-only activity, so without `TEST_DATABASE_URL` cleanup keeps the attendees deactivated, along with any attendee profile they saved.
+
+---
+
 ## 🧪 Example `.env` File
 
 Create a `.env` file in the root directory:
@@ -625,6 +642,7 @@ connectsphere-events-g8t6-backend/
 ├── validators/           # Pure request validation rules
 │   ├── attendeeProfileValidator.js # SPM-270 profile save fields
 │   ├── authValidator.js
+│   ├── registrationValidator.js # SPM-134 registration answers
 │   ├── equipmentValidator.js # SPM-52 equipment fields, unavailable stock and list filters
 │   ├── eventValidator.js
 │   ├── safetyValidator.js

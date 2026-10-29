@@ -313,7 +313,9 @@ const computeRegistrationAvailability = ({
   now = new Date(),
 }) => {
   if (!is_registration_enabled) return "NOT_ENABLED";
-  if (!["CONFIRMED", "PREPARATION"].includes(status)) return "CLOSED";
+  // Registration is open only while the event is exactly CONFIRMED (SPM-134),
+  // matching register_for_event; a PREPARATION event shows as closed.
+  if (status !== "CONFIRMED") return "CLOSED";
 
   const currentTime = now instanceof Date ? now.getTime() : new Date(now).getTime();
   const openAt = registration_open_at ? new Date(registration_open_at).getTime() : null;

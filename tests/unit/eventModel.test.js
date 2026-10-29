@@ -649,16 +649,20 @@ describe("Attendee discovery and registration availability", () => {
     })).toBe("OPEN");
   });
 
-  test("[SPM-34-AC3] should_allow_registration_during_preparation_when_enabled_and_window_is_open", () => {
-    expect(eventModel.computeRegistrationAvailability({
-      status: "PREPARATION",
-      is_registration_enabled: true,
-      registration_capacity: 10,
-      registration_open_at: null,
-      registration_close_at: null,
-      registeredCount: 0,
-    })).toBe("OPEN");
-  });
+  // SPM-134 supersedes SPM-34 AC3: registration is open only in CONFIRMED.
+  test.each(["PREPARATION", "PLANNING", "SAFETY_REVIEW", "SUBMITTED", "UNDER_REVIEW", "APPROVED", "COMPLETED", "CANCELLED", "REJECTED", "DRAFT"])(
+    "[SPM-134] should_show_registration_closed_when_an_enabled_open_event_is_%s",
+    (status) => {
+      expect(eventModel.computeRegistrationAvailability({
+        status,
+        is_registration_enabled: true,
+        registration_capacity: 10,
+        registration_open_at: null,
+        registration_close_at: null,
+        registeredCount: 0,
+      })).toBe("CLOSED");
+    }
+  );
 });
 
 describe("Lead assignment reads", () => {
