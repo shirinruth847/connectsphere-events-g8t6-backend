@@ -140,6 +140,8 @@ const createScenario = async (scenario, people, manifest) => {
   check(await supabase.from("venue_booking").insert({
     event_id: event.event_id, room_id: room.room_id, requested_by: people.coordinator, reviewed_by: people.venueStaff,
     start_datetime: start, end_datetime: end, status: "APPROVED", expected_attendance: scenario.attendance, layout_type: scenario.layout,
+    // The event's only booking is its primary venue (Master 5.4.2, SPM-179).
+    is_primary: true,
   }), "approved venue booking");
   for (const item of scenario.equipment) {
     const equipment = await findOne("equipment", "name", item.name, "equipment_id");
