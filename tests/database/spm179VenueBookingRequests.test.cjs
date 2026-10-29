@@ -184,6 +184,7 @@ before(async () => {
   await db.exec(read("20261028161211_spm179_venue_booking_venue_link.sql"));
   await db.exec(read("20261028162013_spm179_request_venue_bookings.sql"));
   await db.exec(read("20261029080000_spm179_booking_range_hardening.sql"));
+  await db.exec(read("20261029090000_spm179_booking_history_entry.sql"));
 });
 
 test("backfill: every booking gets its room's venue and only single-booking events get a primary", async () => {
@@ -295,6 +296,15 @@ test("TC-02 / TC-21: two venues with one primary; a venue without a room gets on
     booking(event, ANNEX, "10:00", "12:00", { expectedAttendance: 80 }),
   ]);
   assert.deepEqual(result.bookings.map((item) => [item.venueId, item.isPrimary]), [[HALL, true], [ANNEX, false]]);
+  // The history entry uses the event history's { field: { before, after } } shape.
+  const [hallId, annexId] = result.bookings.map((item) => item.bookingId);
+  const { changes } = await one(
+    "SELECT changes FROM public.activity_log WHERE entity_name = 'event' AND entity_id = $1 AND action = 'VENUE_BOOKINGS_REQUESTED'",
+    [event.eventId]
+  );
+  assert.deepEqual(changes, {
+    venueBookings: { before: null, after: [`Hall (Booking #${hallId}, primary)`, `Annex (Booking #${annexId})`] },
+  });
   const annexRoom = await one("SELECT room_id, capacity, layout_type FROM public.room WHERE venue_id = $1", [ANNEX]);
   assert.equal(annexRoom.capacity, 80);
   assert.equal(annexRoom.layout_type, "Theatre");
