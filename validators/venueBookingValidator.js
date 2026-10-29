@@ -116,6 +116,7 @@ const BOOKING_MESSAGES = Object.freeze({
   labelTooLong: `Label must be ${BOOKING_LIMITS.label} characters or fewer.`,
   startRequired: "Start date and time is required.",
   endRequired: "End date and time is required.",
+  timeInvalid: "Enter a date and time with a time zone, for example 2030-03-10T09:00:00+08:00.",
   endBeforeStart: "End time must be after start time.",
   startInPast: "The booking must start in the future.",
   outsideEvent: "The booking must be within the event's dates and times.",
@@ -182,8 +183,9 @@ const validateVenueBookingRequest = (body, { event, now = new Date() } = {}) => 
 
     const start = parseDate(item.start);
     const end = parseDate(item.end);
-    if (!start) fields[at("start")] = BOOKING_MESSAGES.startRequired;
-    if (!end) fields[at("end")] = BOOKING_MESSAGES.endRequired;
+    // A value that is present but unreadable (e.g. no time zone) is not "missing".
+    if (!start) fields[at("start")] = isMissing(item.start) ? BOOKING_MESSAGES.startRequired : BOOKING_MESSAGES.timeInvalid;
+    if (!end) fields[at("end")] = isMissing(item.end) ? BOOKING_MESSAGES.endRequired : BOOKING_MESSAGES.timeInvalid;
     if (start && end) {
       if (end <= start) fields[at("end")] = BOOKING_MESSAGES.endBeforeStart;
       else if (start <= now) fields[at("start")] = BOOKING_MESSAGES.startInPast;

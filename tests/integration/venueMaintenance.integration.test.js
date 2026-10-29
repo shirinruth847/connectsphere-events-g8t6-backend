@@ -108,7 +108,9 @@ const addUpcomingBooking = async (venueId) => {
   return booking.booking_id;
 };
 
-const catalogueIds = async () => (await call("coordinator", "get", "/api/venues")).body.venues.map(({ venueId }) => venueId);
+// The selectable catalogue (in-service venues only) is Venue Staff only since T29;
+// coordinators and Leads choose through the event's venue section.
+const catalogueIds = async () => (await call("venueStaff", "get", "/api/venues")).body.venues.map(({ venueId }) => venueId);
 const requestOptionIds = async () =>
   (await call("organiserA", "get", "/api/events/request-options")).body.venues.map(({ venueId }) => venueId);
 

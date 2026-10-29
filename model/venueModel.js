@@ -1178,6 +1178,9 @@ const BOOKING_REQUEST_ERRORS = new Set([
 ]);
 const LOCK_NOT_AVAILABLE = "55P03";
 const VENUE_LOCK_TIMEOUT = "5s";
+// MongoDB is read while the venue lock is held, so a slow read must not hold it
+// for long; a read that runs out answers AVAILABILITY_UNAVAILABLE.
+const MONGO_READ_UNDER_LOCK_MS = 3000;
 
 const parseErrorDetail = (detail) => {
   try {
@@ -1238,8 +1241,8 @@ const checkVenueCalendar = async (eventId, bookings, venues) => {
   let entries;
   try {
     [details, entries] = await Promise.all([
-      venueDetailModel.getVenueDetailsByIds(venueIds),
-      venueCalendarModel.findCalendarEntries(venueIds, from, to),
+      venueDetailModel.getVenueDetailsByIds(venueIds, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }),
+      venueCalendarModel.findCalendarEntries(venueIds, from, to, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }),
     ]);
   } catch (error) {
     console.warn("[venue-booking-request] MongoDB unavailable", { code: error.code, name: error.name });
@@ -1398,7 +1401,14 @@ const listEventVenueBookings = async (eventId) => {
     .order("start_datetime", { ascending: true })
     .order("booking_id", { ascending: true });
   if (error) throw error;
-  return (data || []).map(toEventVenueBooking);
+  const bookings = (data || []).map(toEventVenueBooking);
+  // The primary venue as _event_primary_venue reads it: a booking written
+  // outside the request flow carries no flag, but as the event's only active
+  // booking it is the primary venue (Master 5.4.2). Showing the stored flag
+  // alone would make the form send a second primary, which is refused.
+  const active = bookings.filter((booking) => ACTIVE_BOOKING_STATUSES.includes(booking.status));
+  if (active.length === 1 && !active[0].isPrimary) active[0].isPrimary = true;
+  return bookings;
 };
 
 module.exports = {

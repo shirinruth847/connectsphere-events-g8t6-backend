@@ -208,4 +208,36 @@ describe("listEventVenueBookings (SPM-179)", () => {
     }));
     expect(supabase.from).toHaveBeenCalledWith("venue_booking");
   });
+
+  const listWith = async (rows) => {
+    const supabase = require("../../config/supabase");
+    const row = (overrides) => ({
+      venue_id: HALL, label: null, start_datetime: "2030-03-10T02:00:00+00:00", end_datetime: "2030-03-10T04:00:00+00:00",
+      expected_attendance: 50, layout_type: "Theatre", required_facilities: [], accessibility_requirements: [],
+      special_requirements: null, rejection_reason: null, is_primary: false, occupied_range: null,
+      created_at: "2030-01-01T00:00:00+00:00", venue: { name: "Hall" }, ...overrides,
+    });
+    supabase.from.mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      eq: jest.fn().mockReturnThis(),
+      order: jest.fn().mockReturnValueOnce({ order: jest.fn().mockResolvedValue({ data: rows.map(row), error: null }) }),
+    });
+    return venueModel.listEventVenueBookings(EVENT_ID);
+  };
+
+  test("[SPM-179-AC10] should_report_an_unflagged_only_active_booking_as_the_primary_venue", async () => {
+    const bookings = await listWith([
+      { booking_id: 1, status: "REJECTED" },
+      { booking_id: 2, status: "APPROVED" },
+    ]);
+    expect(bookings.map((booking) => [booking.bookingId, booking.isPrimary])).toEqual([[1, false], [2, true]]);
+  });
+
+  test("[SPM-179-AC10] should_not_pick_a_primary_among_several_unflagged_active_bookings", async () => {
+    const bookings = await listWith([
+      { booking_id: 1, status: "PENDING" },
+      { booking_id: 2, status: "APPROVED" },
+    ]);
+    expect(bookings.every((booking) => booking.isPrimary === false)).toBe(true);
+  });
 });

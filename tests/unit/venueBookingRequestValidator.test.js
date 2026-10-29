@@ -33,6 +33,12 @@ describe("validateVenueBookingRequest (SPM-179 AC3-AC5)", () => {
       .toEqual({ "bookings.0.start": BOOKING_MESSAGES.startInPast });
   });
 
+  test("[SPM-179-AC5] should_tell_a_missing_time_from_one_without_a_time_zone", () => {
+    const { fields } = validate([item({ start: undefined, end: "2030-03-10T12:00" })]);
+    expect(fields["bookings.0.start"]).toBe(BOOKING_MESSAGES.startRequired);
+    expect(fields["bookings.0.end"]).toBe(BOOKING_MESSAGES.timeInvalid);
+  });
+
   test("[SPM-179-TC-04] should_keep_each_booking_within_the_event", () => {
     expect(validate([item({ start: "2030-03-10T08:30:00+08:00" })]).fields)
       .toEqual({ "bookings.0.start": BOOKING_MESSAGES.outsideEvent });

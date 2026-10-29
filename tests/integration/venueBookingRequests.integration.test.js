@@ -296,6 +296,30 @@ describeLive("SPM-179 venue booking requests (live)", () => {
     expect((await list("coordinatorTwo")).status).toBe(404);
   });
 
+  test("[SPM-179-AC10] an unflagged only booking written elsewhere stays primary; a new venue is added as additional", async () => {
+    const legacy = await createLifecycleEvent(fixtures);
+    const { data: hallRoom } = await supabase.from("room").select("room_id").eq("venue_id", venues.hall.venueId).limit(1).single();
+    const { data: seeded, error } = await supabase.from("venue_booking").insert({
+      room_id: hallRoom.room_id, event_id: legacy.event_id, requested_by: fixtures.accounts.coordinator.userId,
+      start_datetime: legacy.start_datetime, end_datetime: legacy.end_datetime, status: "APPROVED",
+    }).select("booking_id,is_primary").single();
+    expect(error).toBeNull();
+    recordFixtureIds(runId, "bookingIds", [seeded.booking_id]);
+    expect(seeded.is_primary).toBe(false);
+
+    // The list reports it as the primary venue, so the form sends no primary.
+    const before = await list("coordinator", legacy.event_id);
+    expect(before.body.bookings).toEqual([expect.objectContaining({ bookingId: seeded.booking_id, isPrimary: true })]);
+
+    const response = remember(await post("coordinator", legacy.event_id, [item(venues.annex, {
+      start: legacy.start_datetime, end: legacy.end_datetime, isPrimary: false,
+    })]));
+    expect(response.status).toBe(201);
+    expect(response.body.bookings[0].isPrimary).toBe(false);
+    const rows = await bookingRows(legacy.event_id);
+    expect(rows.filter((row) => row.is_primary).map((row) => row.booking_id)).toEqual([seeded.booking_id]);
+  });
+
   test("[SPM-179-AC12] the coordinator's list shows each booking with its status and the primary venue", async () => {
     const response = await list("coordinator");
     expect(response.status).toBe(200);
