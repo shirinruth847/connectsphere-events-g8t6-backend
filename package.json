@@ -34,13 +34,13 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.7.1",
     "mongodb": "^6.20.0",
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.10",
+    "pg": "^8.23.1"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.2.5",
     "jest": "^30.5.2",
     "mongodb-memory-server": "^10.4.3",
-    "pg": "^8.23.1",
     "supertest": "^7.3.1"
   },
   "jest": {
