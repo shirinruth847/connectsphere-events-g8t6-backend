@@ -7,7 +7,8 @@
 -- (never committed, never pasted into chat or Jira), give the role a login:
 --   ALTER ROLE venue_calendar_writer WITH LOGIN PASSWORD '<generated password>';
 -- and set VENUE_LOCK_DATABASE_URL in the backend .env to the session pooler URL
--- for user venue_calendar_writer.rvwiflsedoujspmzfrbq, port 5432, sslmode=require.
+-- for user venue_calendar_writer.rvwiflsedoujspmzfrbq, port 5432, with sslmode=verify-full and
+-- sslrootcert (README: pg treats sslmode=require as verify-full, which needs the CA).
 
 DO $role$
 BEGIN
