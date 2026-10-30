@@ -50,6 +50,8 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_CAPACITY_TOO_SMALL: [409, "This venue cannot hold the event's expected attendance."],
   VENUE_SUGGESTION_VERSION_CONFLICT: [409, "The suggested venue was changed after you loaded it. Reload the event, then try again."],
   IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
+  // Overlapping occupied ranges, refused by venue_booking_no_overlap (SPM-185 AC7).
+  VENUE_BOOKING_CONFLICT: [409, "Another booking already occupies this venue at that time, including its setup and turnaround."],
   // Never answer with partial availability (SPM-74 TC13, Master 7.4 step 5).
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],
 });
@@ -467,6 +469,10 @@ const BOOKING_REQUEST_ERRORS = Object.freeze({
     ? `Expected attendance (${error.expectedAttendance}) exceeds this venue's capacity (${error.capacity}).`
     : "Expected attendance exceeds this venue's capacity."), "expectedAttendance"],
   BOOKING_CONFLICT: [409, (error) => {
+    if (error.conflicts?.some((conflict) => conflict.message)) {
+      return error.conflicts.map((conflict) => conflict.message
+        || `This venue is unavailable from ${formatPeriod(conflict.occupiedStart, conflict.occupiedEnd)}, including setup and turnaround time.`).join(" ");
+    }
     const periods = (error.conflicts || []).map((conflict) =>
       `${formatPeriod(conflict.occupiedStart, conflict.occupiedEnd)} (${CONFLICT_SOURCES[conflict.type] || "another arrangement"})`);
     return periods.length
