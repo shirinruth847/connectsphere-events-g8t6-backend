@@ -571,6 +571,10 @@ const BOOKING_REQUEST_ERRORS = Object.freeze({
     ? `Expected attendance (${error.expectedAttendance}) exceeds this venue's capacity (${error.capacity}).`
     : "Expected attendance exceeds this venue's capacity."), "expectedAttendance"],
   BOOKING_CONFLICT: [409, (error) => {
+    if (error.conflicts?.some((conflict) => conflict.message)) {
+      return error.conflicts.map((conflict) => conflict.message
+        || `This venue is unavailable from ${formatPeriod(conflict.occupiedStart, conflict.occupiedEnd)}, including setup and turnaround time.`).join(" ");
+    }
     const periods = (error.conflicts || []).map((conflict) =>
       `${formatPeriod(conflict.occupiedStart, conflict.occupiedEnd)} (${CONFLICT_SOURCES[conflict.type] || "another arrangement"})`);
     return periods.length

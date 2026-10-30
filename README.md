@@ -125,6 +125,10 @@ Coordinators and Leads search and browse venues inside each event request, start
 
 ### Venue Booking Requests (SPM-179)
 
+SPM-185 conflict responses use the shared SGT formatter for booking, active-hold and block conflicts. `BOOKING_CONFLICT` returns HTTP 409; detailed explanations appear in `error`, the booking's inline field error and `conflicts[].message`. PostgreSQL exclusion violations also map to this conflict response, rather than HTTP 500 or a retryable lock timeout.
+
+Deploy `20261031010000_spm185_booking_conflict_details.sql` before the backend to enable detailed booking-versus-booking messages. It adds advertised `start`/`end` bounds to the existing conflict details and preserves the function's grants, transaction, authorization and history behavior. Older readers ignore the extra fields; newer readers return the existing generic 409 when the old database function is still deployed. Application rollback can retain this additive database change. This migration has not been applied as part of the local fix.
+
 The assigned coordinator requests one or more venue bookings for an event in `PLANNING` (Master 5.2, T15). Each booking names its venue and stores a bridging `room_id` until the decision functions read `venue_id` (Master 6.2 room bridge, T33).
 
 | Method & path | Access | Input | Success | Errors |
