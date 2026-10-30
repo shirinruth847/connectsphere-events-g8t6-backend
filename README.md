@@ -322,6 +322,26 @@ Venue Staff review the venue booking requests that coordinators raise. Every rou
 - **Booking reference:** the booking's own `booking_id`; migration `20261021090000_spm181_booking_id_and_updated_at` dropped the generated `booking_reference` column and added `updated_at`, kept current by the `venue_booking_touch_updated_at` trigger.
 - **Schema:** migration `20261020070631_spm181_venue_booking_details` added `label`, `expected_attendance`, `layout_type`, `required_facilities`, `accessibility_requirements` and `special_requirements`, backfilling attendance from the event and layout from the booked room, plus a nullable `event.event_type` (`CONFERENCE`, `WORKSHOP`, `SEMINAR`, `NETWORKING`, `SOCIAL`, `TRAINING`, `OTHER`). The organiser form does not collect the event type yet. `supabase/seed/spm181_venue_booking_details.sql` fills these fields for the existing mock bookings.
 
+### Tentative Holds (SPM-190)
+
+The assigned coordinator asks Venue Staff to hold one venue for one window of an event in `PLANNING`; Venue Staff place or decline the hold (Master 5.4.3, T34). A hold is a MongoDB `venue_calendar` `HOLD` entry; the request and decision are a `venue_hold_request` row (migration `20261030143144_spm190_venue_holds`).
+
+| Method & path | Who | Input | Success | Errors |
+| --- | --- | --- | --- | --- |
+| `POST /api/events/:id/venue-holds` | Assigned `COORDINATOR`, event in `PLANNING` | `{ venueId, label, start, end, expectedAttendance?, note? }` (window inside the event, ISO 8601 with offset; label 1–100, note ≤ 500); `Idempotency-Key` required | `201 { message, holdRequest }` | `400 VALIDATION_FAILED`, `403`, `404 EVENT_NOT_FOUND`/`VENUE_NOT_FOUND`, `409 EVENT_NOT_IN_PLANNING`, `HOLD_REQUEST_EXISTS`, `HOLD_TOO_LATE`, `VENUE_NOT_BOOKABLE`, `IDEMPOTENCY_KEY_REUSED` |
+| `GET /api/events/:id/venue-holds` | Assigned `COORDINATOR`, supervising Lead | — | `200 { holds: [holdRequest] }` | `403`, `404` |
+| `GET /api/venues/hold-requests` | `VENUE_STAFF` | Optional `?status=PENDING\|PLACED\|DECLINED\|WITHDRAWN` | `200 { requests, pendingCount }`, pending first; each pending request has `preview: { availability, blocking, warnings, occupiedStart, occupiedEnd, expiresAt }` | `400`, `403` |
+| `POST /api/venues/hold-requests/:requestId/place` | `VENUE_STAFF` | No body; `Idempotency-Key` required | `200 { message, holdRequest }` (status `PLACED`, `hold.expiresAt`) | `404 HOLD_REQUEST_NOT_FOUND`, `409 HOLD_REQUEST_DECIDED` (`currentStatus`), `HOLD_TOO_LATE`, `VENUE_BOOKING_CONFLICT`, `VENUE_HELD`, `VENUE_BLOCKED`, `VENUE_BUFFERS_NOT_SET`, `VENUE_NOT_BOOKABLE`, `VENUE_LOCK_TIMEOUT`, `503 VENUE_CALENDAR_UNAVAILABLE`/`VENUE_BOOKINGS_UNAVAILABLE` |
+| `POST /api/venues/hold-requests/:requestId/decline` | `VENUE_STAFF` | `{ reason }` (1–1000) | `200 { message, holdRequest }` | `400`, `404`, `409 HOLD_REQUEST_DECIDED` |
+| `POST /api/venues/hold-requests/:requestId/withdraw` | The request's coordinator | No body | `200 { message, holdRequest }` | `403`, `404`, `409 HOLD_REQUEST_DECIDED` |
+| `POST /api/venues/holds/:holdId/extend` | `VENUE_STAFF` | `{ days }` (1–7) | `200 { message, holdRequest }` | `400 VALIDATION_FAILED` (`fields.days` when past the cutoff), `404 HOLD_NOT_FOUND`, `409 HOLD_ALREADY_EXTENDED`, `HOLD_EXPIRED`, `HOLD_NOT_ACTIVE` |
+| `POST /api/venues/holds/:holdId/release` | `VENUE_STAFF` or the event's coordinator | No body | `200 { message, holdRequest }` | `403`, `404`, `409 HOLD_EXPIRED`, `HOLD_NOT_ACTIVE` |
+
+- **Expiry:** 7 days after placement, or 24 hours before the occupied range (setup included) starts, whichever is earlier; no hold within 24 hours of setup. One extension, still within that cutoff. A hold past its expiry is treated as expired by every read, whatever its stored status.
+- **Under the venue lock (Master 7.4):** placement, extension and release run on `VENUE_LOCK_DATABASE_URL`: the SQL function locks the event and then the venue, approved bookings, active holds and blocks are re-checked under the lock, PostgreSQL records the change, and MongoDB is written before commit with a token-guarded undo. The hold ID comes from the `Idempotency-Key`, so a retry never places a second hold.
+- **Expiry job:** `jobs/holdExpiryJob.js` runs every `HOLD_EXPIRY_INTERVAL_MS` (default five minutes, `0` turns it off), notifies the coordinator and Venue Staff 24 hours before a hold expires and when it expires (one notification per hold and kind), and records overdue holds as `EXPIRED`.
+- **Not in this ticket:** converting a hold into a booking request.
+
 ### Submission guarantees (SPM-36)
 
 The agreed deployment has one Coordinator Lead. Submission saves against the
@@ -548,6 +568,7 @@ SEED_NAMESPACE=dev                         # prefix for seeded emails and organi
 SIGNUP_RATE_LIMIT_MAX=5                    # sign-up attempts per IP per 15 minutes (default 5; tests raise it)
 EVENT_COMPLETION_INTERVAL_MS=60000         # how often ended events are completed (default 60000; 0 turns the job off)
 MONGO_SYNC_INTERVAL_MS=30000               # how often pending MongoDB outbox entries are applied (default 30000; 0 turns the job off)
+HOLD_EXPIRY_INTERVAL_MS=300000             # how often hold expiry notices are sent and overdue holds recorded (default 300000; 0 turns the job off)
 ```
 
 The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.

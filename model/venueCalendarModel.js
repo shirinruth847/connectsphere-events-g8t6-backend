@@ -21,6 +21,8 @@ const toEntry = (document) => ({
   eventId: document.eventId ?? null,
   label: document.label ?? null,
   holdExpiresAt: document.holdExpiresAt ?? null,
+  extendedAt: document.extendedAt ?? null,
+  convertedBookingId: document.convertedBookingId ?? null,
   reason: document.reason ?? null,
   note: document.note ?? null,
   version: document.version ?? null,
@@ -188,7 +190,106 @@ const clearBlockRecovery = async ({ blockId, venueId, writeToken }) => {
   );
 };
 
+// ---------- tentative holds (SPM-190) ----------
+// Written only by venueModel.js while it holds the venue lock (Master 7.4),
+// except the expiry job's status change, which only records what every read
+// already treats as expired (Master 5.4.3).
+
+const insertHold = async ({ holdId, venueId, eventId, label, start, end, occupiedStart, occupiedEnd, holdExpiresAt, createdBy, writeToken }) => {
+  const document = {
+    _id: new ObjectId(holdId),
+    venueId: String(venueId),
+    type: "HOLD",
+    start: new Date(start),
+    end: new Date(end),
+    occupiedStart: new Date(occupiedStart),
+    occupiedEnd: new Date(occupiedEnd),
+    status: "ACTIVE",
+    eventId,
+    label,
+    holdExpiresAt: new Date(holdExpiresAt),
+    extendedAt: null,
+    createdBy,
+    writeToken,
+    createdAt: new Date(),
+    updatedAt: null,
+    version: 1,
+  };
+  const collection = await calendar();
+  try {
+    await collection.insertOne(document);
+    return { ...toEntry(document), existing: false };
+  } catch (error) {
+    if (error?.code !== DUPLICATE_KEY) throw error;
+    const current = await collection.findOne({ _id: document._id });
+    if (!current) throw error;
+    return { ...toEntry(current), existing: true };
+  }
+};
+
+// Extends (once) or releases an active hold read under the venue lock; matches
+// only that version. Returns the updated entry, or null when nothing matched.
+const changeHold = async ({ holdId, venueId, expectedVersion, holdExpiresAt = null, release = false, writeToken }) => {
+  const filter = { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "ACTIVE", version: expectedVersion };
+  const set = release
+    ? { status: "RELEASED", updatedAt: new Date(), writeToken }
+    : { holdExpiresAt: new Date(holdExpiresAt), extendedAt: new Date(), updatedAt: new Date(), writeToken };
+  if (!release) filter.extendedAt = null;
+  const document = await (await calendar()).findOneAndUpdate(filter, { $set: set, $inc: { version: 1 } }, { returnDocument: "after" });
+  return document ? toEntry(document) : null;
+};
+
+// Undo steps, run only when PostgreSQL certainly did not commit; each matches
+// the exact state this attempt left (writeToken), so nothing newer is touched.
+const deleteHold = async ({ holdId, venueId, writeToken }) => {
+  await (await calendar()).deleteOne({
+    _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "ACTIVE", version: 1, writeToken,
+  });
+};
+
+const revertHold = async ({ holdId, venueId, version, holdExpiresAt, extendedAt, writeToken }) => {
+  await (await calendar()).updateOne(
+    { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", version, writeToken },
+    {
+      $set: { status: "ACTIVE", holdExpiresAt: new Date(holdExpiresAt), extendedAt: extendedAt ? new Date(extendedAt) : null, updatedAt: new Date() },
+      $inc: { version: 1 },
+    }
+  );
+};
+
+const ownsHoldWrite = async ({ holdId, venueId, writeToken }) =>
+  Boolean(await (await calendar()).findOne(
+    { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", writeToken },
+    { projection: { _id: 1 }, readPreference: "primary", maxTimeMS: 2000 }
+  ));
+
+// Active holds expiring by `until`, soonest first, for the expiry job.
+const findHoldsExpiringBy = async (until, { limit = 100 } = {}) => {
+  const documents = await (await calendar())
+    .find({ type: "HOLD", status: "ACTIVE", holdExpiresAt: { $lte: new Date(until) } })
+    .sort({ holdExpiresAt: 1, _id: 1 })
+    .limit(limit)
+    .toArray();
+  return documents.map(toEntry);
+};
+
+// Records an overdue hold as EXPIRED; true when this call changed it.
+const markHoldExpired = async ({ holdId, now }) => {
+  const result = await (await calendar()).updateOne(
+    { _id: new ObjectId(holdId), type: "HOLD", status: "ACTIVE", holdExpiresAt: { $lte: new Date(now) } },
+    { $set: { status: "EXPIRED", updatedAt: new Date() }, $inc: { version: 1 } }
+  );
+  return result.modifiedCount === 1;
+};
+
 module.exports = {
+  insertHold,
+  changeHold,
+  deleteHold,
+  revertHold,
+  ownsHoldWrite,
+  findHoldsExpiringBy,
+  markHoldExpired,
   clearBlockRecovery,
   ownsBlockWrite,
   deleteBlock,
