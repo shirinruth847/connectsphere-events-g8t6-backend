@@ -6,7 +6,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { PGlite } = require(process.env.PGLITE_MODULE || "@electric-sql/pglite");
 const root = path.resolve(__dirname, "../..");
-const read = (file) => fs.readFileSync(path.join(root, "supabase/migrations", file), "utf8");
+// LF line endings, so text matches still apply on a CRLF (autocrlf) checkout.
+const read = (file) => fs.readFileSync(path.join(root, "supabase/migrations", file), "utf8").replace(/\r\n/g, "\n");
 const migration = "20261028010000_spm192_reassignment_replay.sql";
 const functionSql = (sql, name) => {
   const match = sql.match(new RegExp(`CREATE (?:OR REPLACE )?FUNCTION public\\.${name}\\([\\s\\S]*?\\n\\$\\$;`));

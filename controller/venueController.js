@@ -58,7 +58,7 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_NOT_AVAILABLE: [409, "This venue is not available for bookings. Reject the request or make the venue active first."],
   VENUE_CAPACITY_EXCEEDED: [409, "The expected attendance is more than this venue's capacity."],
   VENUE_BUFFERS_NOT_SET: [409, "Set this venue's setup and turnaround times before approving bookings."],
-  VENUE_BOOKING_CONFLICT: [409, "Another active booking already occupies this venue at that time."],
+  VENUE_BOOKING_CONFLICT: [409, "Another active booking already occupies this venue at that time, including its setup and turnaround."],
   VENUE_BLOCKED: [409, "The venue is blocked for part of this booking's time."],
   VENUE_HELD: [409, "The venue is held for another event during part of this booking's time."],
   VENUE_LOCK_TIMEOUT: [409, "Another change to this venue is in progress. Try again."],
@@ -563,6 +563,10 @@ const BOOKING_REQUEST_ERRORS = Object.freeze({
     ? `Expected attendance (${error.expectedAttendance}) exceeds this venue's capacity (${error.capacity}).`
     : "Expected attendance exceeds this venue's capacity."), "expectedAttendance"],
   BOOKING_CONFLICT: [409, (error) => {
+    if (error.conflicts?.some((conflict) => conflict.message)) {
+      return error.conflicts.map((conflict) => conflict.message
+        || `This venue is unavailable from ${formatPeriod(conflict.occupiedStart, conflict.occupiedEnd)}, including setup and turnaround time.`).join(" ");
+    }
     const periods = (error.conflicts || []).map((conflict) =>
       `${formatPeriod(conflict.occupiedStart, conflict.occupiedEnd)} (${CONFLICT_SOURCES[conflict.type] || "another arrangement"})`);
     return periods.length

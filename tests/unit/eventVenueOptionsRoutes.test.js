@@ -257,6 +257,15 @@ describe("PUT /api/events/:id/venue-suggestion (SPM-72 AC8)", () => {
     expect(response.status).toBe(status);
     expect(response.body.code).toBe(code);
   });
+
+  test("[SPM-185-AC7] should_map_VENUE_BOOKING_CONFLICT_to_409", async () => {
+    venueModel.suggestEventVenue.mockRejectedValue(venueError("VENUE_BOOKING_CONFLICT"));
+
+    const response = await send("put", "/api/events/42/venue-suggestion", { venueId: 7, version: 0 });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("VENUE_BOOKING_CONFLICT");
+  });
 });
 
 
