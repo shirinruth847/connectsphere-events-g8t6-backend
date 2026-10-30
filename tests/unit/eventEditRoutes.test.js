@@ -622,3 +622,18 @@ describe("GET /api/events/:id/history (AC8)", () => {
     expect(activityModel.findEventHistory).not.toHaveBeenCalled();
   });
 });
+
+test('[SPM-40] owner sees the persisted rejection reason after reloading',async()=>{
+  asOwner();eventModel.findVisibleEvent.mockResolvedValue(eventRow({status:'REJECTED'}));
+  activityModel.findRejectionReason.mockResolvedValue('Capacity is insufficient.');
+  const response=await send('get','/api/events/42');
+  expect(response.status).toBe(200);
+  expect(response.body.event).toMatchObject({statusLabel:'Rejected',rejectionReason:'Capacity is insufficient.'});
+  expect(activityModel.findRejectionReason).toHaveBeenCalledWith(42);
+});
+
+test('[SPM-40] unrelated viewers cannot retrieve rejection notes',async()=>{
+  asOwner();eventModel.findVisibleEvent.mockResolvedValue(null);
+  expect((await send('get','/api/events/42')).status).toBe(404);
+  expect(activityModel.findRejectionReason).not.toHaveBeenCalled();
+});

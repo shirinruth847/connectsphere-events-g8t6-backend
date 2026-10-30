@@ -150,9 +150,20 @@ const markEventHistoryViewed = async (eventId, userId) => {
   return data;
 };
 
+// Read only after event visibility has been checked. Never expose staff-only notes.
+const findRejectionReason = async eventId => {
+  const { data, error } = await supabase.from("activity_log").select("details")
+    .eq("entity_name", "event").eq("entity_id", eventId)
+    .eq("action", "EVENT_REJECTED").eq("audience", "ORGANISER_SAFE")
+    .order("log_id", { ascending: false }).limit(1).maybeSingle();
+  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+  return data?.details ?? null;
+};
+
 module.exports = {
   appendActivity,
   findEventHistory,
+  findRejectionReason,
   findLastHistoryView,
   markEventHistoryViewed,
   toHistoryEntry,

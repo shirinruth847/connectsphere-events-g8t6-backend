@@ -403,6 +403,7 @@ const eventRequestError = (code, fields) => {
 };
 
 const DOMAIN_CODES = new Set([
+  "INVALID_REJECTION_REASON",
   "FORBIDDEN",
   "EVENT_NOT_FOUND",
   "EVENT_NOT_DRAFT",
@@ -854,6 +855,18 @@ const runLifecycleAction = async ({ action, eventId, actorId, expectedVersion, i
   });
   if (error) throw toEventRequestError(error);
   if (!data || !data.event) throw new Error(`${rpc} returned no event.`);
+  return { event: data.event, replayed: data.replayed === true };
+};
+
+// SPM-40: all rejection effects and replay data commit in one RPC.
+const rejectSubmittedEvent = async ({ eventId, actorId, expectedVersion, reason, idempotencyKey }) => {
+  const { data, error } = await supabase.rpc("reject_submitted_event", {
+    p_event_id: eventId, p_actor_id: actorId, p_expected_version: expectedVersion,
+    p_reason: reason, p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({ reason }, {}, [eventId, expectedVersion]),
+  });
+  if (error) throw toEventRequestError(error);
+  if (!data?.event) throw new Error("reject_submitted_event returned no event.");
   return { event: data.event, replayed: data.replayed === true };
 };
 
@@ -1366,6 +1379,7 @@ module.exports = {
   assignCoordinator,
   reassignCoordinator,
   runLifecycleAction,
+  rejectSubmittedEvent,
   getEventReadiness,
   requestClarification,
   postClarificationMessage,
