@@ -1,4 +1,5 @@
 const supabase = require("../config/supabase");
+const { getVenueLockPool } = require("../config/venueLockDatabase");
 const venueDetailModel = require("./venueDetailModel");
 const venueCalendarModel = require("./venueCalendarModel");
 const venueConflictModel = require("./venueConflictModel");
@@ -1155,7 +1156,316 @@ const findVenueBooking = async (bookingId) => {
   };
 };
 
+// ---------- venue booking requests (SPM-179) ----------
+
+// Business refusals raised by begin_venue_booking_request and
+// request_venue_bookings. Per-booking ones carry a JSON DETAIL (index, venueId
+// and, for conflicts, the conflicting periods) so the form shows them inline.
+const BOOKING_REQUEST_ERRORS = new Set([
+  "EVENT_NOT_FOUND",
+  "FORBIDDEN",
+  "EVENT_NOT_IN_PLANNING",
+  "IDEMPOTENCY_KEY_REUSED",
+  "IDEMPOTENCY_IN_PROGRESS",
+  "INVALID_VENUE_BOOKING_REQUEST",
+  "VENUE_LISTED_TWICE",
+  "VENUE_NOT_BOOKABLE",
+  "BOOKING_IN_PAST",
+  "BOOKING_OUTSIDE_EVENT",
+  "VENUE_CAPACITY_EXCEEDED",
+  "VENUE_ALREADY_BOOKED_FOR_EVENT",
+  "VENUE_BUFFERS_NOT_SET",
+  "BOOKING_CONFLICT",
+  "PRIMARY_VENUE_REQUIRED",
+  "PRIMARY_VENUE_ALREADY_SET",
+]);
+// Another transaction holds a lock this one needs (lock_timeout), or PostgreSQL
+// ended this one to break a deadlock or serialisation clash: the coordinator
+// can send the request again (Master 7.4: a retryable 409).
+const RETRYABLE_LOCK_CODES = new Set(["55P03", "40P01", "40001"]);
+// The statement ran past statement_timeout, or the server ended the session
+// (idle_in_transaction_session_timeout, shutdown). Nothing was saved.
+const SESSION_ENDED_CODES = new Set(["57014", "25P03", "57P01", "57P02", "57P03"]);
+const VENUE_LOCK_TIMEOUT = "5s";
+// MongoDB is read while the venue lock is held, so a slow read must not hold it
+// for long; a read that runs out answers AVAILABILITY_UNAVAILABLE.
+const MONGO_READ_UNDER_LOCK_MS = 3000;
+
+const parseErrorDetail = (detail) => {
+  try {
+    const parsed = detail ? JSON.parse(detail) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const toBookingRequestError = (error) => {
+  if (error?.name === "VenueError") return error;
+  if (RETRYABLE_LOCK_CODES.has(error?.code)) return venueError("VENUE_LOCK_TIMEOUT");
+  // Class 08 is a connection exception.
+  if (SESSION_ENDED_CODES.has(error?.code) || String(error?.code ?? "").startsWith("08")) {
+    return venueError("VENUE_BOOKINGS_UNAVAILABLE");
+  }
+  if ((error?.code === "P0001" || error?.code === "P0002") && BOOKING_REQUEST_ERRORS.has(error.message)) {
+    const { index, venueId, conflicts, capacity, expectedAttendance } = parseErrorDetail(error.detail);
+    return venueError(error.message, { index, venueId, conflicts, capacity, expectedAttendance });
+  }
+  return error;
+};
+
+const toIsoOrNull = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+// Advisory checks for one requested booking (Master 5.4): shown to the
+// coordinator and Venue Staff, never a reason to refuse.
+const bookingWarnings = (item, range, venue, document) => {
+  const messages = [];
+  const hours = venueConflictModel.operatingHoursWarning(range, venue.operatingHours);
+  if (hours) messages.push(hours.message);
+  const layouts = document?.supportedLayouts || [];
+  if (layouts.length && !layouts.some((layout) => normalise(layout) === normalise(item.layout))) {
+    messages.push(`${venue.name} does not list the ${item.layout} layout.`);
+  }
+  item.requiredFacilities
+    .filter((facility) => !listMeets(document?.facilities, facility))
+    .forEach((facility) => messages.push(`${venue.name} does not list the facility "${facility}".`));
+  item.accessibilityNeeds
+    .filter((need) => !listMeets(document?.accessibilityFeatures, need))
+    .forEach((need) => messages.push(`${venue.name} does not list the accessibility feature "${need}".`));
+  return messages;
+};
+
+// The MongoDB holds and blocks one booking's occupied range overlaps (Master
+// 5.4). Normal booking requests must respect every active hold, including the
+// event's own. Converting a hold is a separate workflow (SPM-188/SPM-283).
+const findCalendarConflicts = (entries, { venueId, range, now }) =>
+  entries
+    .filter((entry) => entry.venueId === venueId)
+    .filter((entry) => (entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
+      ? entry.status === "ACTIVE"
+      : venueConflictModel.isHoldActive(entry, now)))
+    .filter((entry) => venueConflictModel.overlaps(range, { start: entry.occupiedStart, end: entry.occupiedEnd }))
+    .map((entry) => ({
+      type: entry.type,
+      occupiedStart: toIsoOrNull(entry.occupiedStart),
+      occupiedEnd: toIsoOrNull(entry.occupiedEnd),
+      ...(entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
+        ? { reasonLabel: venueConflictModel.BLOCK_REASON_LABELS[entry.reason] || entry.reason || null }
+        : { holdExpiresAt: toIsoOrNull(entry.holdExpiresAt) }),
+    }));
+
+// Runs while begin_venue_booking_request holds the event and venue locks
+// (Master 7.4 step 2): reads each venue's setup/turnaround minutes and its holds
+// and blocks from MongoDB, refuses overlaps with active holds and blocks, and
+// returns the minutes for the PostgreSQL booking-against-booking check.
+const checkVenueCalendar = async (bookings, venues) => {
+  const venueById = new Map(venues.map((venue) => [venue.venueId, venue]));
+  const venueIds = [...venueById.keys()];
+  const times = bookings.flatMap((item) => [Date.parse(item.start), Date.parse(item.end)]);
+  const from = new Date(Math.min(...times) - BUFFER_MARGIN_MS);
+  const to = new Date(Math.max(...times) + BUFFER_MARGIN_MS);
+
+  let details;
+  let entries;
+  try {
+    [details, entries] = await Promise.all([
+      venueDetailModel.getVenueDetailsByIds(venueIds, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }),
+      venueCalendarModel.findCalendarEntries(venueIds, from, to, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }),
+    ]);
+  } catch (error) {
+    console.warn("[venue-booking-request] MongoDB unavailable", { code: error.code, name: error.name });
+    throw venueError("AVAILABILITY_UNAVAILABLE");
+  }
+
+  const now = new Date();
+  const minutes = {};
+  const warnings = [];
+  bookings.forEach((item, index) => {
+    const venue = venueById.get(item.venueId);
+    if (!venue || !venue.isActive || venue.status !== VENUE_STATUS.ACTIVE) {
+      throw venueError("VENUE_NOT_BOOKABLE", { index, venueId: item.venueId });
+    }
+    const document = details.get(String(item.venueId));
+    const setupMinutes = document?.setupMinutes;
+    const turnaroundMinutes = document?.turnaroundMinutes;
+    if (!Number.isInteger(setupMinutes) || !Number.isInteger(turnaroundMinutes)) {
+      throw venueError("VENUE_BUFFERS_NOT_SET", { index, venueId: item.venueId });
+    }
+    minutes[item.venueId] = { setupMinutes, turnaroundMinutes };
+
+    const range = venueConflictModel.occupiedRange(item.start, item.end, setupMinutes, turnaroundMinutes);
+    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, range, now });
+    if (conflicts.length) throw venueError("BOOKING_CONFLICT", { index, venueId: item.venueId, conflicts });
+
+    const messages = bookingWarnings(item, range, venue, document);
+    if (messages.length) warnings.push({ index, venueId: item.venueId, messages });
+  });
+  return { minutes, warnings };
+};
+
+const toBookingRequestResult = (result) => ({
+  ...result,
+  bookings: (result.bookings || []).map((item) => ({
+    ...item,
+    statusLabel: VENUE_BOOKING_STATUS_LABELS[item.status] || item.status,
+  })),
+});
+
+// Runs work(client) in one transaction on one client of the venue lock
+// connection (Master 7.4, T33), with a short lock_timeout. Commits only when
+// work resolves; otherwise rolls back and rethrows. A client whose rollback
+// fails, or whose connection was lost, is discarded, never returned to the pool.
+// Every venue calendar writer (bookings here; holds and blocks in SPM-188 and
+// SPM-195) takes the venue lock through this function.
+const withVenueLockTransaction = async (work) => {
+  let pool;
+  try {
+    pool = getVenueLockPool();
+  } catch (error) {
+    console.error("[venue-booking-request] venue lock connection unavailable", { code: error.code });
+    throw venueError("VENUE_BOOKINGS_UNAVAILABLE");
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    console.error("[venue-booking-request] cannot open the venue lock connection", { code: error.code });
+    throw venueError("VENUE_BOOKINGS_UNAVAILABLE");
+  }
+
+  // pg-pool removes its own error listener while a client is checked out, so a
+  // connection lost between queries (for example during the MongoDB read)
+  // would otherwise be an unhandled 'error' event that stops the process.
+  let connectionLost = false;
+  const onConnectionError = (error) => {
+    connectionLost = true;
+    console.error("[venue-booking-request] venue lock connection lost", { code: error.code });
+  };
+  client.on("error", onConnectionError);
+
+  let discardClient = false;
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL lock_timeout = '${VENUE_LOCK_TIMEOUT}'`);
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    if (connectionLost) {
+      discardClient = true;
+    } else {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        discardClient = true;
+      }
+    }
+    // PostgreSQL rolls back a transaction whose connection is gone. A COMMIT
+    // that was in flight may still have landed, so the answer is "try again":
+    // the same Idempotency-Key then replays a saved request.
+    if (connectionLost && error?.name !== "VenueError") throw venueError("VENUE_BOOKINGS_UNAVAILABLE");
+    throw error;
+  } finally {
+    client.removeListener("error", onConnectionError);
+    client.release(discardClient);
+  }
+};
+
+// Lock the event then the venues, check MongoDB holds and blocks under those
+// locks, then save the bookings, version, activity and notice, all in one
+// venue lock transaction (Master 7, 7.4). Nothing is announced before COMMIT;
+// any failure rolls everything back.
+const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey }) => {
+  const requestHash = hashRequest({ bookings }, {}, [eventId]);
+  const venueIds = [...new Set(bookings.map((item) => item.venueId))].sort((left, right) => left - right);
+
+  try {
+    const result = await withVenueLockTransaction(async (client) => {
+      const started = (await client.query(
+        "SELECT public.begin_venue_booking_request($1, $2, $3::integer[], $4, $5) AS result",
+        [actorId, eventId, venueIds, idempotencyKey, requestHash]
+      )).rows[0].result;
+      if (started.replay) return started.replay;
+
+      const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || []);
+      return (await client.query(
+        "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
+        [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
+      )).rows[0].result;
+    });
+    return toBookingRequestResult(result);
+  } catch (error) {
+    throw toBookingRequestError(error);
+  }
+};
+
+const EVENT_BOOKING_SELECT =
+  "booking_id,venue_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,is_primary,occupied_range,created_at,venue:venue!venue_booking_venue_id_fkey(name)";
+
+// PostgREST returns a tstzrange as text, for example
+// ["2030-01-01 09:30:00+00","2030-01-01 12:45:00+00").
+const RANGE_PATTERN = /^[[(]"?([^",]*)"?,"?([^",]*)"?[)\]]$/;
+const rangeBoundToIso = (text) => {
+  if (!text) return null;
+  const normalised = text.trim().replace(" ", "T").replace(/([+-]\d{2})$/, "$1:00");
+  return toIsoOrNull(normalised);
+};
+const parseOccupiedRange = (text) => {
+  const match = RANGE_PATTERN.exec(typeof text === "string" ? text.trim() : "");
+  return match
+    ? { occupiedStart: rangeBoundToIso(match[1]), occupiedEnd: rangeBoundToIso(match[2]) }
+    : { occupiedStart: null, occupiedEnd: null };
+};
+
+const toEventVenueBooking = (row) => ({
+  bookingId: row.booking_id,
+  venueId: row.venue_id,
+  venueName: row.venue?.name ?? null,
+  label: row.label,
+  status: row.status,
+  statusLabel: VENUE_BOOKING_STATUS_LABELS[row.status] || row.status,
+  isPrimary: row.is_primary,
+  start: row.start_datetime,
+  end: row.end_datetime,
+  ...parseOccupiedRange(row.occupied_range),
+  expectedAttendance: row.expected_attendance,
+  layout: row.layout_type,
+  requiredFacilities: row.required_facilities || [],
+  accessibilityNeeds: row.accessibility_requirements || [],
+  specialRequirements: row.special_requirements,
+  rejectionReason: row.rejection_reason,
+  requestedAt: row.created_at,
+});
+
+// Every booking of one event, for its assigned coordinator and supervising Lead
+// (requireVisibleEvent has already checked the relationship).
+const listEventVenueBookings = async (eventId) => {
+  const { data, error } = await supabase
+    .from("venue_booking")
+    .select(EVENT_BOOKING_SELECT)
+    .eq("event_id", eventId)
+    .order("start_datetime", { ascending: true })
+    .order("booking_id", { ascending: true });
+  if (error) throw error;
+  const bookings = (data || []).map(toEventVenueBooking);
+  // The primary venue as _event_primary_venue reads it: a booking written
+  // outside the request flow carries no flag, but as the event's only active
+  // booking it is the primary venue (Master 5.4.2). Showing the stored flag
+  // alone would make the form send a second primary, which is refused.
+  const active = bookings.filter((booking) => ACTIVE_BOOKING_STATUSES.includes(booking.status));
+  if (active.length === 1 && !active[0].isPrimary) active[0].isPrimary = true;
+  return bookings;
+};
+
 module.exports = {
+  requestVenueBookings,
+  listEventVenueBookings,
+  withVenueLockTransaction,
   getVenueCatalogue,
   listManagedVenues,
   listVenueOptions,

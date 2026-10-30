@@ -92,7 +92,183 @@ const parseBookingFilters = (query) => {
   return Object.keys(fields).length ? { fields } : { filters };
 };
 
+// ---------- booking request (SPM-179) ----------
+// Returns { bookings } or { fields } keyed "bookings.<index>.<field>", so the
+// form shows each error inside its own venue section (AC5). The database
+// re-checks everything under the venue lock; these messages match it.
+
+const MAX_BOOKINGS_PER_REQUEST = 10;
+const BOOKING_LIMITS = Object.freeze({
+  label: 100,
+  layout: 50, // room.layout_type, which a bridging room copies (Master 6.2, T33)
+  listItems: 20,
+  listItemLength: 100,
+  specialRequirements: 2000,
+});
+const BOOKING_ITEM_FIELDS = new Set([
+  "venueId", "label", "start", "end", "expectedAttendance", "layout",
+  "requiredFacilities", "accessibilityNeeds", "specialRequirements", "isPrimary",
+]);
+const BOOKING_MESSAGES = Object.freeze({
+  venueRequired: "Venue is required.",
+  venueTwice: "This venue is already in the request.",
+  labelRequired: "Label is required.",
+  labelTooLong: `Label must be ${BOOKING_LIMITS.label} characters or fewer.`,
+  startRequired: "Start date and time is required.",
+  endRequired: "End date and time is required.",
+  timeInvalid: "Enter a date and time with a time zone, for example 2030-03-10T09:00:00+08:00.",
+  endBeforeStart: "End time must be after start time.",
+  startInPast: "The booking must start in the future.",
+  outsideEvent: "The booking must be within the event's dates and times.",
+  attendanceRequired: "Expected attendance is required.",
+  attendanceInvalid: "Expected attendance must be a whole number of 1 or more.",
+  layoutRequired: "Layout is required.",
+  layoutTooLong: `Layout must be ${BOOKING_LIMITS.layout} characters or fewer.`,
+  listInvalid: `List up to ${BOOKING_LIMITS.listItems} entries of ${BOOKING_LIMITS.listItemLength} characters or fewer.`,
+  specialInvalid: "Special requirements must be text.",
+  specialTooLong: `Special requirements must be ${BOOKING_LIMITS.specialRequirements} characters or fewer.`,
+  primaryInvalid: "Primary venue must be true or false.",
+  onePrimary: "Choose one primary venue.",
+});
+
+const isMissing = (value) => value === undefined || value === null || (typeof value === "string" && !value.trim());
+
+const parseTextList = (value) => {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > BOOKING_LIMITS.listItems) return null;
+  // Duplicates are dropped ignoring case, keeping the first spelling, as the form does.
+  const items = [];
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== "string" || !item.trim() || item.trim().length > BOOKING_LIMITS.listItemLength) return null;
+    const text = item.trim();
+    if (!seen.has(text.toLowerCase())) {
+      seen.add(text.toLowerCase());
+      items.push(text);
+    }
+  }
+  return items;
+};
+
+// A booking's window: both times readable (with a time zone), the end after the
+// start, a start in the future and the window within the event (Master 6.3).
+// Returns the parsed times and the error for each field that has one.
+const readBookingTimes = (item, { eventStart, eventEnd, now }) => {
+  const start = parseDate(item.start);
+  const end = parseDate(item.end);
+  const errors = {};
+  // A value that is present but unreadable (e.g. no time zone) is not "missing".
+  if (!start) errors.start = isMissing(item.start) ? BOOKING_MESSAGES.startRequired : BOOKING_MESSAGES.timeInvalid;
+  if (!end) errors.end = isMissing(item.end) ? BOOKING_MESSAGES.endRequired : BOOKING_MESSAGES.timeInvalid;
+  if (start && end) {
+    if (end <= start) errors.end = BOOKING_MESSAGES.endBeforeStart;
+    else if (start <= now) errors.start = BOOKING_MESSAGES.startInPast;
+    else if (eventStart && eventEnd && (start < eventStart || end > eventEnd)) errors.start = BOOKING_MESSAGES.outsideEvent;
+  }
+  return { start, end, errors };
+};
+
+// One venue section. Errors go into context.fields under "bookings.<index>.<field>";
+// context.seenVenues refuses a venue listed twice. Returns the normalised booking,
+// or null when the section is not an object.
+const validateBookingItem = (item, index, context) => {
+  const { fields, seenVenues } = context;
+  const at = (field) => `bookings.${index}.${field}`;
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    fields[`bookings.${index}`] = "Each venue must be an object.";
+    return null;
+  }
+  for (const key of Object.keys(item)) {
+    if (!BOOKING_ITEM_FIELDS.has(key)) fields[at(key.slice(0, 60))] = "This field cannot be set.";
+  }
+
+  const venueId = Number.isInteger(item.venueId) && item.venueId > 0 && item.venueId <= MAX_INTEGER ? item.venueId : null;
+  if (!venueId) fields[at("venueId")] = BOOKING_MESSAGES.venueRequired;
+  else if (seenVenues.has(venueId)) fields[at("venueId")] = BOOKING_MESSAGES.venueTwice;
+  else seenVenues.add(venueId);
+
+  const label = typeof item.label === "string" ? item.label.trim() : "";
+  if (!label) fields[at("label")] = BOOKING_MESSAGES.labelRequired;
+  else if (label.length > BOOKING_LIMITS.label) fields[at("label")] = BOOKING_MESSAGES.labelTooLong;
+
+  const { start, end, errors: timeErrors } = readBookingTimes(item, context);
+  for (const [field, message] of Object.entries(timeErrors)) fields[at(field)] = message;
+
+  const attendance = item.expectedAttendance;
+  if (isMissing(attendance)) fields[at("expectedAttendance")] = BOOKING_MESSAGES.attendanceRequired;
+  else if (!Number.isInteger(attendance) || attendance < 1 || attendance > MAX_INTEGER) {
+    fields[at("expectedAttendance")] = BOOKING_MESSAGES.attendanceInvalid;
+  }
+
+  const layout = typeof item.layout === "string" ? item.layout.trim() : "";
+  if (!layout) fields[at("layout")] = BOOKING_MESSAGES.layoutRequired;
+  else if (layout.length > BOOKING_LIMITS.layout) fields[at("layout")] = BOOKING_MESSAGES.layoutTooLong;
+
+  const requiredFacilities = parseTextList(item.requiredFacilities);
+  if (!requiredFacilities) fields[at("requiredFacilities")] = BOOKING_MESSAGES.listInvalid;
+  const accessibilityNeeds = parseTextList(item.accessibilityNeeds);
+  if (!accessibilityNeeds) fields[at("accessibilityNeeds")] = BOOKING_MESSAGES.listInvalid;
+
+  let specialRequirements = null;
+  if (item.specialRequirements !== undefined && item.specialRequirements !== null) {
+    if (typeof item.specialRequirements !== "string") {
+      fields[at("specialRequirements")] = BOOKING_MESSAGES.specialInvalid;
+    } else if (item.specialRequirements.trim().length > BOOKING_LIMITS.specialRequirements) {
+      fields[at("specialRequirements")] = BOOKING_MESSAGES.specialTooLong;
+    } else {
+      specialRequirements = item.specialRequirements.trim() || null;
+    }
+  }
+
+  if (item.isPrimary !== undefined && typeof item.isPrimary !== "boolean") fields[at("isPrimary")] = BOOKING_MESSAGES.primaryInvalid;
+
+  return {
+    venueId,
+    label,
+    start: start ? start.toISOString() : null,
+    end: end ? end.toISOString() : null,
+    expectedAttendance: attendance,
+    layout,
+    requiredFacilities: requiredFacilities || [],
+    accessibilityNeeds: accessibilityNeeds || [],
+    specialRequirements,
+    isPrimary: item.isPrimary === true,
+  };
+};
+
+// event: the visible event row (start_datetime, end_datetime); now: injectable for tests.
+const validateVenueBookingRequest = (body, { event, now = new Date() } = {}) => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { fields: { body: "Send a JSON object with a bookings list." } };
+  }
+  const fields = {};
+  for (const key of Object.keys(body)) {
+    if (key !== "bookings") fields[key.slice(0, 60)] = "This field cannot be set.";
+  }
+  const list = body.bookings;
+  if (!Array.isArray(list) || list.length < 1 || list.length > MAX_BOOKINGS_PER_REQUEST) {
+    fields.bookings = `Add between 1 and ${MAX_BOOKINGS_PER_REQUEST} venues.`;
+    return { fields };
+  }
+
+  const context = {
+    fields,
+    seenVenues: new Set(),
+    eventStart: event?.start_datetime ? new Date(event.start_datetime) : null,
+    eventEnd: event?.end_datetime ? new Date(event.end_datetime) : null,
+    now,
+  };
+  const bookings = list.map((item, index) => validateBookingItem(item, index, context));
+  if (bookings.filter((booking) => booking?.isPrimary).length > 1) fields["bookings.primary"] = BOOKING_MESSAGES.onePrimary;
+
+  return Object.keys(fields).length ? { fields } : { bookings };
+};
+
 module.exports = {
+  validateVenueBookingRequest,
+  MAX_BOOKINGS_PER_REQUEST,
+  BOOKING_LIMITS,
+  BOOKING_MESSAGES,
   parseBookingFilters,
   parseId,
   VENUE_BOOKING_STATUSES,

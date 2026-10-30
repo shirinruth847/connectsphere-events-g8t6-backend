@@ -193,6 +193,8 @@ describe("GET /api/venues (SPM-72)", () => {
       supportedLayouts: ["THEATRE", "CLASSROOM"],
       emergencyAccess: "Two exits on the north side",
       knownRestrictions: ["No open flames"],
+      // Venues of the same building that are still available (SPM-72); none here.
+      relatedVenues: [],
     });
     expect(venueA.rooms).toHaveLength(2);
 
