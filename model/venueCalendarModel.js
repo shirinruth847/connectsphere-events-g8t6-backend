@@ -66,9 +66,9 @@ const findEventHolds = async (eventId) => {
 
 const calendar = async () => (await getMongoDb()).collection("venue_calendar");
 
-const findCalendarEntry = async (entryId, { maxTimeMS } = {}) => {
+const findCalendarEntry = async (entryId, { maxTimeMS, readPreference } = {}) => {
   if (!OBJECT_ID.test(entryId || "")) return null;
-  const document = await (await calendar()).findOne({ _id: new ObjectId(entryId) }, maxTimeMS ? { maxTimeMS } : {});
+  const document = await (await calendar()).findOne({ _id: new ObjectId(entryId) }, { ...(maxTimeMS ? { maxTimeMS } : {}), ...(readPreference ? { readPreference } : {}) });
   return document ? toEntry(document) : null;
 };
 
@@ -98,7 +98,7 @@ const findEntriesByIds = async (entryIds) => {
 // interval (T4). The ID is chosen by the caller, so a retried request that
 // already wrote its document finds it instead of writing a second one: the
 // existing entry is returned with `existing: true`.
-const insertBlock = async ({ blockId, venueId, reason, note, start, end, createdBy }) => {
+const insertBlock = async ({ blockId, venueId, reason, note, start, end, createdBy, writeToken }) => {
   const document = {
     _id: new ObjectId(blockId),
     venueId: String(venueId),
@@ -112,6 +112,7 @@ const insertBlock = async ({ blockId, venueId, reason, note, start, end, created
     reason,
     note,
     createdBy,
+    writeToken,
     createdAt: new Date(),
     updatedAt: null,
     version: 1,
@@ -130,7 +131,7 @@ const insertBlock = async ({ blockId, venueId, reason, note, start, end, created
 
 // Shortens or lifts an active block. Matches only the version the caller read
 // under the venue lock; returns the updated entry, or null when nothing matched.
-const updateBlock = async ({ blockId, venueId, expectedVersion, start, end, lift = false }) => {
+const updateBlock = async ({ blockId, venueId, expectedVersion, start, end, lift = false, writeToken }) => {
   const set = lift
     ? { status: "LIFTED", updatedAt: new Date() }
     : {
@@ -142,7 +143,7 @@ const updateBlock = async ({ blockId, venueId, expectedVersion, start, end, lift
     };
   const document = await (await calendar()).findOneAndUpdate(
     { _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", status: "ACTIVE", version: expectedVersion },
-    { $set: set, $inc: { version: 1 } },
+    { $set: { ...set, writeToken }, $inc: { version: 1 } },
     { returnDocument: "after" }
   );
   return document ? toEntry(document) : null;
@@ -151,15 +152,15 @@ const updateBlock = async ({ blockId, venueId, expectedVersion, start, end, lift
 // Undo steps, run only when the PostgreSQL side certainly did not commit
 // (venueModel.withVenueLockTransaction). Each matches the exact document state
 // the operation left, so nothing written since is touched.
-const deleteBlock = async ({ blockId, venueId }) => {
+const deleteBlock = async ({ blockId, venueId, writeToken }) => {
   await (await calendar()).deleteOne({
-    _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", status: "ACTIVE", version: 1,
+    _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", status: "ACTIVE", version: 1, writeToken,
   });
 };
 
-const revertBlock = async ({ blockId, venueId, version, start, end }) => {
+const revertBlock = async ({ blockId, venueId, version, start, end, writeToken }) => {
   await (await calendar()).updateOne(
-    { _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", version },
+    { _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", version, writeToken },
     {
       $set: {
         status: "ACTIVE",
@@ -174,7 +175,11 @@ const revertBlock = async ({ blockId, venueId, version, start, end }) => {
   );
 };
 
+const ownsBlockWrite = async ({ blockId, venueId, writeToken }) =>
+  Boolean(await (await calendar()).findOne({ _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", writeToken }, { projection: { _id: 1 }, readPreference: "primary", maxTimeMS: 2000 }));
+
 module.exports = {
+  ownsBlockWrite,
   deleteBlock,
   revertBlock,
   findCalendarEntries,

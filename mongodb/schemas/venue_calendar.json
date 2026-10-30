@@ -24,6 +24,7 @@
       "createdAt": { "bsonType": "date" },
       "updatedAt": { "bsonType": ["date", "null"] },
       "version": { "bsonType": "int", "minimum": 1 },
+      "writeToken": { "bsonType": "string", "maxLength": 36 },
       "fixture": { "bsonType": "string", "maxLength": 64 }
     }
   }

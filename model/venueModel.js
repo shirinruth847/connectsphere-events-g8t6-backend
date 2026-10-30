@@ -1329,16 +1329,19 @@ const toBookingRequestResult = (result) => ({
   })),
 });
 
-// Undo steps run newest first; a failed undo is logged for the developer and
-// never hides the original error.
+// Undo steps run newest first. Failure is logged and surfaced as an uncertain
+// calendar outcome, rather than claiming the original action changed nothing.
 const undoMongoWrites = async (undoSteps) => {
+  let complete = true;
   for (const undo of [...undoSteps].reverse()) {
     try {
       await undo();
     } catch (error) {
+      complete = false;
       console.error("[venue-lock] could not undo a MongoDB write after rollback", { code: error?.code, name: error?.name });
     }
   }
+  return complete;
 };
 
 // The jsonb result of one `SELECT public.fn(...) AS result` on the lock client.
@@ -1396,6 +1399,8 @@ const withVenueLockTransaction = async (work) => {
   } catch (error) {
     const serverRefusedCommit = /^[0-9A-Z]{5}$/.test(String(error?.code ?? "")) && !String(error.code).startsWith("08");
     const outcomeUnknown = committing && (connectionLost || !serverRefusedCommit);
+    // Undo before releasing the venue lock whenever the transaction is still open.
+    const recovered = outcomeUnknown || await undoMongoWrites(undoSteps);
     if (connectionLost) {
       discardClient = true;
     } else {
@@ -1405,7 +1410,7 @@ const withVenueLockTransaction = async (work) => {
         discardClient = true;
       }
     }
-    if (!outcomeUnknown) await undoMongoWrites(undoSteps);
+    if (!recovered) throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
     // PostgreSQL rolls back a transaction whose connection is gone. A COMMIT
     // that was in flight may still have landed, so the answer is "try again":
     // the same Idempotency-Key then replays a saved request.
@@ -1573,6 +1578,25 @@ const calendarCall = async (operation) => {
   }
 };
 
+// Acknowledgement can be lost after persistence. Read the attempt's private
+// ownership token on the primary before deciding the PostgreSQL outcome.
+const writeCalendarBlock = async (identity, write) => {
+  try {
+    return await write();
+  } catch (error) {
+    try {
+      if (await venueCalendarModel.ownsBlockWrite(identity)) {
+        const saved = await venueCalendarModel.findCalendarEntry(identity.blockId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS });
+        if (saved) return saved;
+      }
+    } catch {
+      // The registered, token-guarded undo still runs. If that also fails, the
+      // caller receives OUTCOME_UNKNOWN rather than a false no-change claim.
+    }
+    throw venueError("VENUE_CALENDAR_UNAVAILABLE");
+  }
+};
+
 const sortedIds = (ids) => [...new Set(ids.filter(Number.isInteger))].sort((left, right) => left - right);
 
 // The block's MongoDB ID comes from the actor and Idempotency-Key, so a retry
@@ -1703,10 +1727,15 @@ const createVenueBlock = async ({ actorId, venueId, block, idempotencyKey }) => 
       ]
     );
 
-    const written = await calendarCall(() => venueCalendarModel.insertBlock({ blockId, venueId, ...block, createdBy: actorId }));
+    const writeToken = crypto.randomUUID();
+    // Register before sending the write: a network error can follow persistence.
+    // The token prevents compensation from deleting an earlier attempt's block.
+    transaction.onRollback(() => venueCalendarModel.deleteBlock({ blockId, venueId, writeToken }));
+    const written = await writeCalendarBlock(
+      { blockId, venueId, writeToken },
+      () => venueCalendarModel.insertBlock({ blockId, venueId, ...block, createdBy: actorId, writeToken })
+    );
     if (written.existing && !sameBlock(written, venueId, block)) throw venueError("IDEMPOTENCY_KEY_REUSED");
-    // Only a document this attempt wrote is removed if PostgreSQL does not commit.
-    if (!written.existing) transaction.onRollback(() => venueCalendarModel.deleteBlock({ blockId, venueId }));
     return recorded;
   });
 
@@ -1914,13 +1943,17 @@ const changeVenueBlock = async ({ actorId, venueId, blockId, change = null, lift
       "SELECT public.record_venue_block_change($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9::integer[]) AS result",
       [actorId, venueId, blockId, action, JSON.stringify(before), JSON.stringify(after), minutes.setup, minutes.turnaround, locked]
     );
-    const written = await calendarCall(() => venueCalendarModel.updateBlock({
-      blockId, venueId, expectedVersion, start: after.start, end: after.end, lift: Boolean(lift),
-    }));
-    if (!written) throw venueError("BLOCK_VERSION_CONFLICT");
+    const writeToken = crypto.randomUUID();
     transaction.onRollback(() => venueCalendarModel.revertBlock({
-      blockId, venueId, version: written.version, start: latest.start, end: latest.end,
+      blockId, venueId, version: expectedVersion + 1, start: latest.start, end: latest.end, writeToken,
     }));
+    const written = await writeCalendarBlock(
+      { blockId, venueId, writeToken },
+      () => venueCalendarModel.updateBlock({
+        blockId, venueId, expectedVersion, start: after.start, end: after.end, lift: Boolean(lift), writeToken,
+      })
+    );
+    if (!written) throw venueError("BLOCK_VERSION_CONFLICT");
     return written;
   });
 

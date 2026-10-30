@@ -143,6 +143,12 @@ The assigned coordinator requests one or more venue bookings for an event in `PL
 
 ### Venue Blocks and Restoration (SPM-195)
 
+**Acknowledgement-loss recovery:** block writes carry a private attempt token. If a MongoDB write throws after persistence, the backend checks that token under the venue lock and commits PostgreSQL only after confirming the write. Token-guarded compensation is registered before writing and runs before releasing an open PostgreSQL transaction's locks. It cannot delete an earlier attempt or undo a later version. The token is never returned in the API.
+
+**Deployment:** run MongoDB migration `0006_venue_block_write_token` before deploying this backend. It only permits an optional string field; existing entries remain valid. This change needs no PostgreSQL migration. Application rollback can retain the optional field and validator; do not remove historical blocks.
+
+**Prolonged outage:** if MongoDB cannot confirm the write or its compensation, the API returns `503 VENUE_CALENDAR_OUTCOME_UNKNOWN`, never “nothing changed”. PostgreSQL is rolled back, but the calendar needs reconciliation when connectivity returns. Automatic durable reconciliation is not introduced here; the existing out-of-scope consistency-monitor dependency remains. Do not interpret this response as a safe instruction to submit a different action.
+
 Venue Staff block a venue for a period (Master 5.4.4, T4: no setup or turnaround). Every active booking or hold whose occupied range overlaps the block gets an `OPEN` `VENUE_BLOCK` row in `resource_incidents`; the event is kept, and Venue Staff restore each booking once its whole occupied range is free again (Q3).
 
 | Method & path | Access | Input | Success | Errors |

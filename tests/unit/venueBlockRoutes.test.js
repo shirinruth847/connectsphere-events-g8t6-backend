@@ -135,6 +135,7 @@ describe("POST /api/venues/:venueId/blocks", () => {
     ["VENUE_LOCK_TIMEOUT", 409],
     ["IDEMPOTENCY_KEY_REUSED", 409],
     ["VENUE_CALENDAR_UNAVAILABLE", 503],
+    ["VENUE_CALENDAR_OUTCOME_UNKNOWN", 503],
     ["VENUE_BOOKINGS_UNAVAILABLE", 503],
   ])("should_map_%s_to_%i", async (code, status) => {
     venueModel.createVenueBlock.mockRejectedValue(venueError(code));
@@ -258,4 +259,13 @@ describe("POST /api/venues/incidents/:incidentId/restore (SPM-195 AC10)", () => 
     expect(response.status).toBe(404);
     expect(venueModel.restoreVenueIncident).not.toHaveBeenCalled();
   });
+});
+
+
+test("uncertain calendar outcomes do not claim nothing changed", async () => {
+  venueModel.createVenueBlock.mockRejectedValue(venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN"));
+  const response = await send("post", "/api/venues/7/blocks", blockBody());
+  expect(response.status).toBe(503);
+  expect(response.body.error).toMatch(/could not be confirmed/);
+  expect(response.body.error).not.toMatch(/nothing was changed/);
 });

@@ -566,7 +566,8 @@ const BLOCK_ERRORS = Object.freeze({
   INCIDENT_STILL_BLOCKED: [409, "Part of this booking's time, including setup and turnaround, is still blocked."],
   INCIDENT_NOT_RESTORABLE: [409, "This booking can no longer be restored."],
   VENUE_OUT_OF_SERVICE: [409, "This venue is out of service, so the booking cannot be restored."],
-  // Nothing was saved in either store (AC11, Master 7.4 step 6).
+  // Only the confirmed failure response may promise that nothing changed.
+  VENUE_CALENDAR_OUTCOME_UNKNOWN: [503, "The venue calendar outcome could not be confirmed. Reload before taking another action; reconciliation may be required."],
   VENUE_CALENDAR_UNAVAILABLE: [503, "The venue calendar cannot be read or saved right now, so nothing was changed. Try again shortly."],
   VENUE_BOOKINGS_UNAVAILABLE: [503, "Venue blocks cannot be saved right now. Try again shortly."],
 });
