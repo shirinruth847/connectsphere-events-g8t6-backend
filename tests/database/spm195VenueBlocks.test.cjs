@@ -218,7 +218,7 @@ before(async () => {
   await db.exec(read("20261029150000_spm195_block_change_notices.sql"));
   await db.exec(read("20261029160000_spm195_close_ended_incidents.sql"));
   await db.exec(read("20261030160000_spm195_block_change_recovery.sql"));
-  await db.exec(read("20261030170000_spm195_recovery_actor_authorization.sql"));
+  await db.exec(read("20261030180000_spm195_recovery_actor_authorization.sql"));
 });
 
 test("[SPM-195-AC1][TC-03] only active Venue Staff can block, change or restore", async () => {
