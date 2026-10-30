@@ -54,6 +54,8 @@ describe("mongodb/migrate", () => {
       "0004_equipment_details",
       "0004_venue_related_venues",
       "0005_venue_photo_galleries",
+      "0006_venue_block_write_token",
+      "0007_venue_block_change_recovery",
     ]);
     await expect(applyMigrations(db)).resolves.toEqual([]);
   });

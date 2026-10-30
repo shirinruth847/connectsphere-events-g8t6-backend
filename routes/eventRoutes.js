@@ -37,6 +37,8 @@ const {
   getEventVenueOptions,
   getEventVenueAvailability,
   suggestEventVenue,
+  requestVenueBookings,
+  listEventVenueBookings,
 } = require("../controller/venueController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
@@ -84,6 +86,10 @@ const eventVenueReaders = [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER
 router.get("/:id/venue-availability", ...assignedCoordinatorOnly, getEventVenueAvailability);
 router.get("/:id/venue-options", ...eventVenueReaders, getEventVenueOptions);
 router.put("/:id/venue-suggestion", ...coordinatorOnly, requireVisibleEvent, suggestEventVenue);
+// SPM-179: anyone outside the event gets "not found"; the handler refuses
+// related users who are not the assigned coordinator of a PLANNING event.
+router.get("/:id/venue-bookings", ...eventVenueReaders, listEventVenueBookings);
+router.post("/:id/venue-bookings", anySignedInUser, requireVisibleEvent, requestVenueBookings);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.post("/:id/history/viewed", anySignedInUser, requireVisibleEvent, markEventHistoryViewed);
 // SPM-41 clarification threads: another coordinator gets 404; same-organisation

@@ -451,6 +451,7 @@ const getEventHistory = async (req, res, next) => {
       activityModel.findEventHistory(eventId, {
         ...req.pagination,
         audiences: access.historyAudiences,
+        ...(req.user.role === "ORGANISER" ? { organiserView: true } : {}),
         ...(access.historyFields ? { fields: access.historyFields } : {}),
       }),
       activityModel.findLastHistoryView(eventId, req.user.user_id),

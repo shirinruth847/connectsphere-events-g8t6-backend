@@ -2,6 +2,7 @@
 // inside the database functions that make each change, never from here.
 const supabase = require("../config/supabase");
 const { parseAccessibility, eventRequestError } = require("./eventModel");
+const { STATUS_LABELS } = require("../config/eventConstants");
 
 const HISTORY_SELECT = "log_id,user_id,action,details,timestamp,actor_role,changes,audience,actor:user(name)";
 const MAX_LOG_ID = 2147483647;
@@ -18,6 +19,7 @@ const FIELD_ORDER = [
   "accessibilityNeeds",
   "venuePreferences",
   "equipmentRequirements",
+  "technicalSupportNeeds",
   "isRegistrationEnabled",
   "registrationCapacity",
 ];
@@ -67,13 +69,16 @@ const toActorName = (row) => {
   return row.actor ? row.actor.name : null;
 };
 
-const toHistoryEntry = (row) => ({
+const toHistoryEntry = (row, { organiserView = false } = {}) => ({
   historyId: row.log_id,
   action: row.action,
   actor: { userId: row.user_id, name: toActorName(row), role: row.actor_role },
   occurredAt: row.timestamp,
   summary: row.details,
-  changes: toChangeList(row.changes),
+  changes: toChangeList(row.changes).map((change) =>
+    organiserView && change.field === "status"
+      ? { ...change, beforeLabel: STATUS_LABELS[change.before] ?? "Unknown status", afterLabel: STATUS_LABELS[change.after] ?? "Unknown status" }
+      : change),
   audience: row.audience,
 });
 
@@ -86,7 +91,7 @@ const relevantHistoryFilter = (fields) =>
 // assignment records, or the owner's draft history) never leave the database for
 // someone who may not read them (SPM-33 AC8). No audience means no entries.
 // "fields", when given, narrows the history to the portion relevant to the reader.
-const findEventHistory = async (eventId, { limit, cursor = null, audiences = [], fields = null }) => {
+const findEventHistory = async (eventId, { limit, cursor = null, audiences = [], fields = null, organiserView = false }) => {
   const beforeLogId = decodeHistoryCursor(cursor);
   if (audiences.length === 0) return { history: [], nextCursor: null };
 
@@ -104,7 +109,7 @@ const findEventHistory = async (eventId, { limit, cursor = null, audiences = [],
 
   const page = data.slice(0, limit);
   return {
-    history: page.map(toHistoryEntry),
+    history: page.map((row) => toHistoryEntry(row, { organiserView })),
     nextCursor: data.length > limit ? encodeHistoryCursor(page[page.length - 1]) : null,
   };
 };

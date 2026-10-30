@@ -40,11 +40,15 @@ const EVENT_SPECS = {
   coordinatorTwoBusy: { organiser: "organiserB", organisation: "B", coordinator: "coordinatorTwo", status: "CONFIRMED", start: "2027-03-10T10:00:00Z", end: "2027-03-10T12:00:00Z" },
 };
 
+// Each booking lies within its event (Master 6.3, enforced by a trigger since
+// SPM-179): minutes from the event's start. Every booking starts at a
+// different time, so sorting by date has no ties.
 const BOOKING_SPECS = [
-  { event: "registeredConfirmed", status: "REJECTED", start: "2027-03-01T01:00:00Z", end: "2027-03-01T03:00:00Z" },
-  { event: "registeredConfirmed", status: "APPROVED", start: "2027-03-02T01:00:00Z", end: "2027-03-02T03:00:00Z" },
-  { event: "registeredPlanning", status: "APPROVED", start: "2027-03-03T01:00:00Z", end: "2027-03-03T03:00:00Z" },
+  { event: "registeredConfirmed", status: "REJECTED", fromMinute: 0, toMinute: 60 },
+  { event: "registeredConfirmed", status: "APPROVED", fromMinute: 60, toMinute: 120 },
+  { event: "registeredPlanning", status: "APPROVED", fromMinute: 0, toMinute: 60 },
 ];
+const minutesAfter = (iso, minutes) => new Date(Date.parse(iso) + minutes * 60000).toISOString();
 
 const REGISTRATION_SPECS = [
   { event: "registeredConfirmed", status: "REGISTERED" },
@@ -159,10 +163,15 @@ const createAuthFixtures = async (runId, { extraAccounts = [] } = {}) => {
   ));
 
   const events = {};
+  const eventTimes = {};
   for (const [eventIndex, [key, spec]] of Object.entries(EVENT_SPECS).entries()) {
     const isDraft = spec.status === "DRAFT";
     const coordinatorKey = spec.coordinator || "coordinator";
     const coordinatorId = isDraft || spec.unassigned ? null : accounts[coordinatorKey].userId;
+    eventTimes[key] = isDraft ? null : {
+      start: spec.start || new Date(Date.UTC(2027, 2, 1 + eventIndex, 1)).toISOString(),
+      end: spec.end || new Date(Date.UTC(2027, 2, 1 + eventIndex, 3)).toISOString(),
+    };
     events[key] = record("eventIds", await insertOne(
       "event",
       {
@@ -176,8 +185,8 @@ const createAuthFixtures = async (runId, { extraAccounts = [] } = {}) => {
         status: spec.status,
         expected_attendance: 50,
         // event_submitted_fields_check requires these once a request leaves DRAFT.
-        start_datetime: isDraft ? null : spec.start || new Date(Date.UTC(2027, 2, 1 + eventIndex, 1)).toISOString(),
-        end_datetime: isDraft ? null : spec.end || new Date(Date.UTC(2027, 2, 1 + eventIndex, 3)).toISOString(),
+        start_datetime: eventTimes[key]?.start ?? null,
+        end_datetime: eventTimes[key]?.end ?? null,
         preferred_layout_type: isDraft ? null : "THEATRE",
         is_published: Boolean(spec.published),
       },
@@ -200,8 +209,8 @@ const createAuthFixtures = async (runId, { extraAccounts = [] } = {}) => {
         room_id: roomId,
         event_id: events[spec.event],
         requested_by: accounts.coordinator.userId,
-        start_datetime: spec.start,
-        end_datetime: spec.end,
+        start_datetime: minutesAfter(eventTimes[spec.event].start, spec.fromMinute),
+        end_datetime: minutesAfter(eventTimes[spec.event].start, spec.toMinute),
         status: spec.status,
       },
       "booking_id",

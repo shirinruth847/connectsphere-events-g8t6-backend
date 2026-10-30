@@ -880,6 +880,8 @@ Clarification preserves all question/response rounds. Do not start new planning 
 
 After submission, ordinary descriptive/contact changes may be permitted. Date, duration, attendance, venue/layout and equipment changes are significant and must use the change workflow in section 5.7, except when explicitly amended during the clarification loop.
 
+An organiser may provide optional technical-support needs with the event request (SPM-38, clarified by the user on 28 October 2026). These are requirements for the coordinator to review from submission onward, separate from formal technical arrangements. The owner may save them in a private draft and amend them during clarification; coordinators cannot change them through ordinary direct edits. The implementation stores `event.technical_support_needs` (up to 2,000 characters). Backend and frontend fixes are merged to main; migration `20261028120000_spm38_submitted_support_needs` was applied to shared development on 29 October 2026 and passed 12 hosted rollback smoke checks.
+
 New holds, venue bookings and technical requests are created only while the event is in `PLANNING`. A venue replacement or accepted change returns the event to `PLANNING` first, so this rule has no exceptions.
 
 `events.arrangement_version` increases in the same transaction whenever the event's active venue bookings, booking decisions, blocking incidents, technical arrangements or expected attendance change. A safety approval is valid only for the arrangement version it reviewed.

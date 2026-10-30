@@ -11,6 +11,7 @@ const { applyMigrations } = require("../../mongodb/migrate");
 const venuePhotoModel = require("../../model/venuePhotoModel");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
 const { newRunId, createAuthFixtures, cleanupAuthFixtures, recordFixtureIds } = require("../fixtures/authFixtures");
+const { createLifecycleEvent } = require("../fixtures/lifecycleFixtures");
 
 jest.setTimeout(120000);
 
@@ -107,7 +108,11 @@ beforeAll(async () => {
   ].map((document) => JSON.parse(JSON.stringify(document))));
 
   // Another event's booking ends 09:30 + 45 min turnaround = 10:15, inside the event's setup (09:30).
-  await insertBooking(venues.booked.roomId, fixtures.events.coordinatorTwoBusy, "2027-03-10T08:00:00Z", "2027-03-10T09:30:00Z");
+  // Its host event spans the booking, as Master 6.3 requires (SPM-179 trigger).
+  const bookedHost = await createLifecycleEvent(fixtures, {
+    status: "SUBMITTED", coordinator_id: null, start_datetime: "2027-03-10T08:00:00Z", end_datetime: "2027-03-10T09:30:00Z",
+  });
+  await insertBooking(venues.booked.roomId, bookedHost.event_id, "2027-03-10T08:00:00Z", "2027-03-10T09:30:00Z");
   // The event's own booking never conflicts with itself.
   await insertBooking(venues.fits.roomId, eventId, "2027-03-10T10:00:00Z", "2027-03-10T12:00:00Z");
 

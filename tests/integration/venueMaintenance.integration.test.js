@@ -16,12 +16,15 @@ const { applyMigrations } = require("../../mongodb/migrate");
 const { MAX_VENUE_CAPACITY } = require("../../config/venueConstants");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
 const { newRunId, createAuthFixtures, cleanupAuthFixtures, recordFixtureIds } = require("../fixtures/authFixtures");
+const { createLifecycleEvent } = require("../fixtures/lifecycleFixtures");
 
 jest.setTimeout(120000);
 
 const runId = newRunId();
 const prefix = `spm73-${runId}`;
 let fixtures;
+// The confirmed event that holds the upcoming 2030 booking (see addUpcomingBooking).
+let upcomingEventId;
 const sessions = new Map();
 
 const signIn = async (key) => {
@@ -82,12 +85,17 @@ const addUpcomingBooking = async (venueId) => {
     .from("room").insert({ venue_id: venueId, layout_type: "THEATRE", capacity: 100 }).select("room_id").single();
   if (roomError) throw roomError;
   recordFixtureIds(runId, "roomIds", [room.room_id]);
+  // A booking lies within its event (Master 6.3, SPM-179 trigger), so the 2030
+  // booking gets its own confirmed event spanning it.
+  const host = await createLifecycleEvent(fixtures, {
+    status: "CONFIRMED", start_datetime: "2030-01-01T01:00:00Z", end_datetime: "2030-01-01T03:00:00Z",
+  });
+  upcomingEventId = host.event_id;
   const { data: booking, error } = await supabase
     .from("venue_booking")
     .insert({
       room_id: room.room_id,
-      // The fixture event the shared fixtures also book; this booking is in 2030.
-      event_id: fixtures.events.registeredConfirmed,
+      event_id: upcomingEventId,
       requested_by: fixtures.accounts.coordinator.userId,
       start_datetime: "2030-01-01T01:00:00Z",
       end_datetime: "2030-01-01T03:00:00Z",
@@ -100,7 +108,9 @@ const addUpcomingBooking = async (venueId) => {
   return booking.booking_id;
 };
 
-const catalogueIds = async () => (await call("coordinator", "get", "/api/venues")).body.venues.map(({ venueId }) => venueId);
+// The selectable catalogue (in-service venues only) is Venue Staff only since T29;
+// coordinators and Leads choose through the event's venue section.
+const catalogueIds = async () => (await call("venueStaff", "get", "/api/venues")).body.venues.map(({ venueId }) => venueId);
 const requestOptionIds = async () =>
   (await call("organiserA", "get", "/api/events/request-options")).body.venues.map(({ venueId }) => venueId);
 
@@ -255,7 +265,7 @@ describe("SPM-73 venue catalogue maintenance", () => {
 
     // Bookings are kept; the venue stays in the records but cannot be chosen.
     const { count } = await supabase.from("venue_booking").select("booking_id", { count: "exact", head: true })
-      .eq("event_id", fixtures.events.registeredConfirmed).eq("status", "PENDING").gte("start_datetime", "2030-01-01T00:00:00Z");
+      .eq("event_id", upcomingEventId).eq("status", "PENDING").gte("start_datetime", "2030-01-01T00:00:00Z");
     expect(count).toBe(1);
     expect(await catalogueIds()).not.toContain(marina.venueId);
     expect(await requestOptionIds()).not.toContain(marina.venueId);
