@@ -13,6 +13,7 @@ const { getMongoDb, closeMongoDb } = require("../../config/mongodb");
 const { applyMigrations } = require("../../mongodb/migrate");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
 const { newRunId, createAuthFixtures, cleanupAuthFixtures, recordFixtureIds } = require("../fixtures/authFixtures");
+const { createLifecycleEvent } = require("../fixtures/lifecycleFixtures");
 
 jest.setTimeout(180000);
 
@@ -26,6 +27,8 @@ const venues = {};
 const rooms = {};
 const sessions = new Map();
 const staffNotificationKeys = [];
+// The approved booking's event and its still-pending sibling (SPM-186 AC1-AC3).
+let approvedPair;
 
 const signIn = async (key) => {
   if (!sessions.has(key)) {
@@ -65,12 +68,18 @@ const insertVenue = async (label, row) => {
   rooms[label] = room.room_id;
 };
 
-const insertBooking = async (venueLabel, eventKey, start, end, overrides = {}) => {
+// Each scenario books within its own event (Master 6.3, SPM-179 trigger), and
+// sibling bookings share it. Events are created as PLANNING by organiser A with
+// the fixture coordinator; no two of them overlap in time.
+const hostEvent = async (start, end, overrides = {}) =>
+  (await createLifecycleEvent(fixtures, { title: `${prefix} host`, start_datetime: start, end_datetime: end, ...overrides })).event_id;
+
+const insertBooking = async (venueLabel, eventId, start, end, overrides = {}) => {
   const { data, error } = await supabase
     .from("venue_booking")
     .insert({
       room_id: rooms[venueLabel],
-      event_id: fixtures.events[eventKey],
+      event_id: eventId,
       requested_by: fixtures.accounts.coordinator.userId,
       start_datetime: start,
       end_datetime: end,
@@ -92,9 +101,9 @@ const bookingRow = async (bookingId) => {
   return data;
 };
 
-const eventRow = async (eventKey) => {
+const eventRow = async (eventId) => {
   const { data, error } = await supabase
-    .from("event").select("status,arrangement_version").eq("event_id", fixtures.events[eventKey]).single();
+    .from("event").select("status,arrangement_version").eq("event_id", eventId).single();
   if (error) throw error;
   return data;
 };
@@ -153,9 +162,10 @@ afterAll(async () => {
 
 describe("SPM-186 approve a venue booking", () => {
   test("[SPM-186-AC1][SPM-186-AC2] should_approve_one_booking_record_who_and_when_and_leave_the_others", async () => {
-    const target = await insertBooking("Main", "reassignable", "2027-03-10T10:00:00Z", "2027-03-10T11:00:00Z");
-    const sibling = await insertBooking("Closing", "reassignable", "2027-03-10T11:00:00Z", "2027-03-10T12:00:00Z");
-    const before = await eventRow("reassignable");
+    const eventId = await hostEvent("2027-03-09T10:00:00Z", "2027-03-09T12:00:00Z");
+    const target = await insertBooking("Main", eventId, "2027-03-09T10:00:00Z", "2027-03-09T11:00:00Z");
+    const sibling = await insertBooking("Closing", eventId, "2027-03-09T11:00:00Z", "2027-03-09T12:00:00Z");
+    const before = await eventRow(eventId);
 
     const response = await approve(target);
 
@@ -175,9 +185,10 @@ describe("SPM-186 approve a venue booking", () => {
     expect(row.reviewed_at).not.toBeNull();
     expect((await bookingRow(sibling)).status).toBe("PENDING");
 
-    const after = await eventRow("reassignable");
+    const after = await eventRow(eventId);
     expect(after.status).toBe("PLANNING");
     expect(after.arrangement_version).toBe(before.arrangement_version + 1);
+    approvedPair = { eventId, sibling };
 
     const sent = await notificationsFor(`VENUE_BOOKING_APPROVED:${target}:`);
     expect(sent.map(({ action_key: key, recipients }) => [key.split(":").pop(), recipients.map(({ recipient_id: id }) => id)])).toEqual([
@@ -187,15 +198,15 @@ describe("SPM-186 approve a venue booking", () => {
   });
 
   test("[SPM-186-AC3] should_drop_the_booking_from_the_pending_list_and_keep_the_event's_other_pending_bookings", async () => {
-    const list = await call("venueStaff", "get", `/api/venues/bookings?status=PENDING&eventId=${fixtures.events.reassignable}`);
+    const list = await call("venueStaff", "get", `/api/venues/bookings?status=PENDING&eventId=${approvedPair.eventId}`);
 
     expect(list.status).toBe(200);
-    expect(list.body.bookings.every(({ status }) => status === "PENDING")).toBe(true);
-    expect(list.body.bookings.length).toBeGreaterThanOrEqual(1);
+    expect(list.body.bookings.map(({ bookingId }) => bookingId)).toEqual([approvedPair.sibling]);
   });
 
   test("[SPM-186-AC5] should_apply_only_one_of_two_simultaneous_decisions", async () => {
-    const target = await insertBooking("Main", "reassignable", "2027-03-10T06:00:00Z", "2027-03-10T07:00:00Z");
+    const eventId = await hostEvent("2027-03-11T06:00:00Z", "2027-03-11T07:00:00Z");
+    const target = await insertBooking("Main", eventId, "2027-03-11T06:00:00Z", "2027-03-11T07:00:00Z");
 
     const responses = await Promise.all([approve(target), reject(target, "Double-booked by phone")]);
 
@@ -207,7 +218,8 @@ describe("SPM-186 approve a venue booking", () => {
   });
 
   test("[SPM-186-AC4] should_refuse_approving_a_booking_that_was_already_decided", async () => {
-    const target = await insertBooking("Small", "reassignable", "2027-03-10T13:00:00Z", "2027-03-10T14:00:00Z", { expected_attendance: 20 });
+    const eventId = await hostEvent("2027-03-12T13:00:00Z", "2027-03-12T14:00:00Z");
+    const target = await insertBooking("Small", eventId, "2027-03-12T13:00:00Z", "2027-03-12T14:00:00Z", { expected_attendance: 20 });
     expect((await approve(target)).status).toBe(200);
 
     const again = await approve(target, {});
@@ -218,9 +230,14 @@ describe("SPM-186 approve a venue booking", () => {
 
   test("[Master 5.4.1] should_refuse_an_overlap_within_turnaround_and_allow_the_adjacent_start", async () => {
     // Main is 30 min setup and 45 min turnaround: 10:00-12:00 occupies [09:30, 12:45).
-    const first = await insertBooking("Main", "registeredPlanning", "2027-05-01T10:00:00Z", "2027-05-01T12:00:00Z");
-    const overlapping = await insertBooking("Main", "reassignable", "2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
-    const adjacent = await insertBooking("Main", "reassignable", "2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z");
+    // One active booking per event and venue (SPM-179), so each booking has its
+    // own event; the two afternoon events overlap, so they have different coordinators.
+    const morning = await hostEvent("2027-05-01T10:00:00Z", "2027-05-01T12:00:00Z");
+    const late = await hostEvent("2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
+    const later = await hostEvent("2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z", { coordinator_id: fixtures.accounts.coordinatorTwo.userId });
+    const first = await insertBooking("Main", morning, "2027-05-01T10:00:00Z", "2027-05-01T12:00:00Z");
+    const overlapping = await insertBooking("Main", late, "2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
+    const adjacent = await insertBooking("Main", later, "2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z");
     expect((await approve(first)).status).toBe(200);
 
     const conflict = await approve(overlapping);
@@ -230,11 +247,14 @@ describe("SPM-186 approve a venue booking", () => {
   });
 
   test.each([
-    ["NoMinutes", "reassignable", {}, "VENUE_BUFFERS_NOT_SET"],
-    ["Small", "reassignable", { expected_attendance: 41 }, "VENUE_CAPACITY_EXCEEDED"],
-    ["Main", "registeredConfirmed", {}, "EVENT_NOT_IN_PLANNING"],
-  ])("should_refuse_approval_at_%s_for_%s_with_%#", async (venueLabel, eventKey, overrides, code) => {
-    const target = await insertBooking(venueLabel, eventKey, "2027-06-01T10:00:00Z", "2027-06-01T11:00:00Z", overrides);
+    ["NoMinutes", "PLANNING", {}, "VENUE_BUFFERS_NOT_SET"],
+    ["Small", "PLANNING", { expected_attendance: 41 }, "VENUE_CAPACITY_EXCEEDED"],
+    ["Main", "CONFIRMED", {}, "EVENT_NOT_IN_PLANNING"],
+  ])("should_refuse_approval_at_%s_for_a_%s_event_with_%#", async (venueLabel, status, overrides, code) => {
+    // Each case has its own day, so the events never overlap.
+    const day = { NoMinutes: "2027-06-01", Small: "2027-06-02", Main: "2027-06-03" }[venueLabel];
+    const eventId = await hostEvent(`${day}T10:00:00Z`, `${day}T11:00:00Z`, { status });
+    const target = await insertBooking(venueLabel, eventId, `${day}T10:00:00Z`, `${day}T11:00:00Z`, overrides);
 
     const response = await approve(target);
 
@@ -244,7 +264,8 @@ describe("SPM-186 approve a venue booking", () => {
   });
 
   test("[SPM-181-AC7] should_refuse_other_roles_and_hide_unknown_bookings", async () => {
-    const target = await insertBooking("Main", "reassignable", "2027-07-01T10:00:00Z", "2027-07-01T11:00:00Z");
+    const eventId = await hostEvent("2027-07-01T10:00:00Z", "2027-07-01T11:00:00Z");
+    const target = await insertBooking("Main", eventId, "2027-07-01T10:00:00Z", "2027-07-01T11:00:00Z");
 
     expect((await call("coordinator", "post", `/api/venues/bookings/${target}/approve`, {})).status).toBe(403);
     expect((await call("organiserA", "post", `/api/venues/bookings/${target}/reject`, { reason: "x", expectedStatus: "PENDING" })).status).toBe(403);
@@ -255,7 +276,8 @@ describe("SPM-186 approve a venue booking", () => {
 
 describe("SPM-189 reject a venue booking", () => {
   test("[SPM-189-AC2] should_not_save_a_rejection_without_a_reason", async () => {
-    const target = await insertBooking("Main", "reassignable", "2027-08-01T10:00:00Z", "2027-08-01T11:00:00Z");
+    const eventId = await hostEvent("2027-08-01T10:00:00Z", "2027-08-01T11:00:00Z");
+    const target = await insertBooking("Main", eventId, "2027-08-01T10:00:00Z", "2027-08-01T11:00:00Z");
 
     const response = await reject(target, "   ");
 
@@ -265,8 +287,9 @@ describe("SPM-189 reject a venue booking", () => {
   });
 
   test("[SPM-189-AC3][SPM-189-AC4][SPM-189-AC5] should_record_the_reason_with_alternatives_and_leave_the_event_and_other_bookings", async () => {
-    const target = await insertBooking("Main", "reassignable", "2027-08-02T10:00:00Z", "2027-08-02T11:00:00Z");
-    const sibling = await insertBooking("Closing", "reassignable", "2027-08-02T11:00:00Z", "2027-08-02T12:00:00Z");
+    const eventId = await hostEvent("2027-08-02T10:00:00Z", "2027-08-02T12:00:00Z");
+    const target = await insertBooking("Main", eventId, "2027-08-02T10:00:00Z", "2027-08-02T11:00:00Z");
+    const sibling = await insertBooking("Closing", eventId, "2027-08-02T11:00:00Z", "2027-08-02T12:00:00Z");
     const reason = "Projector bay closed that week. Alternatives: Hall B on 3 Aug, or 9 Aug here.";
 
     const response = await reject(target, reason);
@@ -276,7 +299,7 @@ describe("SPM-189 reject a venue booking", () => {
     const row = await bookingRow(target);
     expect(row).toEqual(expect.objectContaining({ status: "REJECTED", rejection_reason: reason, reviewed_by: fixtures.accounts.venueStaff.userId }));
     expect((await bookingRow(sibling)).status).toBe("PENDING");
-    expect((await eventRow("reassignable")).status).toBe("PLANNING");
+    expect((await eventRow(eventId)).status).toBe("PLANNING");
 
     const [coordinatorNotice, ownerNotice] = await notificationsFor(`VENUE_BOOKING_REJECTED:${target}:PENDING:`);
     expect(coordinatorNotice.message).toContain(reason);
@@ -284,7 +307,8 @@ describe("SPM-189 reject a venue booking", () => {
   });
 
   test("[SPM-189-AC6] should_refuse_rejecting_a_booking_that_is_already_rejected", async () => {
-    const target = await insertBooking("Main", "reassignable", "2027-08-03T10:00:00Z", "2027-08-03T11:00:00Z");
+    const eventId = await hostEvent("2027-08-03T10:00:00Z", "2027-08-03T11:00:00Z");
+    const target = await insertBooking("Main", eventId, "2027-08-03T10:00:00Z", "2027-08-03T11:00:00Z");
     expect((await reject(target, "No staff that day")).status).toBe(200);
 
     const again = await reject(target, "Second attempt", "PENDING");
@@ -294,14 +318,15 @@ describe("SPM-189 reject a venue booking", () => {
   });
 
   test("[T32] should_reject_an_approved_future_booking_and_keep_the_confirmed_event", async () => {
-    const target = await insertBooking("Closing", "registeredConfirmed", "2027-09-01T10:00:00Z", "2027-09-01T11:00:00Z", { status: "APPROVED" });
-    const before = await eventRow("registeredConfirmed");
+    const eventId = await hostEvent("2027-09-01T10:00:00Z", "2027-09-01T11:00:00Z", { status: "CONFIRMED" });
+    const target = await insertBooking("Closing", eventId, "2027-09-01T10:00:00Z", "2027-09-01T11:00:00Z", { status: "APPROVED" });
+    const before = await eventRow(eventId);
 
     const response = await reject(target, "Emergency roof repair", "APPROVED");
 
     expect(response.status).toBe(200);
     expect((await bookingRow(target)).status).toBe("REJECTED");
-    const after = await eventRow("registeredConfirmed");
+    const after = await eventRow(eventId);
     expect(after.status).toBe("CONFIRMED");
     expect(after.arrangement_version).toBe(before.arrangement_version + 1);
     const sent = await notificationsFor(`VENUE_BOOKING_REJECTED:${target}:APPROVED:`);
@@ -310,9 +335,11 @@ describe("SPM-189 reject a venue booking", () => {
   });
 
   test("[T32] should_refuse_rejecting_an_approved_booking_that_has_started", async () => {
-    const target = await insertBooking("Small", "registeredPlanning", "2020-01-01T10:00:00Z", "2099-01-01T11:00:00Z", {
-      status: "APPROVED", expected_attendance: 20,
-    });
+    // Started half an hour ago and still running.
+    const start = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const end = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const eventId = await hostEvent(start, end);
+    const target = await insertBooking("Small", eventId, start, end, { status: "APPROVED", expected_attendance: 20 });
 
     const response = await reject(target, "Too late", "APPROVED");
 
@@ -323,9 +350,10 @@ describe("SPM-189 reject a venue booking", () => {
 
 describe("Venue taken out of service with upcoming bookings (Master 5.4.4, T32)", () => {
   test("should_warn_with_the_affected_events_then_keep_bookings_and_alert_coordinators_and_organisers", async () => {
-    const pending = await insertBooking("Closing", "reassignable", "2027-10-01T10:00:00Z", "2027-10-01T11:00:00Z");
+    const eventId = await hostEvent("2027-10-01T10:00:00Z", "2027-10-01T11:00:00Z");
+    const pending = await insertBooking("Closing", eventId, "2027-10-01T10:00:00Z", "2027-10-01T11:00:00Z");
     const { data: venue } = await supabase.from("venue").select("version").eq("venue_id", venues.Closing).single();
-    const before = await eventRow("reassignable");
+    const before = await eventRow(eventId);
 
     const warning = await call("venueStaff", "put", `/api/venues/${venues.Closing}/status`, {
       status: "UNDER_MAINTENANCE", reason: "Air-conditioning failure", version: venue.version,
@@ -334,7 +362,7 @@ describe("Venue taken out of service with upcoming bookings (Master 5.4.4, T32)"
     expect(warning.status).toBe(409);
     expect(warning.body.code).toBe("VENUE_HAS_UPCOMING_BOOKINGS");
     expect(warning.body.affectedEvents).toEqual(expect.arrayContaining([
-      expect.objectContaining({ eventId: fixtures.events.reassignable, requestId: expect.stringMatching(/^REQ-\d{6}$/) }),
+      expect.objectContaining({ eventId, requestId: expect.stringMatching(/^REQ-\d{6}$/) }),
     ]));
     // Venue Staff see which events are affected, never organiser or participant details (Master 4.2).
     for (const item of warning.body.affectedEvents) {
@@ -351,11 +379,11 @@ describe("Venue taken out of service with upcoming bookings (Master 5.4.4, T32)"
     staffNotificationKeys.push(`VENUE_UNAVAILABLE:${venues.Closing}:${confirmed.body.venue.version}:STAFF`);
 
     expect((await bookingRow(pending)).status).toBe("PENDING");
-    const after = await eventRow("reassignable");
+    const after = await eventRow(eventId);
     expect(after.status).toBe("PLANNING");
     expect(after.arrangement_version).toBe(before.arrangement_version + 1);
 
-    const sent = await notificationsFor(`VENUE_UNAVAILABLE:${venues.Closing}:${confirmed.body.venue.version}:${fixtures.events.reassignable}:`);
+    const sent = await notificationsFor(`VENUE_UNAVAILABLE:${venues.Closing}:${confirmed.body.venue.version}:${eventId}:`);
     expect(sent.map(({ action_key: key, recipients }) => [key.split(":").pop(), recipients.map(({ recipient_id: id }) => id)])).toEqual([
       ["COORDINATOR", [fixtures.accounts.coordinator.userId]],
       ["OWNER", [fixtures.accounts.organiserA.userId]],
@@ -365,7 +393,8 @@ describe("Venue taken out of service with upcoming bookings (Master 5.4.4, T32)"
   });
 
   test("should_refuse_approving_a_pending_booking_at_a_venue_out_of_service", async () => {
-    const target = await insertBooking("Closing", "reassignable", "2027-10-02T10:00:00Z", "2027-10-02T11:00:00Z");
+    const eventId = await hostEvent("2027-10-02T10:00:00Z", "2027-10-02T11:00:00Z");
+    const target = await insertBooking("Closing", eventId, "2027-10-02T10:00:00Z", "2027-10-02T11:00:00Z");
 
     const response = await approve(target);
 
