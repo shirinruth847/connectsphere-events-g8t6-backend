@@ -22,6 +22,13 @@ const {
 const { MAX_INTEGER } = require("../validators/eventValidator");
 const { readIdempotencyKey, IDEMPOTENCY_KEY_MESSAGE } = require("../middleware/validate");
 const { validatePhotoUpload, validatePhotoEdit, parsePhotoId, PHOTO_TYPES } = require("../validators/venuePhotoValidator");
+const {
+  validateBlockCreate,
+  validateBlockChange,
+  validateBlockLift,
+  parseBlockId,
+  BLOCK_MESSAGES,
+} = require("../validators/venueBlockValidator");
 
 const BOOKING_NOT_FOUND = { error: "Venue booking not found.", code: "BOOKING_NOT_FOUND" };
 const EVENT_NOT_FOUND = { error: "Event not found.", code: "EVENT_NOT_FOUND" };
@@ -541,7 +548,154 @@ const listEventVenueBookings = async (req, res, next) => {
   }
 };
 
+// ---------- operational blocks and restoration (SPM-195, Venue Staff) ----------
+
+// [status, message]. The database re-checks the Venue Staff role in each write.
+const BLOCK_ERRORS = Object.freeze({
+  FORBIDDEN: [403, DOMAIN_ERRORS.FORBIDDEN[1]],
+  VENUE_NOT_FOUND: [404, DOMAIN_ERRORS.VENUE_NOT_FOUND[1]],
+  BLOCK_NOT_FOUND: [404, "Block not found."],
+  INCIDENT_NOT_FOUND: [404, "Affected booking not found."],
+  INVALID_VENUE_BLOCK: [400, "Please correct the highlighted fields."],
+  IDEMPOTENCY_KEY_REUSED: [409, DOMAIN_ERRORS.IDEMPOTENCY_KEY_REUSED[1]],
+  IDEMPOTENCY_IN_PROGRESS: [409, "This request is still being processed. Try again shortly."],
+  VENUE_LOCK_TIMEOUT: [409, "Another change to this venue or event is in progress. Try again."],
+  BLOCK_NOT_ACTIVE: [409, "This block has been lifted. Reload the venue."],
+  BLOCK_CANNOT_BE_EXTENDED: [409, BLOCK_MESSAGES.extend],
+  BLOCK_VERSION_CONFLICT: [409, "This block was changed after you loaded it. Reload it, then try again."],
+  INCIDENT_STILL_BLOCKED: [409, "Part of this booking's time, including setup and turnaround, is still blocked."],
+  INCIDENT_NOT_RESTORABLE: [409, "This booking can no longer be restored."],
+  VENUE_OUT_OF_SERVICE: [409, "This venue is out of service, so the booking cannot be restored."],
+  // Only the confirmed failure response may promise that nothing changed.
+  VENUE_CALENDAR_OUTCOME_UNKNOWN: [503, "The venue calendar outcome could not be confirmed. Reload before taking another action; reconciliation may be required."],
+  VENUE_CALENDAR_UNAVAILABLE: [503, "The venue calendar cannot be read or saved right now, so nothing was changed. Try again shortly."],
+  VENUE_BOOKINGS_UNAVAILABLE: [503, "Venue blocks cannot be saved right now. Try again shortly."],
+});
+
+const handleBlockError = (error, res, next) => {
+  if (error.name !== "VenueError" || !BLOCK_ERRORS[error.code]) return next(error);
+  const [status, message] = BLOCK_ERRORS[error.code];
+  const extra = {};
+  if (error.code === "BLOCK_CANNOT_BE_EXTENDED") extra.fields = { end: message };
+  if (error.blocks) extra.blocks = error.blocks;
+  return sendError(res, status, error.code, message, extra);
+};
+
+const readVenueParam = (req, res) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) venueNotFound(res);
+  return venueId;
+};
+
+// GET /api/venues/:venueId/blocks — current and upcoming blocks with their
+// affected bookings and holds.
+const listVenueBlocks = async (req, res, next) => {
+  const venueId = readVenueParam(req, res);
+  if (!venueId) return undefined;
+  try {
+    return res.status(200).json(await venueModel.listVenueBlocks(venueId));
+  } catch (err) {
+    return handleBlockError(err, res, next);
+  }
+};
+
+const blockRecordedMessage = (affected) => {
+  if (!affected) return "Block recorded. No bookings or holds are affected.";
+  const subject = affected === 1 ? "One booking or hold is" : `${affected} bookings or holds are`;
+  return `Block recorded. ${subject} affected; their coordinators have been told.`;
+};
+
+// POST /api/venues/:venueId/blocks — body { reason, start, end, note } plus an
+// Idempotency-Key header. 201 with the block and its incidents; 200 for a replay.
+const createVenueBlock = async (req, res, next) => {
+  const venueId = readVenueParam(req, res);
+  if (!venueId) return undefined;
+  const { block, fields } = validateBlockCreate(req.body);
+  const allFields = { ...(fields || {}) };
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey) allFields.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  if (hasErrors(allFields)) return validationFailed(res, allFields);
+
+  try {
+    const result = await venueModel.createVenueBlock({ actorId: req.user.user_id, venueId, block, idempotencyKey });
+    return res.status(result.replayed ? 200 : 201).json({ message: blockRecordedMessage(result.incidents.length), ...result });
+  } catch (err) {
+    return handleBlockError(err, res, next);
+  }
+};
+
+const readBlockParams = (req, res) => {
+  const venueId = parseVenueId(req.params.venueId);
+  const blockId = parseBlockId(req.params.blockId);
+  if (!venueId) {
+    venueNotFound(res);
+    return null;
+  }
+  if (!blockId) {
+    sendError(res, 404, "BLOCK_NOT_FOUND", BLOCK_ERRORS.BLOCK_NOT_FOUND[1]);
+    return null;
+  }
+  return { venueId, blockId };
+};
+
+const sendBlockChange = (res, result, done) => res.status(200).json({
+  message: result.changed ? done : "No change: the block already matches.",
+  ...result,
+});
+
+// PUT /api/venues/:venueId/blocks/:blockId — body { start, end, version }.
+// Only a shorter block is accepted (AC9).
+const shortenVenueBlock = async (req, res, next) => {
+  const params = readBlockParams(req, res);
+  if (!params) return undefined;
+  const { change, fields } = validateBlockChange(req.body);
+  if (fields) return validationFailed(res, fields);
+  try {
+    const result = await venueModel.changeVenueBlock({ actorId: req.user.user_id, ...params, change });
+    return sendBlockChange(res, result, "Block shortened.");
+  } catch (err) {
+    return handleBlockError(err, res, next);
+  }
+};
+
+// POST /api/venues/:venueId/blocks/:blockId/lift — body { version }.
+const liftVenueBlock = async (req, res, next) => {
+  const params = readBlockParams(req, res);
+  if (!params) return undefined;
+  const { lift, fields } = validateBlockLift(req.body);
+  if (fields) return validationFailed(res, fields);
+  try {
+    const result = await venueModel.changeVenueBlock({ actorId: req.user.user_id, ...params, lift });
+    return sendBlockChange(res, result, "Block lifted.");
+  } catch (err) {
+    return handleBlockError(err, res, next);
+  }
+};
+
+// POST /api/venues/incidents/:incidentId/restore — Idempotency-Key header.
+// 200 with the resolved incident; a resolved incident is returned unchanged.
+const restoreVenueIncident = async (req, res, next) => {
+  const incidentId = parseId(req.params.incidentId);
+  if (!incidentId) return sendError(res, 404, "INCIDENT_NOT_FOUND", BLOCK_ERRORS.INCIDENT_NOT_FOUND[1]);
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey) return validationFailed(res, { idempotencyKey: IDEMPOTENCY_KEY_MESSAGE });
+  try {
+    const result = await venueModel.restoreVenueIncident({ actorId: req.user.user_id, incidentId, idempotencyKey });
+    return res.status(200).json({
+      message: result.changed ? "Booking restored. The coordinator and organiser have been told." : "This booking was already restored.",
+      ...result,
+    });
+  } catch (err) {
+    return handleBlockError(err, res, next);
+  }
+};
+
 module.exports = {
+  listVenueBlocks,
+  createVenueBlock,
+  shortenVenueBlock,
+  liftVenueBlock,
+  restoreVenueIncident,
   requestVenueBookings,
   listEventVenueBookings,
   getEventVenueAvailability,

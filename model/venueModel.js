@@ -1,3 +1,4 @@
+const crypto = require("node:crypto");
 const supabase = require("../config/supabase");
 const { getVenueLockPool } = require("../config/venueLockDatabase");
 const venueDetailModel = require("./venueDetailModel");
@@ -1119,7 +1120,11 @@ const findEventBookings = async (eventId) => {
   const bookings = bookingResult.data || [];
   if (!event || event.status === EVENT_STATUS.DRAFT || !bookings.length) return null;
 
-  return { event: toBookingEvent(event), bookings: bookings.map(toBookingDetail) };
+  return {
+    event: toBookingEvent(event),
+    // SPM-195: an affected booking shows its block and the restore action (AC9).
+    bookings: await attachBookingIncidents(eventId, bookings.map(toBookingDetail), INCIDENT_AUDIENCE.VENUE_STAFF),
+  };
 };
 
 const findVenueBooking = async (bookingId) => {
@@ -1197,14 +1202,26 @@ const parseErrorDetail = (detail) => {
   }
 };
 
-const toBookingRequestError = (error) => {
+// Failures every venue lock transaction maps the same way: a VenueError as it
+// is, a lock clash as a retryable 409, an ended session as 503. Null otherwise.
+const toLockFailure = (error) => {
   if (error?.name === "VenueError") return error;
   if (RETRYABLE_LOCK_CODES.has(error?.code)) return venueError("VENUE_LOCK_TIMEOUT");
   // Class 08 is a connection exception.
   if (SESSION_ENDED_CODES.has(error?.code) || String(error?.code ?? "").startsWith("08")) {
     return venueError("VENUE_BOOKINGS_UNAVAILABLE");
   }
-  if ((error?.code === "P0001" || error?.code === "P0002") && BOOKING_REQUEST_ERRORS.has(error.message)) {
+  return null;
+};
+
+// A business refusal raised by a database function: P0001/P0002 with a known MESSAGE.
+const isDatabaseRefusal = (error, knownMessages) =>
+  (error?.code === "P0001" || error?.code === "P0002") && knownMessages.has(error.message);
+
+const toBookingRequestError = (error) => {
+  const lockFailure = toLockFailure(error);
+  if (lockFailure) return lockFailure;
+  if (isDatabaseRefusal(error, BOOKING_REQUEST_ERRORS)) {
     const { index, venueId, conflicts, capacity, expectedAttendance } = parseErrorDetail(error.detail);
     return venueError(error.message, { index, venueId, conflicts, capacity, expectedAttendance });
   }
@@ -1312,6 +1329,24 @@ const toBookingRequestResult = (result) => ({
   })),
 });
 
+// Undo steps run newest first. Failure is logged and surfaced as an uncertain
+// calendar outcome, rather than claiming the original action changed nothing.
+const undoMongoWrites = async (undoSteps) => {
+  let complete = true;
+  for (const undo of [...undoSteps].reverse()) {
+    try {
+      await undo();
+    } catch (error) {
+      complete = false;
+      console.error("[venue-lock] could not undo a MongoDB write after rollback", { code: error?.code, name: error?.name });
+    }
+  }
+  return complete;
+};
+
+// The jsonb result of one `SELECT public.fn(...) AS result` on the lock client.
+const selectResult = async (client, sql, params) => (await client.query(sql, params)).rows[0].result;
+
 // Runs work(client) in one transaction on one client of the venue lock
 // connection (Master 7.4, T33), with a short lock_timeout. Commits only when
 // work resolves; otherwise rolls back and rethrows. A client whose rollback
@@ -1345,14 +1380,27 @@ const withVenueLockTransaction = async (work) => {
   };
   client.on("error", onConnectionError);
 
+  // MongoDB writes made under the lock register an undo (SPM-195). It runs when
+  // PostgreSQL certainly did not commit: work failed, or the server refused the
+  // COMMIT. A COMMIT lost with its connection may have landed, so nothing is
+  // undone; a retry with the same Idempotency-Key replays or completes it.
+  const undoSteps = [];
+  const transaction = { onRollback: (undo) => undoSteps.push(undo) };
+  let committing = false;
+
   let discardClient = false;
   try {
     await client.query("BEGIN");
     await client.query(`SET LOCAL lock_timeout = '${VENUE_LOCK_TIMEOUT}'`);
-    const result = await work(client);
+    const result = await work(client, transaction);
+    committing = true;
     await client.query("COMMIT");
     return result;
   } catch (error) {
+    const serverRefusedCommit = /^[0-9A-Z]{5}$/.test(String(error?.code ?? "")) && !String(error.code).startsWith("08");
+    const outcomeUnknown = committing && (connectionLost || !serverRefusedCommit);
+    // Undo before releasing the venue lock whenever the transaction is still open.
+    const recovered = outcomeUnknown || await undoMongoWrites(undoSteps);
     if (connectionLost) {
       discardClient = true;
     } else {
@@ -1362,6 +1410,7 @@ const withVenueLockTransaction = async (work) => {
         discardClient = true;
       }
     }
+    if (!recovered) throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
     // PostgreSQL rolls back a transaction whose connection is gone. A COMMIT
     // that was in flight may still have landed, so the answer is "try again":
     // the same Idempotency-Key then replays a saved request.
@@ -1383,17 +1432,17 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
 
   try {
     const result = await withVenueLockTransaction(async (client) => {
-      const started = (await client.query(
+      const started = await selectResult(client,
         "SELECT public.begin_venue_booking_request($1, $2, $3::integer[], $4, $5) AS result",
         [actorId, eventId, venueIds, idempotencyKey, requestHash]
-      )).rows[0].result;
+      );
       if (started.replay) return started.replay;
 
       const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || []);
-      return (await client.query(
+      return selectResult(client,
         "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
         [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
-      )).rows[0].result;
+      );
     });
     return toBookingRequestResult(result);
   } catch (error) {
@@ -1456,10 +1505,591 @@ const listEventVenueBookings = async (eventId) => {
   // alone would make the form send a second primary, which is refused.
   const active = bookings.filter((booking) => ACTIVE_BOOKING_STATUSES.includes(booking.status));
   if (active.length === 1 && !active[0].isPrimary) active[0].isPrimary = true;
-  return bookings;
+  return attachBookingIncidents(eventId, bookings, INCIDENT_AUDIENCE.COORDINATOR);
+};
+
+// ---------- operational blocks and restoration (SPM-195) ----------
+
+// Business refusals raised by the SPM-195 database functions.
+const VENUE_BLOCK_ERRORS = new Set([
+  "FORBIDDEN",
+  "VENUE_NOT_FOUND",
+  "INVALID_VENUE_BLOCK",
+  "IDEMPOTENCY_KEY_REUSED",
+  "IDEMPOTENCY_IN_PROGRESS",
+  "AFFECTED_SET_CHANGED",
+  "INCIDENT_NOT_FOUND",
+  "INCIDENT_NOT_RESTORABLE",
+  "VENUE_OUT_OF_SERVICE",
+]);
+// Operations that start from a venue lock the affected events first (Master 7).
+// When the set grows between the first read and the locks, the transaction is
+// rolled back and run again with the larger set, a bounded number of times.
+const MAX_LOCK_ATTEMPTS = 3;
+
+const INCIDENT_AUDIENCE = Object.freeze({ COORDINATOR: "COORDINATOR", VENUE_STAFF: "VENUE_STAFF" });
+const INCIDENT_STATUS_LABELS = Object.freeze({ OPEN: "Open", RESOLVED: "Resolved" });
+const INCIDENT_RESOLUTION_LABELS = Object.freeze({
+  RESTORED: "Booking restored",
+  REPLACED: "Venue replaced",
+  RELEASED: "Booking released",
+  EVENT_CANCELLED: "Event cancelled",
+});
+const BLOCK_STATUS_LABELS = Object.freeze({ ACTIVE: "Active", LIFTED: "Lifted" });
+// Whether an open incident's booking can be restored now, per audience (AC7, AC9).
+// "ended": the booking or hold no longer reserves the venue (an expired hold,
+// before the expiry job closes its incident), so it can never be restored.
+const RESTORE_LABELS = Object.freeze({
+  [INCIDENT_AUDIENCE.VENUE_STAFF]: {
+    true: "Can be restored",
+    false: "Venue still blocked",
+    null: "Availability not checked",
+    ended: "Booking or hold has ended",
+  },
+  [INCIDENT_AUDIENCE.COORDINATOR]: {
+    true: "The venue is free again. Waiting for Venue Staff to restore the booking.",
+    false: "Waiting for the venue to become free.",
+    null: "Availability not checked.",
+    ended: "The booking or hold has ended, so it cannot be restored.",
+  },
+});
+const ACTIVE_HOLD_OR_BOOKING = new Set(ACTIVE_BOOKING_STATUSES);
+
+// Backend labels; an unknown code is shown as itself.
+const blockReasonLabel = (reason) => venueConflictModel.BLOCK_REASON_LABELS[reason] || reason;
+const incidentStatusLabel = (status) => INCIDENT_STATUS_LABELS[status] || status;
+const incidentResolutionLabel = (resolution) => (resolution ? INCIDENT_RESOLUTION_LABELS[resolution] || resolution : null);
+
+const toVenueBlockError = (error) => {
+  const lockFailure = toLockFailure(error);
+  if (lockFailure) return lockFailure;
+  return isDatabaseRefusal(error, VENUE_BLOCK_ERRORS) ? venueError(error.message) : error;
+};
+
+// Every MongoDB read or write in a block flow: when MongoDB fails, nothing is
+// saved in either store (Master 7.4 step 6, AC11).
+const calendarCall = async (operation) => {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error?.name === "VenueError") throw error;
+    console.warn("[venue-block] MongoDB unavailable", { code: error?.code, name: error?.name });
+    throw venueError("VENUE_CALENDAR_UNAVAILABLE");
+  }
+};
+
+// Acknowledgement can be lost after persistence. Read the attempt's private
+// ownership token on the primary before deciding the PostgreSQL outcome.
+const writeCalendarBlock = async (identity, write) => {
+  try {
+    return await write();
+  } catch (error) {
+    try {
+      if (await venueCalendarModel.ownsBlockWrite(identity)) {
+        const saved = await venueCalendarModel.findCalendarEntry(identity.blockId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS });
+        if (saved) return saved;
+      }
+    } catch {
+      // The registered, token-guarded undo still runs. If that also fails, the
+      // caller receives OUTCOME_UNKNOWN rather than a false no-change claim.
+    }
+    throw venueError("VENUE_CALENDAR_UNAVAILABLE");
+  }
+};
+
+const sortedIds = (ids) => [...new Set(ids.filter(Number.isInteger))].sort((left, right) => left - right);
+
+// The block's MongoDB ID comes from the actor and Idempotency-Key, so a retry
+// after a commit that failed past the MongoDB write finds the same document.
+const blockIdFor = (actorId, idempotencyKey) =>
+  crypto.createHash("sha256").update(`venue-block:${actorId}:${idempotencyKey}`).digest("hex").slice(0, 24);
+
+const sameBlock = (entry, venueId, block) =>
+  entry.venueId === venueId && entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
+  && new Date(entry.start).getTime() === Date.parse(block.start)
+  && new Date(entry.end).getTime() === Date.parse(block.end)
+  && entry.reason === block.reason && entry.note === block.note;
+
+const toBlock = (entry) => ({
+  blockId: entry.id,
+  venueId: entry.venueId,
+  reason: entry.reason,
+  reasonLabel: blockReasonLabel(entry.reason),
+  start: toIsoOrNull(entry.start),
+  end: toIsoOrNull(entry.end),
+  note: entry.note,
+  status: entry.status,
+  statusLabel: BLOCK_STATUS_LABELS[entry.status] || entry.status,
+  version: entry.version,
+  createdAt: toIsoOrNull(entry.createdAt),
+  updatedAt: toIsoOrNull(entry.updatedAt),
+});
+
+// Setup/turnaround minutes, for booking rows written before occupied_range
+// existed. They are set once and never change (Master 5.4.1).
+const readVenueMinutes = async (venueId) => {
+  const details = await venueDetailModel.getVenueDetailsByIds([venueId], { maxTimeMS: MONGO_READ_UNDER_LOCK_MS });
+  const document = details.get(String(venueId));
+  return {
+    setup: Number.isInteger(document?.setupMinutes) ? document.setupMinutes : null,
+    turnaround: Number.isInteger(document?.turnaroundMinutes) ? document.turnaroundMinutes : null,
+  };
+};
+
+// Events whose active bookings at the venue are near the block, read before any
+// lock. A superset is harmless: the extra events are locked and left unchanged.
+const findBookingEventIdsNear = async (venueId, start, end) => {
+  const { data, error } = await supabase
+    .from("venue_booking")
+    .select("event_id")
+    .eq("venue_id", venueId)
+    .in("status", ACTIVE_BOOKING_STATUSES)
+    .lt("start_datetime", new Date(Date.parse(end) + BUFFER_MARGIN_MS).toISOString())
+    .gt("end_datetime", new Date(Date.parse(start) - BUFFER_MARGIN_MS).toISOString());
+  if (error) throw error;
+  return (data || []).map((row) => row.event_id);
+};
+
+// Every event the block may affect, read before any lock: bookings near it and
+// active holds under it. The locks re-check the set (requireLocked).
+const findEventIdsNearBlock = async (range) => {
+  const holds = await calendarCall(() => venueCalendarModel.findCalendarEntries([range.venueId], range.start, range.end));
+  return [
+    ...(await findBookingEventIdsNear(range.venueId, range.start, range.end)),
+    ...venueConflictModel.findHoldsUnderBlock(holds, range, new Date()).map((hold) => hold.eventId),
+  ];
+};
+
+const findOpenIncidentEventIds = async (blockId) => {
+  const { data, error } = await supabase
+    .from("resource_incidents")
+    .select("event_id")
+    .eq("calendar_block_id", blockId)
+    .eq("type", "VENUE_BLOCK")
+    .eq("status", "OPEN");
+  if (error) throw error;
+  return (data || []).map((row) => row.event_id);
+};
+
+// Runs work(client, lockedEventIds) on the venue lock connection. work throws
+// AFFECTED_SET_CHANGED with the events it found unlocked; the next attempt
+// locks them too.
+const withAffectedEventLocks = async (eventIds, work) => {
+  let locked = sortedIds(eventIds);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await withVenueLockTransaction((client, transaction) => work(client, locked, transaction));
+    } catch (error) {
+      const failure = toVenueBlockError(error);
+      if (failure.code !== "AFFECTED_SET_CHANGED") throw failure;
+      if (attempt >= MAX_LOCK_ATTEMPTS) throw venueError("VENUE_LOCK_TIMEOUT");
+      locked = sortedIds([...locked, ...(failure.eventIds || [])]);
+    }
+  }
+};
+
+const requireLocked = (needed, locked) => {
+  const missing = sortedIds(needed).filter((eventId) => !locked.includes(eventId));
+  if (missing.length) throw venueError("AFFECTED_SET_CHANGED", { eventIds: missing });
+};
+
+// POST /api/venues/:venueId/blocks (AC2–AC5, AC11–AC14). Reads the affected
+// events, locks them and then the venue, re-reads the MongoDB holds under the
+// lock, writes the incidents, versions, supersession, history and notices, then
+// the BLOCK document; commits only when the MongoDB write succeeded.
+const createVenueBlock = async ({ actorId, venueId, block, idempotencyKey }) => {
+  const requestHash = hashRequest(block, {}, [venueId]);
+  const blockId = blockIdFor(actorId, idempotencyKey);
+  const range = { venueId, start: block.start, end: block.end };
+
+  const minutes = await calendarCall(() => readVenueMinutes(venueId));
+  const eventIds = await findEventIdsNearBlock(range);
+
+  const result = await withAffectedEventLocks(eventIds, async (client, locked, transaction) => {
+    const started = await selectResult(client,
+      "SELECT public.begin_venue_block($1, $2, $3, $4, $5, $6, $7::integer[], $8, $9) AS result",
+      [actorId, venueId, block.start, block.end, minutes.setup, minutes.turnaround, locked, idempotencyKey, requestHash]
+    );
+    if (started.replay) return started.replay;
+
+    const entries = await calendarCall(() => venueCalendarModel.findCalendarEntries(
+      [venueId], block.start, block.end, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }
+    ));
+    const holds = venueConflictModel.findHoldsUnderBlock(entries, range, new Date());
+    requireLocked([...started.affectedEventIds, ...holds.map((hold) => hold.eventId)], locked);
+
+    const recorded = await selectResult(client,
+      "SELECT public.record_venue_block($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7::integer[], $8, $9) AS result",
+      [
+        actorId, venueId, JSON.stringify({ blockId, ...block }),
+        JSON.stringify(holds.map((hold) => ({ holdId: hold.id, eventId: hold.eventId }))),
+        minutes.setup, minutes.turnaround, locked, idempotencyKey, requestHash,
+      ]
+    );
+
+    const writeToken = crypto.randomUUID();
+    // Register before sending the write: a network error can follow persistence.
+    // The token prevents compensation from deleting an earlier attempt's block.
+    transaction.onRollback(() => venueCalendarModel.deleteBlock({ blockId, venueId, writeToken }));
+    const written = await writeCalendarBlock(
+      { blockId, venueId, writeToken },
+      () => venueCalendarModel.insertBlock({ blockId, venueId, ...block, createdBy: actorId, writeToken })
+    );
+    if (written.existing && !sameBlock(written, venueId, block)) throw venueError("IDEMPOTENCY_KEY_REUSED");
+    return recorded;
+  });
+
+  return {
+    ...result,
+    block: {
+      ...result.block,
+      reasonLabel: blockReasonLabel(result.block.reason),
+      statusLabel: BLOCK_STATUS_LABELS.ACTIVE,
+      version: 1,
+    },
+    incidents: (result.incidents || []).map((incident) => ({ ...incident, requestId: formatRequestId(incident.eventId) })),
+  };
+};
+
+const INCIDENT_SELECT =
+  "incident_id,event_id,booking_id,calendar_hold_id,calendar_block_id,status,resolution,created_at,resolved_at,"
+  + "booking:venue_booking(venue_id,status,start_datetime,end_datetime,occupied_range),event:event(title)";
+
+const findIncidents = async (filter) => {
+  let query = supabase.from("resource_incidents").select(INCIDENT_SELECT).eq("type", "VENUE_BLOCK");
+  if (filter.eventId) query = query.eq("event_id", filter.eventId);
+  if (filter.blockIds) query = query.in("calendar_block_id", filter.blockIds);
+  if (filter.incidentIds) query = query.in("incident_id", filter.incidentIds);
+  const { data, error } = await query.order("created_at", { ascending: false }).order("incident_id", { ascending: false });
+  if (error) throw error;
+  return data || [];
+};
+
+// Each incident with its event reference, its block and, while open, whether
+// its whole occupied range is free of active blocks now (AC7, AC9). MongoDB is
+// read for holds, blocks and older bookings' minutes; when it cannot be read,
+// the block is null and canBeRestored is null, never true.
+const describeIncidents = async (rows, audience) => {
+  if (!rows.length) return [];
+  const now = new Date();
+  const calendarIds = rows.flatMap((row) => [row.calendar_block_id, row.calendar_hold_id]).filter(Boolean);
+  const venueIds = [...new Set(rows.map((row) => row.booking?.venue_id).filter(Number.isInteger))];
+
+  let entriesById = null;
+  let minutesByVenue = null;
+  try {
+    [entriesById, minutesByVenue] = await Promise.all([
+      venueCalendarModel.findEntriesByIds(calendarIds),
+      venueDetailModel.getVenueDetailsByIds(venueIds),
+    ]);
+  } catch (error) {
+    console.warn("[venue-block] MongoDB unavailable for incidents", { code: error?.code, name: error?.name });
+  }
+
+  const located = rows.map((row) => {
+    const hold = row.calendar_hold_id ? entriesById?.get(row.calendar_hold_id) : null;
+    const venueId = row.booking?.venue_id ?? hold?.venueId ?? null;
+    let range = null;
+    if (row.booking) {
+      const stored = parseOccupiedRange(row.booking.occupied_range);
+      if (stored.occupiedStart) range = { start: stored.occupiedStart, end: stored.occupiedEnd };
+      else if (minutesByVenue) {
+        const document = minutesByVenue.get(String(venueId));
+        const occupied = venueConflictModel.occupiedRange(
+          row.booking.start_datetime, row.booking.end_datetime, document?.setupMinutes, document?.turnaroundMinutes
+        );
+        range = { start: occupied.start.toISOString(), end: occupied.end.toISOString() };
+      }
+    } else if (hold) {
+      range = { start: toIsoOrNull(hold.occupiedStart), end: toIsoOrNull(hold.occupiedEnd) };
+    }
+    // A booking that is no longer active, or a hold that is expired, converted
+    // or gone, cannot be restored whatever the calendar says.
+    const ended = row.booking
+      ? !ACTIVE_HOLD_OR_BOOKING.has(row.booking.status)
+      : Boolean(row.calendar_hold_id && entriesById && !(hold && venueConflictModel.isHoldActive(hold, now)));
+    return { row, venueId, range, ended };
+  });
+
+  const open = located.filter((item) => item.row.status === "OPEN" && !item.ended && item.venueId && item.range);
+  let calendarEntries = null;
+  if (open.length && entriesById) {
+    try {
+      const from = new Date(Math.min(...open.map((item) => Date.parse(item.range.start))));
+      const to = new Date(Math.max(...open.map((item) => Date.parse(item.range.end))));
+      calendarEntries = await venueCalendarModel.findCalendarEntries([...new Set(open.map((item) => item.venueId))], from, to);
+    } catch (error) {
+      console.warn("[venue-block] MongoDB unavailable for restorability", { code: error?.code, name: error?.name });
+    }
+  }
+
+  return located.map(({ row, venueId, range, ended }) => {
+    const block = entriesById?.get(row.calendar_block_id) || null;
+    let restorable = null;
+    if (row.status === "OPEN" && ended) restorable = false;
+    else if (row.status === "OPEN" && calendarEntries) {
+      restorable = venueConflictModel.canBeRestored(range, calendarEntries.filter((entry) => entry.venueId === venueId));
+    }
+    return {
+      incidentId: row.incident_id,
+      eventId: row.event_id,
+      requestId: formatRequestId(row.event_id),
+      eventTitle: row.event?.title ?? null,
+      bookingId: row.booking_id,
+      calendarHoldId: row.calendar_hold_id,
+      calendarBlockId: row.calendar_block_id,
+      venueId,
+      occupiedStart: range?.start ?? null,
+      occupiedEnd: range?.end ?? null,
+      status: row.status,
+      statusLabel: incidentStatusLabel(row.status),
+      resolution: row.resolution,
+      resolutionLabel: incidentResolutionLabel(row.resolution),
+      createdAt: row.created_at,
+      resolvedAt: row.resolved_at,
+      block: block ? toBlock(block) : null,
+      canBeRestored: row.status === "OPEN" ? restorable : null,
+      restoreLabel: row.status === "OPEN" ? RESTORE_LABELS[audience][ended ? "ended" : String(restorable)] : null,
+    };
+  });
+};
+
+// The coordinator's options on an affected booking (Master 5.4.4, AC7).
+const coordinatorIncidentActions = (incident) => [
+  { action: "RESTORE", available: false, label: incident.restoreLabel },
+  { action: "REPLACE", available: false, label: "Replacing the venue is not available yet." },
+  { action: "CANCEL", available: true, label: "Cancel the event." },
+];
+
+// Adds each booking's incident: the open one, otherwise the latest resolved one.
+const attachBookingIncidents = async (eventId, bookings, audience) => {
+  if (!bookings.length) return bookings;
+  const incidents = (await describeIncidents(await findIncidents({ eventId }), audience))
+    .filter((incident) => incident.bookingId != null);
+  return bookings.map((booking) => {
+    const own = incidents.filter((incident) => incident.bookingId === booking.bookingId);
+    const incident = own.find((item) => item.status === "OPEN") || own[0] || null;
+    if (!incident) return { ...booking, incident: null };
+    const card = audience === INCIDENT_AUDIENCE.COORDINATOR && incident.status === "OPEN"
+      ? { ...incident, actions: coordinatorIncidentActions(incident) }
+      : incident;
+    return { ...booking, incident: card };
+  });
+};
+
+// The incidents of the given blocks, as Venue Staff see them.
+const describeBlockIncidents = async (blockIds) =>
+  describeIncidents(await findIncidents({ blockIds }), INCIDENT_AUDIENCE.VENUE_STAFF);
+
+// GET /api/venues/:venueId/blocks: the venue's current and upcoming blocks,
+// lifted ones included, each with its incidents (Venue Staff venue page, AC9).
+const listVenueBlocks = async (venueId) => {
+  const venue = await findManagedVenueRow(venueId);
+  if (!venue) throw venueError("VENUE_NOT_FOUND");
+  const { blocks, hasMore } = await calendarCall(() => venueCalendarModel.findVenueBlocks(venueId, new Date()));
+  const incidents = blocks.length ? await describeBlockIncidents(blocks.map((block) => block.id)) : [];
+  return {
+    venueId,
+    venueName: venue.name,
+    hasMore,
+    blocks: blocks.map((block) => ({
+      ...toBlock(block),
+      incidents: incidents.filter((incident) => incident.calendarBlockId === block.id),
+    })),
+  };
+};
+
+// A MongoDB intent survives process restarts and network outages. Its receipt
+// commits with the PostgreSQL effects, so recovery is safe even after a lost
+// COMMIT response. Never take a no-change shortcut before settling the intent.
+const clearCommittedBlockRecovery = async (identity) => {
+  if (!identity.writeToken) return;
+  try {
+    await venueCalendarModel.clearBlockRecovery(identity);
+  } catch {
+    // Retain the durable intent. A later request replays the committed receipt.
+    console.warn("[venue-block] committed change still has recovery metadata");
+  }
+};
+
+const recordBlockChangeOnce = (client, actorId, venueId, blockId, intent, minutes, locked) => selectResult(client,
+  "SELECT public.record_venue_block_change_once($1, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11::integer[]) AS result",
+  [actorId, intent.actorId, intent.writeToken, venueId, blockId, intent.action,
+    JSON.stringify(intent.before), JSON.stringify(intent.after), minutes.setup, minutes.turnaround, locked]
+);
+
+const recoverBlockChange = async (actorId, venueId, current) => {
+  const intent = current.writeRecovery;
+  if (!intent) return;
+  const minutes = await calendarCall(() => readVenueMinutes(venueId));
+  const eventIds = [...intent.eventIds, ...await findOpenIncidentEventIds(current.id)];
+  await withAffectedEventLocks(eventIds, async (client, locked) => {
+    const started = await selectResult(client,
+      "SELECT public.begin_venue_block_change($1, $2, $3, $4::integer[]) AS result",
+      [actorId, venueId, current.id, locked]
+    );
+    requireLocked(started.affectedEventIds, locked);
+    const latest = await calendarCall(() => venueCalendarModel.findCalendarEntry(current.id, {
+      readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS,
+    }));
+    if (!latest?.writeRecovery) return;
+    if (latest.writeRecovery.writeToken !== intent.writeToken) throw venueError("BLOCK_VERSION_CONFLICT");
+    await recordBlockChangeOnce(client, actorId, venueId, current.id, intent, minutes, locked);
+  });
+  await clearCommittedBlockRecovery({ blockId: current.id, venueId, writeToken: intent.writeToken });
+};
+
+// PUT /api/venues/:venueId/blocks/:blockId (shorten) and POST .../lift (AC9,
+// AC11, AC14). A repeated request that matches the block's current state
+// changes nothing and returns 200. Open incidents stay open: Venue Staff then
+// restore each booking that is free again (AC10).
+const changeVenueBlock = async ({ actorId, venueId, blockId, change = null, lift = null }) => {
+  let current = await calendarCall(() => venueCalendarModel.findCalendarEntry(blockId));
+  if (!current || current.type !== venueConflictModel.ENTRY_TYPES.BLOCK || current.venueId !== venueId) {
+    throw venueError("BLOCK_NOT_FOUND");
+  }
+
+  if (current.writeRecovery) {
+    await recoverBlockChange(actorId, venueId, current);
+    current = await calendarCall(() => venueCalendarModel.findCalendarEntry(blockId, { readPreference: "primary" }));
+    if (!current) throw venueError("BLOCK_NOT_FOUND");
+  }
+
+  const unchanged = async () => ({
+    block: toBlock(current),
+    incidents: await describeBlockIncidents([blockId]),
+    changed: false,
+  });
+  if (lift && current.status === "LIFTED") return unchanged();
+  if (current.status !== "ACTIVE") throw venueError("BLOCK_NOT_ACTIVE");
+  if (change) {
+    const kind = venueConflictModel.classifyBlockChange(current, change);
+    if (kind === venueConflictModel.BLOCK_CHANGE.UNCHANGED) return unchanged();
+    if (kind === venueConflictModel.BLOCK_CHANGE.EXTEND) throw venueError("BLOCK_CANNOT_BE_EXTENDED");
+  }
+  const expectedVersion = (lift || change).version;
+  if (current.version !== expectedVersion) throw venueError("BLOCK_VERSION_CONFLICT");
+
+  const action = lift ? "LIFTED" : "SHORTENED";
+  const before = { start: toIsoOrNull(current.start), end: toIsoOrNull(current.end) };
+  const after = lift ? before : { start: change.start, end: change.end };
+  const minutes = await calendarCall(() => readVenueMinutes(venueId));
+
+  const updated = await withAffectedEventLocks(await findOpenIncidentEventIds(blockId), async (client, locked, transaction) => {
+    const started = await selectResult(client,
+      "SELECT public.begin_venue_block_change($1, $2, $3, $4::integer[]) AS result",
+      [actorId, venueId, blockId, locked]
+    );
+    requireLocked(started.affectedEventIds, locked);
+
+    const latest = await calendarCall(() => venueCalendarModel.findCalendarEntry(blockId, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
+    if (!latest || latest.status !== "ACTIVE" || latest.version !== expectedVersion) throw venueError("BLOCK_VERSION_CONFLICT");
+
+    const writeToken = crypto.randomUUID();
+    const writeRecovery = { actorId, action, before, after, eventIds: locked, writeToken };
+    await recordBlockChangeOnce(client, actorId, venueId, blockId, writeRecovery, minutes, locked);
+    transaction.onRollback(() => venueCalendarModel.revertBlock({
+      blockId, venueId, version: expectedVersion + 1, start: latest.start, end: latest.end, writeToken,
+    }));
+    const written = await writeCalendarBlock(
+      { blockId, venueId, writeToken },
+      () => venueCalendarModel.updateBlock({
+        blockId, venueId, expectedVersion, start: after.start, end: after.end, lift: Boolean(lift), writeToken, writeRecovery,
+      })
+    );
+    if (!written) throw venueError("BLOCK_VERSION_CONFLICT");
+    return written;
+  });
+
+  await clearCommittedBlockRecovery({ blockId, venueId, writeToken: updated.writeRecovery?.writeToken });
+  return {
+    block: toBlock(updated),
+    incidents: await describeBlockIncidents([blockId]),
+    changed: true,
+  };
+};
+
+// POST /api/venues/incidents/:incidentId/restore (AC10, AC13, Master 7.1
+// booking restoration). Locks the incident's event, then the venue; restores
+// only when no active block overlaps the whole occupied range under the lock.
+// The incident's venue, read before any lock: the booking's, or the hold's in MongoDB.
+const findIncidentVenueId = async (row) => {
+  if (!row.calendar_hold_id) return row.booking?.venue_id ?? null;
+  const hold = await calendarCall(() => venueCalendarModel.findCalendarEntry(row.calendar_hold_id));
+  if (!hold?.venueId) throw venueError("INCIDENT_NOT_RESTORABLE");
+  return hold.venueId;
+};
+
+// Under the lock: the occupied range and start to restore. A hold is re-read
+// and must still be active at this venue; a booking's come from PostgreSQL.
+const readRestoreTarget = async (incident, venueId) => {
+  if (!incident.calendarHoldId) {
+    return { range: { start: incident.occupiedStart, end: incident.occupiedEnd }, start: incident.start };
+  }
+  const hold = await calendarCall(() => venueCalendarModel.findCalendarEntry(
+    incident.calendarHoldId, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }
+  ));
+  if (!hold || hold.type !== venueConflictModel.ENTRY_TYPES.HOLD || hold.venueId !== venueId
+      || !venueConflictModel.isHoldActive(hold, new Date())) {
+    throw venueError("INCIDENT_NOT_RESTORABLE");
+  }
+  return { range: { start: hold.occupiedStart, end: hold.occupiedEnd }, start: hold.start };
+};
+
+// Under the lock: refuses while any active block overlaps the range, naming the blocks.
+const requireNoActiveBlocks = async (venueId, range) => {
+  const entries = await calendarCall(() => venueCalendarModel.findCalendarEntries(
+    [venueId], range.start, range.end, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }
+  ));
+  const blocking = venueConflictModel.findActiveBlocks(entries, range);
+  if (!blocking.length) return;
+  throw venueError("INCIDENT_STILL_BLOCKED", {
+    blocks: blocking.map((block) => ({
+      start: toIsoOrNull(block.start),
+      end: toIsoOrNull(block.end),
+      reasonLabel: blockReasonLabel(block.reason),
+    })),
+  });
+};
+
+const restoreVenueIncident = async ({ actorId, incidentId, idempotencyKey }) => {
+  const requestHash = hashRequest({ incidentId }, {}, []);
+  const [row] = await findIncidents({ incidentIds: [incidentId] });
+  if (!row) throw venueError("INCIDENT_NOT_FOUND");
+  const venueId = await findIncidentVenueId(row);
+  if (!venueId) throw venueError("INCIDENT_NOT_FOUND");
+  const minutes = await calendarCall(() => readVenueMinutes(venueId));
+
+  const result = await withAffectedEventLocks([row.event_id], async (client) => {
+    const started = await selectResult(client,
+      "SELECT public.begin_venue_incident_restore($1, $2, $3, $4, $5, $6, $7) AS result",
+      [actorId, incidentId, venueId, minutes.setup, minutes.turnaround, idempotencyKey, requestHash]
+    );
+    if (started.replay) return started.replay;
+
+    const { range, start } = await readRestoreTarget(started.incident, venueId);
+    await requireNoActiveBlocks(venueId, range);
+
+    return selectResult(client,
+      "SELECT public.restore_venue_incident($1, $2, $3, $4, $5, $6) AS result",
+      [actorId, incidentId, venueId, start ? new Date(start).toISOString() : null, idempotencyKey, requestHash]
+    );
+  });
+
+  return {
+    ...result,
+    requestId: formatRequestId(result.eventId),
+    statusLabel: incidentStatusLabel(result.status),
+    resolutionLabel: incidentResolutionLabel(result.resolution),
+  };
 };
 
 module.exports = {
+  createVenueBlock,
+  changeVenueBlock,
+  restoreVenueIncident,
+  listVenueBlocks,
+  INCIDENT_AUDIENCE,
   requestVenueBookings,
   listEventVenueBookings,
   withVenueLockTransaction,
