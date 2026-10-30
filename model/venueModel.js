@@ -996,7 +996,7 @@ const getSelectableVenuePhotoImage = async (venueId, photoId) => {
 // ---------- venue booking review (SPM-181) ----------
 
 const BOOKING_VENUE_SELECT =
-  "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours,setup_turnaround_min))";
+  "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours))";
 const BOOKING_FIELDS =
   "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,reviewer:user!venue_booking_reviewed_by_fkey(name)";
 const BOOKING_LIST_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT},event:event!inner(event_id,title,event_type,status)`;
@@ -1012,17 +1012,25 @@ const toEventType = (eventType) => ({
   eventTypeLabel: eventType ? EVENT_TYPE_LABELS[eventType] || eventType : null,
 });
 
-const toBookingVenue = (room) => ({
-  venueId: room.venue.venue_id,
-  name: room.venue.name,
-  address: room.venue.address,
-  maxCapacity: room.venue.max_capacity,
-  operatingHours: room.venue.operating_hours,
-  setupTurnaroundMinutes: room.venue.setup_turnaround_min,
-  roomId: room.room_id,
-  roomLayoutType: room.layout_type,
-  roomCapacity: room.capacity,
-});
+// Setup and turnaround come from MongoDB venue_details (Master 6.4), not the
+// deprecated setup_turnaround_min column; `detailsAvailable` is false when
+// MongoDB could not be read, so the minutes are unknown rather than unset.
+const toBookingVenue = (room, details = null) => {
+  const detail = details ? details.get(String(room.venue.venue_id)) ?? null : null;
+  return {
+    venueId: room.venue.venue_id,
+    name: room.venue.name,
+    address: room.venue.address,
+    maxCapacity: room.venue.max_capacity,
+    operatingHours: room.venue.operating_hours,
+    setupMinutes: Number.isInteger(detail?.setupMinutes) ? detail.setupMinutes : null,
+    turnaroundMinutes: Number.isInteger(detail?.turnaroundMinutes) ? detail.turnaroundMinutes : null,
+    detailsAvailable: Boolean(details),
+    roomId: room.room_id,
+    roomLayoutType: room.layout_type,
+    roomCapacity: room.capacity,
+  };
+};
 
 const toBookingSummary = (row) => ({
   // The booking reference is venue_booking.booking_id itself.
@@ -1064,9 +1072,9 @@ const toDecisionActions = (row, eventStatus, now) => {
   };
 };
 
-const toBookingDetail = (row, eventStatus, now = Date.now()) => ({
+const toBookingDetail = (row, eventStatus, now = Date.now(), details = null) => ({
   ...toBookingSummary(row),
-  venue: toBookingVenue(row.room),
+  venue: toBookingVenue(row.room, details),
   layoutType: row.layout_type,
   requiredFacilities: row.required_facilities || [],
   accessibilityRequirements: row.accessibility_requirements || [],
@@ -1207,7 +1215,8 @@ const findEventBookings = async (eventId) => {
   if (!event || event.status === EVENT_STATUS.DRAFT || !bookings.length) return null;
 
   const now = Date.now();
-  return { event: toBookingEvent(event), bookings: bookings.map((row) => toBookingDetail(row, event.status, now)) };
+  const details = await readDetailsOrNull(bookings.map((row) => ({ venue_id: row.room.venue.venue_id })));
+  return { event: toBookingEvent(event), bookings: bookings.map((row) => toBookingDetail(row, event.status, now, details)) };
 };
 
 const findVenueBooking = async (bookingId) => {

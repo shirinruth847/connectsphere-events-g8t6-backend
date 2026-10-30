@@ -3,6 +3,7 @@ jest.mock("../../model/venueDetailModel", () => ({ getVenueDetailsByIds: jest.fn
 
 const supabase = require("../../config/supabase");
 const venueModel = require("../../model/venueModel");
+const venueDetailModel = require("../../model/venueDetailModel");
 
 // A chainable stand-in for a supabase-js query that resolves to `result` and
 // records every filter call.
@@ -135,6 +136,7 @@ describe("findVenueBooking", () => {
 
   test("[SPM-181-AC2][SPM-181-AC3] should_return_requirements_event_details_and_sibling_bookings", async () => {
     mockEventContext(eventRow(), [bookingRow(110, "PENDING", 45, "Hall A"), bookingRow(112, "REJECTED", 47, "Room C")]);
+    venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([["45", { setupMinutes: 30, turnaroundMinutes: 45 }]]));
 
     const result = await venueModel.findVenueBooking(110);
 
@@ -143,8 +145,11 @@ describe("findVenueBooking", () => {
       requiredFacilities: ["Stage"],
       accessibilityRequirements: [],
       layoutType: "Theater",
-      venue: { venueId: 45, name: "Hall A", maxCapacity: 300, setupTurnaroundMinutes: 30 },
+      // SPM-186: setup and turnaround come from MongoDB, not the deprecated column.
+      venue: { venueId: 45, name: "Hall A", maxCapacity: 300, setupMinutes: 30, turnaroundMinutes: 45, detailsAvailable: true },
     });
+    expect(result.booking.venue).not.toHaveProperty("setupTurnaroundMinutes");
+    expect(venueDetailModel.getVenueDetailsByIds).toHaveBeenCalledWith([45, 47]);
     expect(result.event).toMatchObject({
       requestId: "REQ-000442",
       eventTypeLabel: "Seminar",
@@ -157,6 +162,15 @@ describe("findVenueBooking", () => {
       expect.objectContaining({ bookingId: 112, venueName: "Room C", status: "REJECTED", statusLabel: "Rejected" }),
     ]);
     expect(result.otherBookings[0]).not.toHaveProperty("requiredFacilities");
+  });
+
+  test("[SPM-186] should_report_setup_and_turnaround_as_unknown_when_mongodb_is_down", async () => {
+    mockEventContext(eventRow(), [bookingRow(110, "PENDING", 45, "Hall A")]);
+    venueDetailModel.getVenueDetailsByIds.mockRejectedValue(Object.assign(new Error("down"), { code: "ECONNREFUSED" }));
+
+    const result = await venueModel.findVenueBooking(110);
+
+    expect(result.booking.venue).toMatchObject({ setupMinutes: null, turnaroundMinutes: null, detailsAvailable: false });
   });
 
   test("should_return_null_for_a_missing_booking", async () => {
