@@ -380,6 +380,7 @@ All four also answer `403 TRANSITION_NOT_ALLOWED` with `currentStatus` when the 
 
 - **Readiness** (Master 5.3) is checked by `_event_readiness` on today's tables (`20261020112025`, `20261020142915`, `20261021100000`): active bookings are `PENDING`/`APPROVED` `venue_booking` rows, capacity is the venue's `max_capacity`, overlapping active bookings at the same venue report `BOOKING_CONFLICT`, the primary venue is the event's only active booking (several active bookings report `NO_PRIMARY_VENUE` until bookings have a primary flag), every equipment requirement needs an approved `equipment_request`, and a `PENDING` change request blocks. An open resource incident reports `OPEN_BLOCKING_INCIDENT` once `resource_incidents` exists; until then readiness fails closed with `READINESS_DATA_PENDING`. The Master resource draft in `supabase/drafts/` (kept out of `supabase/migrations/` until SPM-179/SPM-181/SPM-186 agree) replaces these functions with the full check; readiness integration tests requiring those tables remain pending.
 - **Completion job:** `jobs/eventCompletionJob.js` starts with the server and calls `complete_due_events` every `EVENT_COMPLETION_INTERVAL_MS` (default one minute, `0` turns it off). It completes ended `CONFIRMED` and `PREPARATION` events in batches of 50, using database time and `SKIP LOCKED`, and records them as `System` in the history (`activity_log.user_id` is null, `actor_role` is `SYSTEM`). Registration closes with the state, because it is open only in `CONFIRMED` and `PREPARATION`.
+- **Waitlist offer expiry job (SPM-163):** `jobs/waitlistOfferExpiryJob.js` starts with the server and calls `expire_due_waitlist_offers` every `WAITLIST_OFFER_EXPIRY_INTERVAL_MS` (default one minute, `0` turns it off). Under each event's lock it expires offers past their deadline (database time), withdraws those waitlist places and offers the freed places to the next people in the queue, recorded as `System`. Accepting an overdue offer is refused even before the job runs.
 - **Assignment uses the shared function:** migration `20261022100000_spm173_assignment_shared_transition.sql` routes Lead assignment through `_check_event_transition` and `_apply_event_transition`, retaining the assignment conflict guard, assignment row and notifications. Other lifecycle writers must use the shared helpers before a database trigger can safely refuse direct status writes.
 
 ### Clarification Threads (SPM-41)
@@ -505,6 +506,7 @@ SEED_NAMESPACE=dev                         # prefix for seeded emails and organi
 SIGNUP_RATE_LIMIT_MAX=5                    # sign-up attempts per IP per 15 minutes (default 5; tests raise it)
 EVENT_COMPLETION_INTERVAL_MS=60000         # how often ended events are completed (default 60000; 0 turns the job off)
 MONGO_SYNC_INTERVAL_MS=30000               # how often pending MongoDB outbox entries are applied (default 30000; 0 turns the job off)
+WAITLIST_OFFER_EXPIRY_INTERVAL_MS=60000    # how often unanswered waitlist place offers expire and pass on (default 60000; 0 turns the job off)
 ```
 
 The code does not read `SUPABASE_PUBLIC_KEY`; name the anon/publishable key `SUPABASE_ANON_KEY`.
