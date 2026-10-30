@@ -218,6 +218,7 @@ before(async () => {
   await db.exec(read("20261029150000_spm195_block_change_notices.sql"));
   await db.exec(read("20261029160000_spm195_close_ended_incidents.sql"));
   await db.exec(read("20261030160000_spm195_block_change_recovery.sql"));
+  await db.exec(read("20261030170000_spm195_recovery_actor_authorization.sql"));
 });
 
 test("[SPM-195-AC1][TC-03] only active Venue Staff can block, change or restore", async () => {
@@ -625,4 +626,73 @@ test("[SPM-195] recovery receipts are private and only callable by the lock role
     has_table_privilege('authenticated','public.venue_block_change_receipts','SELECT') AS browser,
     has_table_privilege('venue_calendar_writer','public.venue_block_change_receipts','INSERT') AS direct_write`, [signature]);
   assert.deepEqual(privileges, { writer: true, service: false, browser: false, direct_write: false });
+});
+
+for (const originalState of [
+  { name: "deactivated", active: false, role: "VENUE_STAFF" },
+  { name: "reassigned", active: true, role: "COORDINATOR" },
+]) {
+  test(`[SPM-195] an active colleague recovers a ${originalState.name} actor's change with original attribution`, async () => {
+    const event = await createEvent();
+    await addBooking(event, ANNEX, "14:00", "16:00");
+    const { blockId } = await block(ANNEX, event.at("13:00"), event.at("15:00"), { eventIds: [event.eventId] });
+    const token = require("node:crypto").randomUUID();
+    const args = [VENUE_STAFF_TWO, VENUE_STAFF, token, ANNEX, blockId,
+      JSON.stringify({ start: event.at("13:00"), end: event.at("15:00") }), [event.eventId]];
+    const recover = async (actor = VENUE_STAFF_TWO) => db.transaction(async (tx) => {
+      await tx.query("SELECT public.begin_venue_block_change($1,$2,$3,$4::integer[])", [actor, ANNEX, blockId, [event.eventId]]);
+      const values = [...args]; values[0] = actor;
+      return (await tx.query("SELECT public.record_venue_block_change_once($1,$2,$3::uuid,$4,$5,'LIFTED',$6::jsonb,$6::jsonb,0,0,$7::integer[]) AS result", values)).rows[0].result;
+    });
+    await db.query('UPDATE public."user" SET is_active=$2,role=$3 WHERE user_id=$1', [VENUE_STAFF, originalState.active, originalState.role]);
+    try {
+      const result = await recover();
+      assert.deepEqual(await recover(), result);
+      for (const entity of ["event", "venue"]) {
+        const entries = await rows("SELECT user_id, actor_role FROM public.activity_log WHERE entity_name=$1 AND entity_id=$2 AND action='VENUE_BLOCK_LIFTED' AND user_id=$3",
+          [entity, entity === "event" ? event.eventId : ANNEX, VENUE_STAFF]);
+        assert.ok(entries.length > 0, "history must retain original actor");
+        assert.ok(entries.every(x => x.actor_role === "VENUE_STAFF"));
+      }
+      const receipt = await one("SELECT actor_id FROM public.venue_block_change_receipts WHERE write_token=$1", [token]);
+      assert.equal(receipt.actor_id, VENUE_STAFF);
+      assert.equal((await activityOf("event", event.eventId)).filter(x => x.action === "VENUE_BLOCK_LIFTED").length, 1);
+      assert.equal((await noticesOf(event.eventId)).filter(x => x.title === "Venue block lifted").length, 2);
+      // Authorization is still checked on receipt replay, not just first execution.
+      for (const actor of [OWNER, COORDINATOR, INACTIVE_VENUE_STAFF]) await refused(recover(actor), "FORBIDDEN");
+      // The legacy direct entry point must not inherit recovery's relaxed attribution.
+      await refused(db.query("SELECT public.record_venue_block_change($1,$2,$3,'LIFTED',$4::jsonb,$4::jsonb,0,0,$5::integer[])",
+        [VENUE_STAFF, ANNEX, blockId, args[5], [event.eventId]]), "FORBIDDEN");
+    } finally {
+      await db.query('UPDATE public."user" SET is_active=true,role=\'VENUE_STAFF\' WHERE user_id=$1', [VENUE_STAFF]);
+    }
+  });
+}
+
+test("[SPM-195] no runtime or browser role can bypass recovery authorization via the effects helper", async () => {
+  const signature = "public._record_venue_block_change_effects(integer,integer,text,text,jsonb,jsonb,integer,integer,integer[])";
+  for (const role of ["anon", "authenticated", "service_role", "venue_calendar_writer"]) {
+    const privileges = await one("SELECT has_function_privilege($1,$2,'EXECUTE') AS allowed", [role, signature]);
+    assert.equal(privileges.allowed, false, role);
+  }
+});
+
+test("[SPM-195] a fresh recovery refuses unauthorized requesters and a missing historical actor without side effects", async () => {
+  const event = await createEvent();
+  await addBooking(event, ANNEX, "14:00", "16:00");
+  const { blockId } = await block(ANNEX, event.at("13:00"), event.at("15:00"), { eventIds: [event.eventId] });
+  for (const actor of [OWNER, COORDINATOR, INACTIVE_VENUE_STAFF, null]) {
+    await refused(db.query("SELECT public.record_venue_block_change_once($1,$2,$3::uuid,$4,$5,'LIFTED',$6::jsonb,$6::jsonb,0,0,$7::integer[])",
+      [actor, VENUE_STAFF, require("node:crypto").randomUUID(), ANNEX, blockId,
+        JSON.stringify({ start: event.at("13:00"), end: event.at("15:00") }), [event.eventId]]), "FORBIDDEN");
+  }
+  const token = require("node:crypto").randomUUID();
+  await refused(db.transaction(async tx => {
+    await tx.query("SELECT public.begin_venue_block_change($1,$2,$3,$4::integer[])", [VENUE_STAFF_TWO, ANNEX, blockId, [event.eventId]]);
+    await tx.query("SELECT public.record_venue_block_change_once($1,NULL,$2::uuid,$3,$4,'LIFTED',$5::jsonb,$5::jsonb,0,0,$6::integer[])",
+      [VENUE_STAFF_TWO, token, ANNEX, blockId, JSON.stringify({ start: event.at("13:00"), end: event.at("15:00") }), [event.eventId]]);
+  }), "INVALID_VENUE_BLOCK");
+  assert.equal((await activityOf("event", event.eventId)).filter(x => x.action === "VENUE_BLOCK_LIFTED").length, 0);
+  assert.equal((await rows("SELECT write_token FROM public.venue_block_change_receipts WHERE block_id=$1", [blockId])).length, 0);
+  assert.equal((await noticesOf(event.eventId)).filter(x => x.title === "Venue block lifted").length, 0);
 });
