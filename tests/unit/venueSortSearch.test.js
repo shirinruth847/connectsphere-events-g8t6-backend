@@ -84,6 +84,15 @@ describe("findVenueBookings search and sort (SPM-181)", () => {
     ]);
   });
 
+  test("[SPM-186] should_reverse_the_request_status_order_and_keep_the_soonest_booking_first", async () => {
+    const { list } = await callsFor({ order: "desc" });
+    expect(list.filter(([method]) => method === "order")).toEqual([
+      ["order", "status", { ascending: false }],
+      ["order", "start_datetime", { ascending: true }],
+      ["order", "booking_id", { ascending: true }],
+    ]);
+  });
+
   test.each([
     ["date", "start_datetime"],
     ["attendance", "expected_attendance"],

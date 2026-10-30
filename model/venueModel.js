@@ -281,7 +281,8 @@ const compareMinutes = (field, ascending, details) => (a, b) => {
 // filtered by name, location (address) and status, case-insensitively.
 const listManagedVenues = async ({ search, location, status, sort = "name", order = "asc" }, { limit, offset }) => {
   let query = supabase.from("venue").select(MANAGED_VENUE_SELECT).eq("is_active", true);
-  if (search) query = query.ilike("name", `%${escapeLike(search)}%`);
+  // One box searches name and location (SPM-186); "location" still narrows by address.
+  if (search) query = query.or(orIlike(["name", "address"], search));
   if (location) query = query.ilike("address", `%${escapeLike(location)}%`);
   if (status) query = query.eq("status", status);
   const ascending = order !== "desc";
@@ -525,6 +526,12 @@ const auditPhoto = async (actorId, venueId, action, details, changes) => {
   } catch (error) {
     console.error("[venue-photos] audit entry not written", { venueId, action, code: error.code });
   }
+};
+
+// A deleted venue's history is "not found", like the venue itself (SPM-186).
+const findVenueHistory = async (venueId, pagination) => {
+  await requireVenueRow(venueId);
+  return activityModel.findVenueHistory(venueId, pagination);
 };
 
 const listVenuePhotos = async (venueId) => {
@@ -1133,7 +1140,9 @@ const BOOKING_SORT_COLUMNS = Object.freeze({
 const applyBookingSort = (query, sort, order) => {
   const ascending = order !== "desc";
   const sorted = sort === "default" || !BOOKING_SORT_COLUMNS[sort]
-    ? query.order("status", { ascending: true }).order("start_datetime", { ascending })
+    // Request status (SPM-186): booking_status enum order, Pending → Approved →
+    // Rejected → Cancelled, or the reverse; the soonest booking first within each.
+    ? query.order("status", { ascending }).order("start_datetime", { ascending: true })
     : query.order(BOOKING_SORT_COLUMNS[sort], { ascending, nullsFirst: false }).order("start_datetime", { ascending: true });
   return sorted.order("booking_id", { ascending: true });
 };
@@ -1168,6 +1177,18 @@ const findVenueBookings = async ({ status, venueId, eventId, from, to, limit, q 
 // The event and every booking under it, or null when the event has no
 // bookings or is still a private draft: Venue Staff reach events only
 // through their bookings.
+// Venue Staff reach an event only through its venue bookings, and never a
+// private draft (SPM-181); the same rule gates its history (SPM-186).
+const hasReviewableBookings = async (eventId) => {
+  const [eventResult, bookingResult] = await Promise.all([
+    supabase.from("event").select("event_id,status").eq("event_id", eventId).maybeSingle(),
+    supabase.from("venue_booking").select("booking_id", { count: "exact", head: true }).eq("event_id", eventId),
+  ]);
+  if (eventResult.error) throw eventResult.error;
+  if (bookingResult.error) throw bookingResult.error;
+  return Boolean(eventResult.data && eventResult.data.status !== EVENT_STATUS.DRAFT && bookingResult.count > 0);
+};
+
 const findEventBookings = async (eventId) => {
   const [eventResult, bookingResult] = await Promise.all([
     supabase.from("event").select(BOOKING_EVENT_SELECT).eq("event_id", eventId).maybeSingle(),
@@ -1619,6 +1640,8 @@ module.exports = {
   compareOptions,
   findVenueBookings,
   findEventBookings,
+  hasReviewableBookings,
+  findVenueHistory,
   findVenueBooking,
   approveVenueBooking,
   rejectVenueBooking,

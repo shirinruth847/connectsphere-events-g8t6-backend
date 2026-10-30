@@ -13,8 +13,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const FILTER_PARAMS = new Set(["status", "venueId", "eventId", "from", "to", "limit", "q", "sort", "order"]);
 
-// My Requests sorts (SPM-181). "default" puts pending requests first, then the
-// soonest booking; "lastOpened" is per viewer and sorted by the browser.
+// My Requests sorts (SPM-181). "default" is by request status (SPM-186):
+// pending first when ascending, then the soonest booking; "lastOpened" is per
+// viewer and sorted by the browser.
 const BOOKING_SORTS = Object.freeze(["default", "date", "attendance", "lastEdited", "alphabetical"]);
 const SORT_ORDERS = Object.freeze(["asc", "desc"]);
 const MAX_SEARCH_LENGTH = 100;

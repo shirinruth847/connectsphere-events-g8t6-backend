@@ -1,4 +1,5 @@
 const venueModel = require("../model/venueModel");
+const activityModel = require("../model/activityModel");
 const {
   parseBookingFilters, parseBookingDecision,
   parseId,
@@ -6,7 +7,7 @@ const {
   BOOKING_MESSAGES,
 } = require("../validators/venueBookingValidator");
 const { formatRequestId } = require("../model/eventModel");
-const { EVENT_RELATIONSHIP, EVENT_TYPE_LABELS } = require("../config/eventConstants");
+const { EVENT_RELATIONSHIP, EVENT_TYPE_LABELS, HISTORY_AUDIENCE, VENUE_STAFF_HISTORY_FIELDS } = require("../config/eventConstants");
 const { validateAvailabilityQuery } = require("../validators/venueAvailabilityValidator");
 const {
   validateVenueCreate,
@@ -154,6 +155,26 @@ const getVenueBooking = async (req, res, next) => {
   }
 };
 
+const invalidCursor = (res) => validationFailed(res, { cursor: "Invalid page cursor." });
+
+// The venue-relevant part of an event's history (SPM-186, Master 4.2).
+const getEventBookingHistory = async (req, res, next) => {
+  try {
+    const eventId = parseId(req.params.eventId);
+    if (!eventId || !(await venueModel.hasReviewableBookings(eventId))) return res.status(404).json(EVENT_NOT_FOUND);
+    const page = await activityModel.findEventHistory(eventId, {
+      ...req.pagination,
+      audiences: [HISTORY_AUDIENCE.ORGANISER_SAFE, HISTORY_AUDIENCE.STAFF_ONLY],
+      fields: VENUE_STAFF_HISTORY_FIELDS,
+      actionPattern: "VENUE_*",
+    });
+    return res.status(200).json(page);
+  } catch (err) {
+    if (err.code === "INVALID_CURSOR") return invalidCursor(res);
+    return next(err);
+  }
+};
+
 const getEventVenueBookings = async (req, res, next) => {
   try {
     const eventId = parseId(req.params.eventId);
@@ -194,6 +215,17 @@ const getManagedVenue = async (req, res, next) => {
     const { details, detailStatus } = await venueModel.getManagedVenueDetails(venueId);
     return res.status(200).json({ venue, details, detailStatus });
   } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const getVenueHistory = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  try {
+    return res.status(200).json(await venueModel.findVenueHistory(venueId, req.pagination));
+  } catch (err) {
+    if (err.code === "INVALID_CURSOR") return invalidCursor(res);
     return handleError(err, res, next);
   }
 };
@@ -609,4 +641,6 @@ module.exports = {
   listVenueBookings,
   getVenueBooking,
   getEventVenueBookings,
+  getEventBookingHistory,
+  getVenueHistory,
 };

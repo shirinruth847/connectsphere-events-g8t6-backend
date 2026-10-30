@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { requireAuth } = require("../middleware/auth");
 const { requireRole } = require("../middleware/authorize");
-const { validatePagination } = require("../middleware/validate");
+const { validatePagination, validateCursorPagination } = require("../middleware/validate");
 const { USER_ROLES } = require("../config/roles");
 const {
   getVenueCatalogue,
@@ -19,6 +19,8 @@ const {
   listVenueBookings,
   getVenueBooking,
   getEventVenueBookings,
+  getEventBookingHistory,
+  getVenueHistory,
   approveVenueBooking,
   rejectVenueBooking,
   listVenuePhotos,
@@ -52,6 +54,8 @@ router.get("/availability", requireAuth, requireRole("COORDINATOR", "VENUE_STAFF
 // Venue booking review (SPM-181); declared before /:venueId.
 router.get("/bookings", ...venueStaffOnly, listVenueBookings);
 router.get("/bookings/events/:eventId", ...venueStaffOnly, getEventVenueBookings);
+// The venue-relevant part of the event's history (SPM-186).
+router.get("/bookings/events/:eventId/history", ...venueStaffOnly, validateCursorPagination, getEventBookingHistory);
 router.get("/bookings/:bookingId", ...venueStaffOnly, getVenueBooking);
 // One booking per decision; there is no bulk decision (SPM-186 AC6).
 router.post("/bookings/:bookingId/approve", ...venueStaffOnly, approveVenueBooking);
@@ -67,6 +71,8 @@ router.put("/:venueId", ...venueStaffOnly, updateVenue);
 router.put("/:venueId/status", ...venueStaffOnly, changeVenueStatus);
 // MongoDB details, including setup/turnaround minutes (Master 6.4, T27).
 router.put("/:venueId/details", ...venueStaffOnly, updateVenueDetails);
+// The venue's own change history (SPM-186).
+router.get("/:venueId/history", ...venueStaffOnly, validateCursorPagination, getVenueHistory);
 
 // Photo gallery in MongoDB (T28): Venue Staff upload, edit and delete.
 router.get("/:venueId/photos", ...venueStaffOnly, listVenuePhotos);
