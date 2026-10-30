@@ -71,6 +71,58 @@ describe("venueRequirements (SPM-72 AC5)", () => {
     expect(statuses(list).capacity).toBe("MET");
   });
 
+  describe("capacity assessment (SPM-198)", () => {
+    const capacityFor = (maxCapacity, expected = 150) => venueRequirements({
+      venue: venue({ maxCapacity }), event: event({ expected_attendance: expected }), requiredFacilities: [], availability: available, detailsRead: true,
+    }).find((item) => item.key === "capacity");
+
+    test("[SPM-198-AC1] should_call_more_places_than_guests_sufficient", () => {
+      expect(capacityFor(200)).toMatchObject({
+        status: "MET",
+        assessment: {
+          level: "SUFFICIENT",
+          title: "Capacity Sufficient",
+          message: "Venue capacity is adequate (200 seats for 150 guests). Comfortable spacing available.",
+        },
+      });
+    });
+
+    test("[SPM-198-AC2] should_call_exactly_full_adequate_and_still_met", () => {
+      expect(capacityFor(150)).toMatchObject({
+        status: "MET",
+        assessment: {
+          level: "EXACT",
+          title: "Capacity Adequate",
+          message: "Venue exactly meets expected attendance (150 seats for 150 guests). No buffer space. May feel crowded.",
+        },
+      });
+    });
+
+    test("[SPM-198-AC3] should_call_fewer_places_than_guests_insufficient", () => {
+      expect(capacityFor(100)).toMatchObject({
+        status: "UNMET",
+        assessment: {
+          level: "INSUFFICIENT",
+          title: "Capacity Insufficient",
+          message: "Venue is too small (100 seats for 150 expected guests). Cannot accommodate. Recommend alternative venue.",
+        },
+      });
+    });
+
+    test("[SPM-198] should_apply_the_boundaries_one_either_side_and_group_thousands", () => {
+      expect(capacityFor(151).assessment.level).toBe("SUFFICIENT");
+      expect(capacityFor(149).assessment.level).toBe("INSUFFICIENT");
+      expect(capacityFor(1500, 1200).assessment.message).toBe(
+        "Venue capacity is adequate (1,500 seats for 1,200 guests). Comfortable spacing available."
+      );
+    });
+
+    test("[SPM-198] should_give_no_assessment_without_expected_attendance", () => {
+      const list = venueRequirements({ venue: venue(), event: event({ expected_attendance: null }), requiredFacilities: [], availability: available, detailsRead: true });
+      expect(list.find((item) => item.key === "capacity")).toBeUndefined();
+    });
+  });
+
   test("[SPM-72-AC6] should_report_details_not_checked_when_mongodb_is_unavailable", () => {
     const list = venueRequirements({
       venue: venue({ supportedLayouts: null, accessibilityFeatures: null, facilities: null, rooms: [{ layoutType: "Classroom" }] }),

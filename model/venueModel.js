@@ -729,6 +729,34 @@ const toNeedList = (value) => {
 
 const requirement = (key, label, status, detail) => ({ key, label, status, detail });
 
+// SPM-198: how well the venue's capacity suits the expected attendance. More
+// room than people is sufficient, exactly full is adequate (still met, but
+// with no spare space), fewer places than people is insufficient.
+const CAPACITY_LEVEL = Object.freeze({ SUFFICIENT: "SUFFICIENT", EXACT: "EXACT", INSUFFICIENT: "INSUFFICIENT" });
+const capacityAssessment = (capacity, attendance) => {
+  const seats = capacity.toLocaleString("en-SG");
+  const guests = attendance.toLocaleString("en-SG");
+  if (capacity > attendance) {
+    return {
+      level: CAPACITY_LEVEL.SUFFICIENT,
+      title: "Capacity Sufficient",
+      message: `Venue capacity is adequate (${seats} seats for ${guests} guests). Comfortable spacing available.`,
+    };
+  }
+  if (capacity === attendance) {
+    return {
+      level: CAPACITY_LEVEL.EXACT,
+      title: "Capacity Adequate",
+      message: `Venue exactly meets expected attendance (${seats} seats for ${guests} guests). No buffer space. May feel crowded.`,
+    };
+  }
+  return {
+    level: CAPACITY_LEVEL.INSUFFICIENT,
+    title: "Capacity Insufficient",
+    message: `Venue is too small (${seats} seats for ${guests} expected guests). Cannot accommodate. Recommend alternative venue.`,
+  };
+};
+
 // detailsRead is false when MongoDB was unavailable: PostgreSQL rooms and the
 // accessibility note can still show a need as met, but never as unmet.
 const venueRequirements = ({ venue, event, requiredFacilities, availability, detailsRead }) => {
@@ -737,12 +765,15 @@ const venueRequirements = ({ venue, event, requiredFacilities, availability, det
 
   if (event.expected_attendance != null) {
     const fits = venue.maxCapacity >= event.expected_attendance;
-    list.push(requirement(
-      "capacity",
-      "Capacity",
-      fits ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET,
-      `Holds ${venue.maxCapacity.toLocaleString("en-SG")}; ${event.expected_attendance.toLocaleString("en-SG")} expected`
-    ));
+    list.push({
+      ...requirement(
+        "capacity",
+        "Capacity",
+        fits ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET,
+        `Holds ${venue.maxCapacity.toLocaleString("en-SG")}; ${event.expected_attendance.toLocaleString("en-SG")} expected`
+      ),
+      assessment: capacityAssessment(venue.maxCapacity, event.expected_attendance),
+    });
   }
 
   list.push(requirement("availability", "Availability", availability.requirementStatus, availability.detail));
