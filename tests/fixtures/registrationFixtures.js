@@ -1,7 +1,8 @@
 // Minimal live fixtures for event registration (SPM-134): login-capable
-// accounts and one organisation, nothing else. Registration reads no venue,
-// room, booking or equipment data, so the suite does not depend on the shared
-// builder's event and booking set. Each suite creates its own events.
+// accounts, one organisation and, per event, the primary venue that sets its
+// registration capacity (Master 5.6). Nothing else: the suite does not depend
+// on the shared builder's event, booking and equipment set. Each suite creates
+// its own events.
 // Accounts are created through Auth Admin, never raw SQL (Master 10.4), and
 // use the shared spm32-<run> naming and manifest, so cleanupAuthFixtures and
 // npm run test:cleanup remove them like any other run.
@@ -52,4 +53,45 @@ const createRegistrationFixtures = async (runId, accounts) => {
   return { runId, accounts: created, organisations: { A: organisationId } };
 };
 
-module.exports = { createRegistrationFixtures };
+// Gives an event its own synthetic venue and one approved primary booking
+// covering the whole event, so the venue's max_capacity is the event's venue
+// capacity. A venue per event keeps bookings from ever overlapping.
+const bookPrimaryVenue = async (runId, { eventId, requestedBy, startDatetime, endDatetime, capacity }) => {
+  const venueId = check(
+    await supabase
+      .from("venue")
+      .insert({ name: `spm32-${runId} Venue ${eventId}`, address: "1 Synthetic Street", max_capacity: capacity })
+      .select("venue_id")
+      .single(),
+    `venue for event ${eventId}`
+  ).venue_id;
+  recordFixtureIds(runId, "venueIds", [venueId]);
+
+  const roomId = check(
+    await supabase.from("room").insert({ venue_id: venueId, layout_type: "THEATRE", capacity }).select("room_id").single(),
+    `room for event ${eventId}`
+  ).room_id;
+  recordFixtureIds(runId, "roomIds", [roomId]);
+
+  const bookingId = check(
+    await supabase
+      .from("venue_booking")
+      .insert({
+        event_id: eventId,
+        room_id: roomId,
+        requested_by: requestedBy,
+        start_datetime: startDatetime,
+        end_datetime: endDatetime,
+        status: "APPROVED",
+        is_primary: true,
+        reviewed_at: new Date().toISOString(),
+      })
+      .select("booking_id")
+      .single(),
+    `primary booking for event ${eventId}`
+  ).booking_id;
+  recordFixtureIds(runId, "bookingIds", [bookingId]);
+  return { venueId, roomId, bookingId };
+};
+
+module.exports = { createRegistrationFixtures, bookPrimaryVenue };

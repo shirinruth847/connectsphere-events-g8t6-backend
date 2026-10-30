@@ -9,7 +9,7 @@ const app = require("../../server");
 const supabase = require("../../config/supabase");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
 const { newRunId, cleanupAuthFixtures, recordFixtureIds } = require("../fixtures/authFixtures");
-const { createRegistrationFixtures } = require("../fixtures/registrationFixtures");
+const { createRegistrationFixtures, bookPrimaryVenue } = require("../fixtures/registrationFixtures");
 
 jest.setTimeout(300000);
 
@@ -40,8 +40,10 @@ const registerAs = async (key, eventId, body = answers(), headers = {}) => {
   return req.send(body);
 };
 
-// Each event gets its own day, so fixture events never share a time slot.
-const insertEvent = async (overrides = {}) => {
+// Each event gets its own day, so fixture events never share a time slot, a
+// registration period that started yesterday and ends the day before the
+// event, and its own primary venue (venueCapacity null leaves it without one).
+const insertEvent = async (overrides = {}, { venueCapacity = 50 } = {}) => {
   eventOffset += 1;
   const startsAt = Date.now() + (10 + eventOffset) * DAY;
   const { data, error } = await supabase.from("event").insert({
@@ -61,9 +63,18 @@ const insertEvent = async (overrides = {}) => {
     registration_open_at: new Date(Date.now() - DAY).toISOString(),
     registration_close_at: new Date(startsAt - DAY).toISOString(),
     ...overrides,
-  }).select("event_id").single();
+  }).select("event_id,start_datetime,end_datetime").single();
   if (error) throw new Error(`Fixture event insert failed: ${error.message}`);
   recordFixtureIds(runId, "eventIds", [data.event_id]);
+  if (venueCapacity !== null) {
+    await bookPrimaryVenue(runId, {
+      eventId: data.event_id,
+      requestedBy: fixtures.accounts.organiserA.userId,
+      startDatetime: data.start_datetime,
+      endDatetime: data.end_datetime,
+      capacity: venueCapacity,
+    });
+  }
   return data.event_id;
 };
 
@@ -387,12 +398,36 @@ describe("[SPM-134] capacity", () => {
   );
 });
 
-describe("[SPM-134] registration window and enablement", () => {
-  test.each([
-    ["the_window_has_closed", { registration_close_at: new Date(Date.now() - 60 * 1000).toISOString() }],
-    ["the_window_has_not_opened", { registration_open_at: new Date(Date.now() + DAY).toISOString() }],
-  ])("[TC-REG-018] should_return_409_registration_closed_and_write_nothing_when_%s", async (label, overrides) => {
-    const eventId = await insertEvent(overrides);
+// Final rule (team agreement of 30 October 2026, Master 5.6): a CONFIRMED,
+// attendee-visible event takes registrations from registration_open_at until
+// registration_close_at, subject to its primary venue's capacity. The enabled
+// flag is not a gate. Discovery shows the state registration enforces.
+describe("[SPM-134] registration period, venue capacity and the enabled flag", () => {
+  test("[TC-REG-011] should_register_during_the_registration_period_when_places_remain", async () => {
+    const eventId = await insertEvent({ registration_capacity: 2 });
+    expect(await discoveryAvailability("racer", eventId)).toBe("OPEN");
+    const res = await registerAs("racer", eventId);
+    recordRegistrations([res]);
+    expect(res.status).toBe(201);
+    expect(res.body.registration.status).toBe("REGISTERED");
+  });
+
+  test("[SPM-134] should_return_409_registration_not_yet_open_and_write_nothing_before_the_start_time", async () => {
+    const eventId = await insertEvent({ registration_open_at: new Date(Date.now() + DAY).toISOString() });
+    expect(await discoveryAvailability("racer", eventId)).toBe("NOT_YET_OPEN");
+    const before = await snapshot(eventId);
+    const res = await registerAs("racer", eventId);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("REGISTRATION_NOT_YET_OPEN");
+    expect(res.body.registration).toBeUndefined();
+    await expectNothingWritten(eventId, before);
+  });
+
+  test("[TC-REG-018] should_return_409_registration_closed_and_write_nothing_when_the_end_time_has_passed", async () => {
+    const eventId = await insertEvent({
+      registration_open_at: new Date(Date.now() - 2 * DAY).toISOString(),
+      registration_close_at: new Date(Date.now() - 60 * 1000).toISOString(),
+    });
     const before = await snapshot(eventId);
     const res = await registerAs("racer", eventId);
     expect(res.status).toBe(409);
@@ -401,7 +436,7 @@ describe("[SPM-134] registration window and enablement", () => {
     expect(await discoveryAvailability("racer", eventId)).toBe("CLOSED");
   });
 
-  test("[SPM-134] should_return_registration_closed_not_full_when_the_window_has_closed_on_a_full_event", async () => {
+  test("[SPM-134] should_return_registration_closed_not_full_when_the_end_time_has_passed_on_a_full_event", async () => {
     const eventId = await insertEvent({ registration_capacity: 1, registration_close_at: new Date(Date.now() - 60 * 1000).toISOString() });
     await insertRegistration(eventId, "deactivatable", "REGISTERED");
     const res = await registerAs("racer", eventId);
@@ -410,13 +445,64 @@ describe("[SPM-134] registration window and enablement", () => {
     expect(await discoveryAvailability("racer", eventId)).toBe("CLOSED");
   });
 
-  test("[TC-REG-019] should_return_409_registration_not_enabled_when_the_organiser_has_not_enabled_registration", async () => {
-    const eventId = await insertEvent({ is_registration_enabled: false, registration_capacity: null });
+  test("[TC-REG-017] should_stop_direct_registration_at_the_primary_venue_capacity", async () => {
+    // No organiser cap (allowed only with the flag off), so the venue alone limits.
+    const eventId = await insertEvent({ is_registration_enabled: false, registration_capacity: null }, { venueCapacity: 2 });
+    await insertRegistration(eventId, "attendee", "REGISTERED");
+    expect(await discoveryAvailability("racer", eventId)).toBe("OPEN");
+    const last = await registerAs("racer", eventId);
+    recordRegistrations([last]);
+    expect(last.status).toBe(201);
+    expect(await discoveryAvailability("racer", eventId)).toBe("FULL_WAITLIST");
+
+    const before = await snapshot(eventId);
+    const full = await registerAs("deactivatable", eventId);
+    expect(full.status).toBe(409);
+    expect(full.body.code).toBe("REGISTRATION_FULL");
+    await expectNothingWritten(eventId, before);
+    expect((await registrationsFor(eventId)).filter((row) => row.registration_status === "WAITLISTED")).toEqual([]);
+  });
+
+  test("[SPM-134] should_stop_at_the_venue_capacity_when_the_organiser_cap_is_higher", async () => {
+    const eventId = await insertEvent({ registration_capacity: 10 }, { venueCapacity: 1 });
+    const first = await registerAs("racer", eventId);
+    recordRegistrations([first]);
+    expect(first.status).toBe(201);
+    const second = await registerAs("deactivatable", eventId);
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("REGISTRATION_FULL");
+  });
+
+  test("[SPM-134] should_register_and_still_enforce_capacity_when_registration_enabled_is_false", async () => {
+    const eventId = await insertEvent({ is_registration_enabled: false, registration_capacity: 1 });
+    expect(await discoveryAvailability("racer", eventId)).toBe("OPEN");
+    const res = await registerAs("racer", eventId);
+    recordRegistrations([res]);
+    expect(res.status).toBe(201);
+    expect(await registrationsFor(eventId)).toHaveLength(1);
+    expect(await confirmationsFor(eventId)).toHaveLength(1);
+
+    expect(await discoveryAvailability("racer", eventId)).toBe("FULL_WAITLIST");
+    const before = await snapshot(eventId);
+    const full = await registerAs("deactivatable", eventId);
+    expect(full.status).toBe(409);
+    expect(full.body.code).toBe("REGISTRATION_FULL");
+    await expectNothingWritten(eventId, before);
+  });
+
+  // Missing configuration never means "always open" or "unlimited".
+  test.each([
+    ["there_is_no_primary_venue", {}, { venueCapacity: null }],
+    ["there_is_no_registration_start_time", { registration_open_at: null }, {}],
+    ["there_is_no_registration_end_time", { registration_close_at: null }, {}],
+  ])("[SPM-134] should_return_409_registration_unavailable_and_write_nothing_when_%s", async (_label, overrides, options) => {
+    const eventId = await insertEvent(overrides, options);
+    expect(await discoveryAvailability("racer", eventId)).toBe("UNAVAILABLE");
+    const before = await snapshot(eventId);
     const res = await registerAs("racer", eventId);
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe("REGISTRATION_NOT_ENABLED");
-    expect(await registrationsFor(eventId)).toEqual([]);
-    expect(await discoveryAvailability("racer", eventId)).toBe("NOT_ENABLED");
+    expect(res.body.code).toBe("REGISTRATION_UNAVAILABLE");
+    await expectNothingWritten(eventId, before);
   });
 
   test("[SPM-134] should_return_404_when_the_event_is_unpublished_closed_out_or_missing", async () => {

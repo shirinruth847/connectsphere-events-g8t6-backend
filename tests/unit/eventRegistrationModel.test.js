@@ -73,11 +73,20 @@ describe("registerForEvent (SPM-134)", () => {
   });
 
   test.each([
-    "EVENT_NOT_FOUND", "NOT_ATTENDEE", "ALREADY_REGISTERED", "ALREADY_WAITLISTED", "REGISTRATION_NOT_ENABLED",
-    "REGISTRATION_CLOSED", "REGISTRATION_FULL", "IDEMPOTENCY_KEY_REUSED", "IDEMPOTENCY_IN_PROGRESS",
+    "EVENT_NOT_FOUND", "NOT_ATTENDEE", "ALREADY_REGISTERED", "ALREADY_WAITLISTED",
+    "REGISTRATION_NOT_YET_OPEN", "REGISTRATION_CLOSED", "REGISTRATION_FULL", "REGISTRATION_UNAVAILABLE",
+    "IDEMPOTENCY_KEY_REUSED", "IDEMPOTENCY_IN_PROGRESS",
   ])("[SPM-134] should_map_the_database_refusal_%s_to_a_registration_error", async (code) => {
     supabase.rpc.mockResolvedValue({ data: null, error: { code: "P0001", message: code } });
     await expect(registerForEvent(21, 7, ANSWERS)).rejects.toMatchObject({ name: "RegistrationError", code });
+  });
+
+  // The enabled flag is no longer a gate (Master 5.6), so the database never
+  // raises this refusal and it is not part of the API contract.
+  test("[SPM-134] should_not_treat_registration_not_enabled_as_a_registration_refusal", async () => {
+    supabase.rpc.mockResolvedValue({ data: null, error: { code: "P0001", message: "REGISTRATION_NOT_ENABLED" } });
+    const error = await registerForEvent(21, 7, ANSWERS).catch((caught) => caught);
+    expect(error.name).not.toBe("RegistrationError");
   });
 
   test("[SPM-134] should_throw_an_unexpected_error_when_the_database_fails_or_returns_nothing", async () => {

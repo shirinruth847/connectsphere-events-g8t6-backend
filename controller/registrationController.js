@@ -6,14 +6,15 @@ const { validateRegistration } = require("../validators/registrationValidator");
 
 const FORBIDDEN = { error: "You do not have permission to access this resource.", code: "FORBIDDEN" };
 
-// Business refusals of a registration (SPM-134). FULL and CLOSED stay
-// separate: a full event is not a closed one.
+// Business refusals of a registration (SPM-134). NOT_YET_OPEN, CLOSED and
+// FULL stay separate: a full event is not a closed one.
 const REGISTRATION_CONFLICTS = Object.freeze({
   ALREADY_REGISTERED: "You're already registered for this event.",
   ALREADY_WAITLISTED: "You're already on the waitlist for this event.",
-  REGISTRATION_NOT_ENABLED: "Registration isn't available for this event.",
+  REGISTRATION_NOT_YET_OPEN: "Registration for this event hasn't opened yet.",
   REGISTRATION_CLOSED: "Registration for this event is closed.",
   REGISTRATION_FULL: "This event is full, so direct registration isn't available.",
+  REGISTRATION_UNAVAILABLE: "Registration isn't available for this event yet. Please try again later.",
   IDEMPOTENCY_KEY_REUSED: "This Idempotency-Key was already used for a different request.",
   IDEMPOTENCY_IN_PROGRESS: "This request is still being processed. Try again shortly.",
 });

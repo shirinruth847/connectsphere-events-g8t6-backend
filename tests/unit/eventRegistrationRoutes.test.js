@@ -128,7 +128,7 @@ describe("POST /api/registrations/mine/:eventId (SPM-134)", () => {
   });
 
   test.each([
-    "ALREADY_REGISTERED", "ALREADY_WAITLISTED", "REGISTRATION_NOT_ENABLED", "REGISTRATION_CLOSED", "REGISTRATION_FULL",
+    "ALREADY_REGISTERED", "ALREADY_WAITLISTED", "REGISTRATION_NOT_YET_OPEN", "REGISTRATION_CLOSED", "REGISTRATION_FULL", "REGISTRATION_UNAVAILABLE",
     "IDEMPOTENCY_KEY_REUSED", "IDEMPOTENCY_IN_PROGRESS",
   ])("[SPM-134] should_return_409_with_the_stable_code_when_registration_is_refused_as_%s", async (code) => {
     registrationModel.registerForEvent.mockRejectedValue(registrationError(code));
