@@ -1254,14 +1254,14 @@ const bookingWarnings = (item, range, venue, document) => {
 };
 
 // The MongoDB holds and blocks one booking's occupied range overlaps (Master
-// 5.4). The event's own hold never blocks its own booking, as on the venue
-// section; another event's active hold and every active block do.
-const findCalendarConflicts = (entries, { venueId, eventId, range, now }) =>
+// 5.4). Normal booking requests must respect every active hold, including the
+// event's own. Converting a hold is a separate workflow (SPM-188/SPM-283).
+const findCalendarConflicts = (entries, { venueId, range, now }) =>
   entries
     .filter((entry) => entry.venueId === venueId)
     .filter((entry) => (entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
       ? entry.status === "ACTIVE"
-      : venueConflictModel.isHoldActive(entry, now) && String(entry.eventId) !== String(eventId)))
+      : venueConflictModel.isHoldActive(entry, now)))
     .filter((entry) => venueConflictModel.overlaps(range, { start: entry.occupiedStart, end: entry.occupiedEnd }))
     .map((entry) => ({
       type: entry.type,
@@ -1276,7 +1276,7 @@ const findCalendarConflicts = (entries, { venueId, eventId, range, now }) =>
 // (Master 7.4 step 2): reads each venue's setup/turnaround minutes and its holds
 // and blocks from MongoDB, refuses overlaps with active holds and blocks, and
 // returns the minutes for the PostgreSQL booking-against-booking check.
-const checkVenueCalendar = async (eventId, bookings, venues) => {
+const checkVenueCalendar = async (bookings, venues) => {
   const venueById = new Map(venues.map((venue) => [venue.venueId, venue]));
   const venueIds = [...venueById.keys()];
   const times = bookings.flatMap((item) => [Date.parse(item.start), Date.parse(item.end)]);
@@ -1312,7 +1312,7 @@ const checkVenueCalendar = async (eventId, bookings, venues) => {
     minutes[item.venueId] = { setupMinutes, turnaroundMinutes };
 
     const range = venueConflictModel.occupiedRange(item.start, item.end, setupMinutes, turnaroundMinutes);
-    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, eventId, range, now });
+    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, range, now });
     if (conflicts.length) throw venueError("BOOKING_CONFLICT", { index, venueId: item.venueId, conflicts });
 
     const messages = bookingWarnings(item, range, venue, document);
@@ -1433,7 +1433,7 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
       );
       if (started.replay) return started.replay;
 
-      const { minutes, warnings } = await checkVenueCalendar(eventId, bookings, started.venues || []);
+      const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || []);
       return selectResult(client,
         "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
         [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
