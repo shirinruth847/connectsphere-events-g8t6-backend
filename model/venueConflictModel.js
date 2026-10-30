@@ -81,6 +81,24 @@ const formatLocal = (time) => {
   return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 };
 
+// "12:45pm" in venue local time (SGT), as conflict messages show it (SPM-185 AC2, AC6).
+const formatClock = (time) => {
+  const minutes = localMinutes(time);
+  const hour = Math.floor(minutes / 60);
+  return `${hour % 12 || 12}:${String(minutes % 60).padStart(2, "0")}${hour < 12 ? "am" : "pm"}`;
+};
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const localDay = (time) => Math.floor((time + VENUE_UTC_OFFSET_MINUTES * MINUTE_MS) / DAY_MS);
+
+// The clock time alone on the request's first day; with the date on any other
+// day, so multi-day conflicts stay unambiguous.
+const formatMoment = (time, requestDay) => {
+  if (localDay(time) === requestDay) return formatClock(time);
+  const date = new Date(time + VENUE_UTC_OFFSET_MINUTES * MINUTE_MS);
+  return `${date.getUTCDate()} ${MONTH_NAMES[date.getUTCMonth()]} ${date.getUTCFullYear()}, ${formatClock(time)}`;
+};
+
 // The parts of an occupied range outside operating hours, as instant ranges.
 // A warning, never a block (Master 5.4, Q8).
 const outsideOperatingHours = (range, hours) => {
@@ -172,6 +190,35 @@ const calendarEntry = (entry, now) => {
 
 const occupied = (entry) => ({ start: entry.occupiedStart, end: entry.occupiedEnd });
 
+const CONFLICT_PART_LABELS = Object.freeze({ BOOKING: "booking", HOLD: "active hold", BLOCK: "operational block" });
+
+// Explains a refused request (SPM-185 AC2): the part of the existing entry it
+// hits (the entry's own time first, then its turnaround, then its setup) and
+// whether the request's own setup or turnaround causes it. `request` carries
+// the requested window and its occupied range.
+const conflictMessage = (entry, request) => {
+  const requested = occupied(request);
+  const parts = [
+    { label: CONFLICT_PART_LABELS[entry.type] || "booking", start: entry.start, end: entry.end },
+    { label: "turnaround period", start: entry.end, end: entry.occupiedEnd },
+    { label: "setup period", start: entry.occupiedStart, end: entry.start },
+  ];
+  const part = parts.find((candidate) => toTime(candidate.start) < toTime(candidate.end) && overlaps(candidate, requested)) || parts[0];
+
+  const requestDay = localDay(toTime(request.start));
+  const setupMinutes = (toTime(request.start) - toTime(request.occupiedStart)) / MINUTE_MS;
+  const turnaroundMinutes = (toTime(request.occupiedEnd) - toTime(request.end)) / MINUTE_MS;
+  const own = [];
+  if (setupMinutes > 0 && overlaps({ start: request.occupiedStart, end: request.start }, occupied(entry))) {
+    own.push(`its ${setupMinutes}-minute setup from ${formatMoment(toTime(request.occupiedStart), requestDay)}`);
+  }
+  if (turnaroundMinutes > 0 && overlaps({ start: request.end, end: request.occupiedEnd }, occupied(entry))) {
+    own.push(`its ${turnaroundMinutes}-minute turnaround until ${formatMoment(toTime(request.occupiedEnd), requestDay)}`);
+  }
+  const period = `${formatMoment(toTime(part.start), requestDay)}–${formatMoment(toTime(part.end), requestDay)}`;
+  return `Venue's ${part.label} (${period}) overlaps with your requested booking${own.length ? `, including ${own.join(" and ")}` : ""}.`;
+};
+
 // Pairs of blocking entries whose occupied ranges overlap (SPM-74 AC).
 const findOverlaps = (entries) => {
   const blocking = entries.filter((entry) => entry.blocking);
@@ -207,9 +254,16 @@ const freePeriods = (entries, from, to) => {
 // Booking conflicts come first, then holds, then blocks, for the summary status.
 const checkRequestedPeriod = (venue, entries, requested) => {
   const range = occupiedRange(requested.start, requested.end, venue.setupMinutes, venue.turnaroundMinutes);
+  const request = { start: requested.start, end: requested.end, occupiedStart: range.start, occupiedEnd: range.end };
   const conflicts = entries
     .filter((entry) => entry.blocking && overlaps(range, occupied(entry)))
-    .map((entry) => ({ entryId: entry.entryId, type: entry.type, occupiedStart: entry.occupiedStart, occupiedEnd: entry.occupiedEnd }));
+    .map((entry) => ({
+      entryId: entry.entryId,
+      type: entry.type,
+      occupiedStart: entry.occupiedStart,
+      occupiedEnd: entry.occupiedEnd,
+      message: conflictMessage(entry, request),
+    }));
   const warning = operatingHoursWarning(range, venue.operatingHours);
   const firstType = ["BOOKING", "HOLD", "BLOCK"].find((type) => conflicts.some((conflict) => conflict.type === type));
   let availability = AVAILABILITY.AVAILABLE;
@@ -310,5 +364,6 @@ module.exports = {
   findOverlaps,
   freePeriods,
   checkRequestedPeriod,
+  conflictMessage,
   buildVenueCalendar,
 };
