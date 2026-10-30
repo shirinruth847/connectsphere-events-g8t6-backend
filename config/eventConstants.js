@@ -181,12 +181,14 @@ const SAFETY_ROUND_STATUS = Object.freeze({
 
 // The change history a Safety Officer reads: changes to attendance, timing,
 // venues and layout, access and equipment (Master 5.9), plus every safety
-// review entry. Field names match activity_log.changes keys.
+// review entry. Field names match activity_log.changes keys; "venueBookings"
+// is the venue booking request entry (SPM-179).
 const SAFETY_REVIEW_HISTORY_FIELDS = Object.freeze([
   "expectedAttendance",
   "startDatetime",
   "endDatetime",
   "venuePreferences",
+  "venueBookings",
   "preferredLayoutType",
   "accessibilityNeeds",
   "equipmentRequirements",

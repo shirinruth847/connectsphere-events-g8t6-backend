@@ -1,5 +1,12 @@
 const venueModel = require("../model/venueModel");
-const { parseBookingFilters, parseBookingDecision, parseId } = require("../validators/venueBookingValidator");
+const {
+  parseBookingFilters, parseBookingDecision,
+  parseId,
+  validateVenueBookingRequest,
+  BOOKING_MESSAGES,
+} = require("../validators/venueBookingValidator");
+const { formatRequestId } = require("../model/eventModel");
+const { EVENT_RELATIONSHIP, EVENT_TYPE_LABELS } = require("../config/eventConstants");
 const { validateAvailabilityQuery } = require("../validators/venueAvailabilityValidator");
 const {
   validateVenueCreate,
@@ -464,7 +471,119 @@ const suggestEventVenue = async (req, res, next) => {
   }
 };
 
+// ---------- venue booking requests (SPM-179) ----------
+// requireVisibleEvent has answered "not found" to anyone outside the event's
+// scope; these handlers then decide what a related user may do.
+
+const SINGAPORE_TIME = new Intl.DateTimeFormat("en-SG", {
+  timeZone: "Asia/Singapore", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+});
+const formatPeriod = (start, end) => `${SINGAPORE_TIME.format(new Date(start))} to ${SINGAPORE_TIME.format(new Date(end))}`;
+const CONFLICT_SOURCES = Object.freeze({ BOOKING: "another booking", HOLD: "a tentative hold", BLOCK: "an operational block" });
+
+// [status, message or message builder, field shown in the venue section]
+const BOOKING_REQUEST_ERRORS = Object.freeze({
+  FORBIDDEN: [403, "Only the event's assigned coordinator can request venue bookings.", null],
+  EVENT_NOT_FOUND: [404, "Event request not found.", null],
+  EVENT_NOT_IN_PLANNING: [409, "Venue bookings can be requested only while the event is in planning.", null],
+  IDEMPOTENCY_KEY_REUSED: [409, DOMAIN_ERRORS.IDEMPOTENCY_KEY_REUSED[1], null],
+  IDEMPOTENCY_IN_PROGRESS: [409, "This request is still being processed. Try again shortly.", null],
+  VENUE_LOCK_TIMEOUT: [409, "Another change to this event or venue is in progress. Try again.", null],
+  INVALID_VENUE_BOOKING_REQUEST: [400, "Please correct the highlighted fields.", null],
+  VENUE_LISTED_TWICE: [400, BOOKING_MESSAGES.venueTwice, "venueId"],
+  VENUE_NOT_BOOKABLE: [409, "This venue is not available for booking.", "venueId"],
+  VENUE_ALREADY_BOOKED_FOR_EVENT: [409, "This event already has a booking at this venue.", "venueId"],
+  VENUE_BUFFERS_NOT_SET: [409, "This venue cannot take bookings until Venue Staff set its setup and turnaround times.", "venueId"],
+  BOOKING_IN_PAST: [409, BOOKING_MESSAGES.startInPast, "start"],
+  BOOKING_OUTSIDE_EVENT: [409, BOOKING_MESSAGES.outsideEvent, "start"],
+  VENUE_CAPACITY_EXCEEDED: [409, (error) => (error.capacity != null
+    ? `Expected attendance (${error.expectedAttendance}) exceeds this venue's capacity (${error.capacity}).`
+    : "Expected attendance exceeds this venue's capacity."), "expectedAttendance"],
+  BOOKING_CONFLICT: [409, (error) => {
+    const periods = (error.conflicts || []).map((conflict) =>
+      `${formatPeriod(conflict.occupiedStart, conflict.occupiedEnd)} (${CONFLICT_SOURCES[conflict.type] || "another arrangement"})`);
+    return periods.length
+      ? `This venue is unavailable from ${periods.join("; ")}, including setup and turnaround time.`
+      : "This venue is unavailable at that time.";
+  }, "start"],
+  PRIMARY_VENUE_REQUIRED: [409, BOOKING_MESSAGES.onePrimary, null],
+  PRIMARY_VENUE_ALREADY_SET: [409, "This event already has a primary venue. Add the new venues as additional venues.", null],
+  AVAILABILITY_UNAVAILABLE: [503, "Availability could not be checked. Try again later.", null],
+  VENUE_BOOKINGS_UNAVAILABLE: [503, "Venue bookings cannot be requested right now. Try again shortly.", null],
+});
+
+const handleBookingRequestError = (error, res, next) => {
+  if (error.name !== "VenueError" || !BOOKING_REQUEST_ERRORS[error.code]) return next(error);
+  const [status, message, field] = BOOKING_REQUEST_ERRORS[error.code];
+  const text = typeof message === "function" ? message(error) : message;
+  const extra = {};
+  if (Number.isInteger(error.index)) {
+    extra.bookingIndex = error.index;
+    if (field) extra.fields = { [`bookings.${error.index}.${field}`]: text };
+  } else if (error.code === "PRIMARY_VENUE_REQUIRED") {
+    extra.fields = { "bookings.primary": text };
+  }
+  if (error.venueId != null) extra.venueId = error.venueId;
+  if (error.conflicts) extra.conflicts = error.conflicts;
+  return sendError(res, status, error.code, text, extra);
+};
+
+// POST /api/events/:id/venue-bookings — body { bookings: [...] } plus an
+// Idempotency-Key header. 201 with the saved bookings; 200 for a replay.
+const requestVenueBookings = async (req, res, next) => {
+  const { event, eventId, access } = req.visibleEvent;
+  if (!access.canRequestVenueBookings) {
+    const code = access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR ? "EVENT_NOT_IN_PLANNING" : "FORBIDDEN";
+    return sendError(res, BOOKING_REQUEST_ERRORS[code][0], code, BOOKING_REQUEST_ERRORS[code][1]);
+  }
+
+  const { bookings, fields } = validateVenueBookingRequest(req.body, { event });
+  const allFields = { ...(fields || {}) };
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey) allFields.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  if (hasErrors(allFields)) return validationFailed(res, allFields);
+
+  try {
+    const result = await venueModel.requestVenueBookings({
+      actorId: req.user.user_id,
+      eventId,
+      bookings,
+      idempotencyKey,
+    });
+    const count = result.bookings.length;
+    return res.status(result.replayed ? 200 : 201).json({
+      message: `${count === 1 ? "Venue booking" : `${count} venue bookings`} requested. Venue Staff will review ${count === 1 ? "it" : "them"}.`,
+      ...result,
+    });
+  } catch (err) {
+    return handleBookingRequestError(err, res, next);
+  }
+};
+
+// GET /api/events/:id/venue-bookings — the assigned coordinator and the
+// supervising Lead (read-only) see every booking of the event.
+const listEventVenueBookings = async (req, res, next) => {
+  try {
+    const { event, eventId, access } = req.visibleEvent;
+    const bookings = await venueModel.listEventVenueBookings(eventId);
+    // The event view has no event type; the request form shows it read-only (AC2).
+    const eventType = event.event_type ?? null;
+    return res.status(200).json({
+      eventId,
+      requestId: formatRequestId(eventId),
+      eventType,
+      eventTypeLabel: eventType ? EVENT_TYPE_LABELS[eventType] || eventType : null,
+      canRequestVenueBookings: access.canRequestVenueBookings === true,
+      bookings,
+    });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 module.exports = {
+  requestVenueBookings,
+  listEventVenueBookings,
   getEventVenueAvailability,
   getEventVenueOptions,
   listSelectableVenuePhotos,
