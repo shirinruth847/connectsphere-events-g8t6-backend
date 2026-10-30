@@ -9,7 +9,7 @@
 --     requests commit at the same moment (SPM-185 AC7); the loser gets 23P01.
 --     Holds and blocks live in MongoDB and are checked under the venue lock
 --     (Master 7.4, SPM-188), not here. Rows without a range are ignored;
---     20261029120100_spm185_backfill_occupied_range fills the active ones.
+--     20261030120100_spm185_backfill_occupied_range fills the active ones.
 -- Not applied to the shared database yet; run it with the backfill in one
 -- transaction.
 

@@ -19,8 +19,8 @@ const read = (file) => fs.readFileSync(migrationPath(file), "utf8");
 const VENUE_LINK = "20261028161211_spm179_venue_booking_venue_link.sql";
 const skip = fs.existsSync(migrationPath(VENUE_LINK)) ? false : `needs ${VENUE_LINK} (SPM-179)`;
 const VENUE_LINK_MIGRATION = skip ? "" : read(VENUE_LINK);
-const NO_OVERLAP_MIGRATION = read("20261029120000_spm185_booking_no_overlap.sql");
-const BACKFILL_MIGRATION = read("20261029120100_spm185_backfill_occupied_range.sql");
+const NO_OVERLAP_MIGRATION = read("20261030120000_spm185_booking_no_overlap.sql");
+const BACKFILL_MIGRATION = read("20261030120100_spm185_backfill_occupied_range.sql");
 const touchMigration = read("20261021090000_spm181_booking_id_and_updated_at.sql");
 const TOUCH_TRIGGER = touchMigration.slice(
   touchMigration.indexOf("CREATE FUNCTION public._touch_venue_booking_updated_at"),
@@ -138,6 +138,18 @@ test("[SPM-185] backfill re-check stops on overlaps created by setup and turnaro
             (SELECT count(*)::int FROM pg_proc WHERE proname = 'venue_occupied_range') AS functions`
   );
   assert.deepEqual(applied.rows[0], { constraints: 0, functions: 0 }, "nothing is applied when the re-check fails");
+});
+
+test("[SPM-185] backfill re-check ignores overlapping bookings that get no range", { skip }, async (t) => {
+  // Fixture venue 68 has no minutes: like live bookings 172 and 173, these two
+  // overlap on their windows but get no range, so the constraint ignores them.
+  const db = await setup(t, {
+    bookings: [[172, 4, sgt("09:00"), sgt("11:00")], [173, 4, sgt("10:00"), sgt("12:00"), "PENDING"]],
+  });
+
+  await migrate(db);
+  assert.equal((await rangeOf(db, 172)).lo, null);
+  assert.equal((await rangeOf(db, 173)).lo, null);
 });
 
 test("[SPM-185-TC3] the constraint refuses 13:14 and allows 13:15 after a 10:00-12:00 booking at 30/45", { skip }, async (t) => {

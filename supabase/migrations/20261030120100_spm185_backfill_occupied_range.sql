@@ -14,7 +14,7 @@
 -- The other active bookings are at spm32-* test fixture venues without a
 -- venue_details document; they keep no range and the exclusion constraint
 -- ignores them (Master 5.4.1: such venues cannot receive bookings).
--- Requires 20261029120000_spm185_booking_no_overlap. Not applied to the shared
+-- Requires 20261030120000_spm185_booking_no_overlap. Not applied to the shared
 -- database yet; run it in the same transaction as that file.
 
 CREATE TEMP TABLE spm185_venue_minutes (
@@ -27,8 +27,9 @@ INSERT INTO spm185_venue_minutes (venue_id, setup_minutes, turnaround_minutes)
 VALUES (1, 45, 45), (2, 30, 30), (45, 30, 45), (46, 15, 15), (48, 0, 0), (49, 30, 30), (50, 30, 30);
 
 -- Re-check before writing: no two active bookings at one venue may overlap
--- once setup and turnaround are added. Bookings left without minutes are
--- compared on their booking window.
+-- once setup and turnaround are added. Only bookings that will have a range
+-- (stored, or backfilled here) are compared; bookings without one are ignored,
+-- as venue_booking_no_overlap ignores them.
 DO $$
 DECLARE
   v_pairs text;
@@ -38,12 +39,12 @@ BEGIN
            b.venue_id,
            coalesce(
              b.occupied_range,
-             public.venue_occupied_range(b.start_datetime, b.end_datetime, m.setup_minutes, m.turnaround_minutes),
-             tstzrange(b.start_datetime, b.end_datetime, '[)')
+             public.venue_occupied_range(b.start_datetime, b.end_datetime, m.setup_minutes, m.turnaround_minutes)
            ) AS occupied_range
       FROM public.venue_booking AS b
       LEFT JOIN spm185_venue_minutes AS m ON m.venue_id = b.venue_id
      WHERE b.status IN ('PENDING', 'APPROVED')
+       AND (b.occupied_range IS NOT NULL OR m.venue_id IS NOT NULL)
   )
   SELECT string_agg(format('venue %s: bookings %s and %s', a.venue_id, a.booking_id, c.booking_id), '; ')
     INTO v_pairs
