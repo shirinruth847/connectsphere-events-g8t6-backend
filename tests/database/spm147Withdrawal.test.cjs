@@ -1,0 +1,102 @@
+// SPM-147 Withdraw Event Registration on an isolated in-memory PostgreSQL engine.
+// Run: node --test tests/database/spm147Withdrawal.test.cjs
+const { before, test } = require("node:test");
+const assert = require("node:assert/strict");
+const {
+  openWaitlistDatabase,
+  ORGANISER,
+  A,
+  B,
+  C,
+  createEvent,
+  register,
+  withdraw,
+  placeOf,
+  offersFor,
+  noticesFor,
+  visible,
+  fullEventWithQueue,
+} = require("../fixtures/waitlistDatabase");
+
+before(openWaitlistDatabase);
+
+test("[SPM-147 AC3] withdrawal sets WITHDRAWN and sends a confirmation that stays visible", async () => {
+  const eventId = await createEvent({ capacity: 10 });
+  await register(A, eventId);
+  const result = await withdraw(A, eventId);
+
+  assert.equal(result.registration.registration_status, "WITHDRAWN");
+  assert.equal(result.registration.late_withdrawal, false);
+  const place = await placeOf(A, eventId);
+  assert.equal(place.registration_status, "WITHDRAWN");
+  assert.ok(place.withdrawal_date);
+
+  const notice = (await noticesFor(A, eventId)).at(-1);
+  assert.equal(notice.type, "REGISTRATION_WITHDRAWN");
+  assert.match(notice.message, /^You've withdrawn your registration for "Synthetic Gala" on .+ SGT\. To attend, register again; /);
+  assert.equal(await visible(A, "ATTENDEE", eventId, "REGISTRATION_WITHDRAWN"), true);
+  assert.equal(await visible(A, "ATTENDEE", eventId, "REGISTRATION_CONFIRMED"), false);
+  await assert.rejects(withdraw(A, eventId), /NOT_REGISTERED/);
+});
+
+test("[SPM-147 AC4] a withdrawal with nobody waiting offers nothing", async () => {
+  const eventId = await createEvent({ capacity: 1 });
+  await register(A, eventId);
+  await withdraw(A, eventId);
+  assert.equal((await offersFor(eventId)).length, 0);
+});
+
+test("[SPM-147 AC5] withdrawal is refused once the event has started", async () => {
+  const started = await createEvent({ startsIn: "-1 minute" });
+  await register(A, started);
+  await assert.rejects(withdraw(A, started), /EVENT_STARTED/);
+  const completed = await createEvent({ startsIn: "-3 days", status: "COMPLETED" });
+  await register(A, completed);
+  await assert.rejects(withdraw(A, completed), /EVENT_STARTED/);
+  assert.equal((await placeOf(A, started)).registration_status, "REGISTERED");
+});
+
+test("[SPM-147 AC6] the owner hears of withdrawals within 24 hours of the start, without the attendee's name", async () => {
+  const lateNotices = async (startsIn) => {
+    const eventId = await createEvent({ capacity: 10, startsIn });
+    await register(A, eventId);
+    await register(B, eventId);
+    const result = await withdraw(A, eventId);
+    return { result, notices: (await noticesFor(ORGANISER, eventId)).filter((notice) => notice.type === "REGISTRATION_ALERT") };
+  };
+
+  const dayBefore = await lateNotices("23 hours");
+  assert.equal(dayBefore.result.registration.late_withdrawal, true);
+  assert.equal(dayBefore.notices.length, 1);
+  assert.equal(dayBefore.notices[0].title, "Late withdrawal");
+  assert.match(dayBefore.notices[0].message, /^An attendee withdrew from "Synthetic Gala", which starts .+ SGT\. Registered now: 1 of 10\.$/);
+  assert.doesNotMatch(dayBefore.notices[0].message, /Attendee A/);
+
+  assert.equal((await lateNotices("2 hours")).notices.length, 1);
+  assert.equal((await lateNotices("25 hours")).notices.length, 0);
+  const farFuture = await lateNotices("30 days");
+  assert.equal(farFuture.result.registration.late_withdrawal, false);
+  assert.equal(farFuture.notices.length, 0);
+});
+
+test("[SPM-147] withdrawal refuses waitlisted places, places it cannot see and cancelled events", async () => {
+  const eventId = await fullEventWithQueue([B]);
+  await assert.rejects(withdraw(B, eventId), /NOT_REGISTERED/);
+  await assert.rejects(withdraw(C, eventId), /EVENT_NOT_FOUND/);
+  await assert.rejects(withdraw(A, 999999), /EVENT_NOT_FOUND/);
+
+  const cancelled = await createEvent({ status: "CANCELLED" });
+  await register(A, cancelled);
+  await assert.rejects(withdraw(A, cancelled), /EVENT_NOT_ACTIVE/);
+});
+
+test("[SPM-147] a replayed withdrawal returns the stored result without duplicate notices", async () => {
+  const eventId = await createEvent({ capacity: 10, startsIn: "3 hours" });
+  await register(A, eventId);
+  const first = await withdraw(A, eventId, "spm147-withdraw-01");
+  const replay = await withdraw(A, eventId, "spm147-withdraw-01");
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.registration.withdrawal_date, first.registration.withdrawal_date);
+  assert.equal((await noticesFor(A, eventId)).filter((notice) => notice.type === "REGISTRATION_WITHDRAWN").length, 1);
+  assert.equal((await noticesFor(ORGANISER, eventId)).length, 1);
+});
