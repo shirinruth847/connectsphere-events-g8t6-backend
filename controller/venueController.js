@@ -54,6 +54,8 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_BOOKING_CONFLICT: [409, "Another approved booking already occupies this venue at that time."],
   VENUE_BLOCKED: [409, "The venue is blocked for part of this booking's time."],
   VENUE_HELD: [409, "The venue is held for another event during part of this booking's time."],
+  VENUE_LOCK_TIMEOUT: [409, "Another change to this venue is in progress. Try again."],
+  VENUE_BOOKINGS_UNAVAILABLE: [503, "Venue bookings cannot be decided right now. Try again shortly."],
   BOOKING_ALREADY_STARTED: [409, "This booking has already started, so it can no longer be rejected here. Coordinate changes on the day directly."],
   // Never answer with partial availability (SPM-74 TC13, Master 7.4 step 5).
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],

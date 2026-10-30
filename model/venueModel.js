@@ -1258,30 +1258,21 @@ const findVenueBooking = async (bookingId) => {
 
 // ---------- venue booking decisions (SPM-186, SPM-189, T32) ----------
 
-const findBookingForDecision = async (bookingId) => {
-  const { data, error } = await supabase
-    .from("venue_booking")
-    .select("booking_id,status,start_datetime,end_datetime,room:room!inner(venue_id)")
-    .eq("booking_id", bookingId)
-    .maybeSingle();
-  if (error) throw error;
-  return data;
-};
-
 // The venue's setup/turnaround minutes and any active block over the booking's
 // occupied range (Master 5.4.1, 5.4.4). Minutes are set once, so reading them
 // before the database locks the booking cannot race with a change. Without
 // MongoDB no approval is made (Master 7.3).
-const readApprovalCalendar = async (booking) => {
+const readApprovalCalendar = async (booking, { maxTimeMS } = {}) => {
   const venueId = booking.room.venue_id;
   try {
-    const detail = await venueDetailModel.getVenueDetail(venueId);
+    const details = await venueDetailModel.getVenueDetailsByIds([venueId], { maxTimeMS });
+    const detail = details.get(String(venueId));
     const setupMinutes = Number.isInteger(detail?.setupMinutes) ? detail.setupMinutes : null;
     const turnaroundMinutes = Number.isInteger(detail?.turnaroundMinutes) ? detail.turnaroundMinutes : null;
     if (setupMinutes === null || turnaroundMinutes === null) return { setupMinutes, turnaroundMinutes, blocked: false };
 
     const range = venueConflictModel.occupiedRange(booking.start_datetime, booking.end_datetime, setupMinutes, turnaroundMinutes);
-    const entries = await venueCalendarModel.findCalendarEntries([venueId], range.start, range.end);
+    const entries = await venueCalendarModel.findCalendarEntries([venueId], range.start, range.end, { maxTimeMS });
     // Unexpired holds of other events occupy the venue too (Master 5.4.3).
     const conflicts = findCalendarConflicts(entries, { venueId, range, now: new Date() });
     return {
@@ -1295,27 +1286,59 @@ const readApprovalCalendar = async (booking) => {
   }
 };
 
-const decideVenueBooking = async (actorId, bookingId, decision, { expectedStatus = null, reason = null } = {}) => {
-  const booking = await findBookingForDecision(bookingId);
-  if (!booking) throw venueError("BOOKING_NOT_FOUND");
+// A pg error from the venue lock connection, in the shape toVenueError reads.
+const toDecisionError = (error) => {
+  if (error?.name === "VenueError") return error;
+  if (RETRYABLE_LOCK_CODES.has(error?.code)) return venueError("VENUE_LOCK_TIMEOUT");
+  if (SESSION_ENDED_CODES.has(error?.code) || String(error?.code ?? "").startsWith("08")) return venueError("VENUE_BOOKINGS_UNAVAILABLE");
+  if (error?.code === "P0001" || error?.code === "P0002") return toVenueError({ message: error.message, details: error.detail, code: error.code });
+  return error;
+};
 
-  let calendar = { setupMinutes: null, turnaroundMinutes: null, blocked: false };
-  if (decision === "APPROVE" && booking.status === "PENDING") {
-    calendar = await readApprovalCalendar(booking);
+// Approval holds the event and venue locks on the venue lock connection while
+// it reads the venue's minutes, holds and blocks from MongoDB, then decides in
+// the same transaction (Master 7.4, T33), so no hold or block can slip in
+// between the check and the commit. A rejection frees time and needs no lock.
+const approveUnderVenueLock = (actorId, bookingId, expectedStatus) => withVenueLockTransaction(async (client) => {
+  const locked = (await client.query(
+    "SELECT public.begin_venue_booking_decision($1, $2) AS result",
+    [actorId, bookingId],
+  )).rows[0].result;
+
+  let calendar = { setupMinutes: null, turnaroundMinutes: null };
+  if (locked.status === "PENDING") {
+    calendar = await readApprovalCalendar(
+      { room: { venue_id: locked.venueId }, start_datetime: locked.start, end_datetime: locked.end },
+      { maxTimeMS: MONGO_READ_UNDER_LOCK_MS },
+    );
     if (calendar.blocked) throw venueError("VENUE_BLOCKED");
     if (calendar.held) throw venueError("VENUE_HELD");
   }
+  await client.query(
+    "SELECT public.decide_venue_booking($1, $2, 'APPROVE', $3, NULL, $4, $5)",
+    [actorId, bookingId, expectedStatus, calendar.setupMinutes, calendar.turnaroundMinutes],
+  );
+});
 
-  const { error } = await supabase.rpc("decide_venue_booking", {
-    p_actor_id: actorId,
-    p_booking_id: bookingId,
-    p_decision: decision,
-    p_expected_status: expectedStatus,
-    p_reason: reason,
-    p_setup_minutes: calendar.setupMinutes,
-    p_turnaround_minutes: calendar.turnaroundMinutes,
-  });
-  if (error) throw toVenueError(error);
+const decideVenueBooking = async (actorId, bookingId, decision, { expectedStatus = null, reason = null } = {}) => {
+  if (decision === "APPROVE") {
+    try {
+      await approveUnderVenueLock(actorId, bookingId, expectedStatus);
+    } catch (error) {
+      throw toDecisionError(error);
+    }
+  } else {
+    const { error } = await supabase.rpc("decide_venue_booking", {
+      p_actor_id: actorId,
+      p_booking_id: bookingId,
+      p_decision: decision,
+      p_expected_status: expectedStatus,
+      p_reason: reason,
+      p_setup_minutes: null,
+      p_turnaround_minutes: null,
+    });
+    if (error) throw toVenueError(error);
+  }
 
   const result = await findVenueBooking(bookingId);
   if (!result) throw new Error("decide_venue_booking left no readable booking.");

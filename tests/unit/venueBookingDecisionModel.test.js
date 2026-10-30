@@ -3,6 +3,10 @@
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/venueDetailModel", () => ({ getVenueDetail: jest.fn(), getVenueDetailsByIds: jest.fn() }));
 jest.mock("../../model/venueCalendarModel", () => ({ findCalendarEntries: jest.fn() }));
+jest.mock("../../config/venueLockDatabase", () => ({ getVenueLockPool: jest.fn() }));
+
+const { EventEmitter } = require("events");
+const { getVenueLockPool } = require("../../config/venueLockDatabase");
 
 const supabase = require("../../config/supabase");
 const venueDetailModel = require("../../model/venueDetailModel");
@@ -53,10 +57,9 @@ const eventRow = (status = "PLANNING") => ({
   accessibility_needs: null, submitted_at: null, organisation: null, coordinator: { name: "Seed Coordinator" },
 });
 
-// Queues the queries the model makes, in order, by table.
-const mockTables = ({ decision = bookingRow(), afterBookings = [bookingRow()], event = eventRow() } = {}) => {
+// Queues the queries the model makes after a decision, in order, by table.
+const mockTables = ({ afterBookings = [bookingRow()], event = eventRow() } = {}) => {
   const bookingQueries = [
-    queryReturning({ data: decision && { booking_id: decision.booking_id, status: decision.status, start_datetime: decision.start_datetime, end_datetime: decision.end_datetime, room: { venue_id: 45 } }, error: null }),
     queryReturning({ data: { event_id: 442 }, error: null }),
     queryReturning({ data: afterBookings, error: null }),
     // The active bookings near the window, for the per-booking checks (SPM-186).
@@ -73,25 +76,55 @@ beforeEach(() => {
   jest.clearAllMocks();
   venueDetailModel.getVenueDetail.mockResolvedValue({ setupMinutes: 30, turnaroundMinutes: 45 });
   venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
-  venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map());
+  venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([["45", { setupMinutes: 30, turnaroundMinutes: 45 }]]));
   supabase.rpc.mockResolvedValue({ data: { bookingId: 110, status: "APPROVED" }, error: null });
 });
 
-describe("approveVenueBooking", () => {
-  test("[SPM-186-AC1] should_send_the_actor_booking_status_and_the_venue_minutes_to_the_atomic_decision", async () => {
+describe("approveVenueBooking under the venue lock (Master 7.4, T33)", () => {
+  const pgError = (message, detail, code = "P0001") => Object.assign(new Error(message), { code, detail });
+  let client;
+  let locked;
+  let decideError;
+
+  // A pg client on the venue lock connection: begin locks event then venue,
+  // decide_venue_booking commits the decision in the same transaction.
+  beforeEach(() => {
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+    jest.spyOn(console, "error").mockImplementation(() => {});
+    locked = { bookingId: 110, eventId: 442, venueId: 45, status: "PENDING", start: FUTURE_START, end: FUTURE_END };
+    decideError = null;
+    client = Object.assign(new EventEmitter(), {
+      release: jest.fn(),
+      query: jest.fn(async (sql) => {
+        if (sql.includes("begin_venue_booking_decision")) {
+          if (locked instanceof Error) throw locked;
+          return { rows: [{ result: locked }] };
+        }
+        if (sql.includes("decide_venue_booking") && decideError) throw decideError;
+        return { rows: [{}] };
+      }),
+    });
+    getVenueLockPool.mockReturnValue({ connect: jest.fn().mockResolvedValue(client) });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const statements = () => client.query.mock.calls.map(([sql]) => sql.trim().split(/[\s(]+/).slice(0, 2).join(" "));
+  const decideParams = () => client.query.mock.calls.find(([sql]) => sql.includes("decide_venue_booking"))?.[1];
+
+  test("[SPM-186-AC1][SPM-186-AC8] should_lock_check_and_decide_in_one_transaction", async () => {
     mockTables({ afterBookings: [bookingRow({ status: "APPROVED", reviewed_at: "2026-10-24T10:00:00Z", reviewer: { name: "Seed Venue Staff" } })] });
 
     const result = await venueModel.approveVenueBooking(7, 110, { expectedStatus: "PENDING", reason: null });
 
-    expect(supabase.rpc).toHaveBeenCalledWith("decide_venue_booking", {
-      p_actor_id: 7,
-      p_booking_id: 110,
-      p_decision: "APPROVE",
-      p_expected_status: "PENDING",
-      p_reason: null,
-      p_setup_minutes: 30,
-      p_turnaround_minutes: 45,
-    });
+    expect(statements()).toEqual([
+      "BEGIN",
+      "SET LOCAL",
+      "SELECT public.begin_venue_booking_decision",
+      "SELECT public.decide_venue_booking",
+      "COMMIT",
+    ]);
+    expect(decideParams()).toEqual([7, 110, "PENDING", 30, 45]);
+    expect(supabase.rpc).not.toHaveBeenCalled();
     expect(result.booking).toEqual(expect.objectContaining({
       bookingId: 110,
       status: "APPROVED",
@@ -101,118 +134,123 @@ describe("approveVenueBooking", () => {
     }));
   });
 
-  test("should_check_blocks_over_the_occupied_range", async () => {
+  test("should_read_holds_and_blocks_for_the_occupied_range_with_a_short_timeout", async () => {
     mockTables();
 
     await venueModel.approveVenueBooking(7, 110, {});
 
-    const [venueIds, from, to] = venueCalendarModel.findCalendarEntries.mock.calls[0];
+    const [venueIds, from, to, options] = venueCalendarModel.findCalendarEntries.mock.calls[0];
     expect(venueIds).toEqual([45]);
     expect(from.toISOString()).toBe("2099-11-04T00:30:00.000Z");
     expect(to.toISOString()).toBe("2099-11-04T04:45:00.000Z");
+    expect(options).toEqual({ maxTimeMS: 3000 });
+    // The MongoDB read happens between the lock and the decision.
+    const [, , decideOrder] = client.query.mock.invocationCallOrder;
+    expect(venueCalendarModel.findCalendarEntries.mock.invocationCallOrder[0]).toBeLessThan(client.query.mock.invocationCallOrder[3]);
+    expect(decideOrder).toBeDefined();
   });
 
-  test("should_refuse_when_an_active_block_overlaps_and_never_call_the_decision", async () => {
+  test("[SPM-186-TC8] should_refuse_an_active_block_and_roll_back", async () => {
     mockTables();
     venueCalendarModel.findCalendarEntries.mockResolvedValue([
-      { venueId: 45, type: "HOLD", status: "EXPIRED", occupiedStart: FUTURE_START, occupiedEnd: FUTURE_END, holdExpiresAt: "2099-11-01T00:00:00Z" },
       { venueId: 45, type: "BLOCK", status: "ACTIVE", reason: "MAINTENANCE", occupiedStart: FUTURE_START, occupiedEnd: FUTURE_END },
     ]);
 
     await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ code: "VENUE_BLOCKED" });
-    expect(supabase.rpc).not.toHaveBeenCalled();
+    expect(decideParams()).toBeUndefined();
+    expect(statements()).toContain("ROLLBACK");
   });
 
-  test("[SPM-186-AC7] should_refuse_when_another_event's_unexpired_hold_overlaps", async () => {
+  test("[SPM-186-TC8] should_refuse_another_event's_unexpired_hold", async () => {
     mockTables();
     venueCalendarModel.findCalendarEntries.mockResolvedValue([
       { venueId: 45, type: "HOLD", status: "ACTIVE", eventId: 9, occupiedStart: "2099-11-04T04:00:00Z", occupiedEnd: "2099-11-04T05:00:00Z", holdExpiresAt: "2099-11-01T00:00:00Z" },
     ]);
 
     await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ code: "VENUE_HELD" });
-    expect(supabase.rpc).not.toHaveBeenCalled();
+    expect(decideParams()).toBeUndefined();
   });
 
-  test("should_ignore_an_overdue_hold_and_entries_at_other_venues", async () => {
+  test("should_ignore_overdue_holds_lifted_blocks_and_other_venues", async () => {
     mockTables();
     venueCalendarModel.findCalendarEntries.mockResolvedValue([
       { venueId: 45, type: "HOLD", status: "ACTIVE", occupiedStart: FUTURE_START, occupiedEnd: FUTURE_END, holdExpiresAt: "2020-01-01T00:00:00Z" },
+      { venueId: 45, type: "BLOCK", status: "LIFTED", occupiedStart: FUTURE_START, occupiedEnd: FUTURE_END },
       { venueId: 46, type: "BLOCK", status: "ACTIVE", occupiedStart: FUTURE_START, occupiedEnd: FUTURE_END },
     ]);
 
     await venueModel.approveVenueBooking(7, 110, {});
 
-    expect(supabase.rpc).toHaveBeenCalled();
+    expect(decideParams()).toEqual([7, 110, null, 30, 45]);
   });
 
-  test("should_ignore_lifted_blocks", async () => {
+  test("[SPM-186-TC13] should_refuse_with_503_when_mongodb_cannot_be_read", async () => {
     mockTables();
-    venueCalendarModel.findCalendarEntries.mockResolvedValue([{ venueId: 45, type: "BLOCK", status: "LIFTED", occupiedStart: FUTURE_START, occupiedEnd: FUTURE_END }]);
-
-    await venueModel.approveVenueBooking(7, 110, {});
-
-    expect(supabase.rpc).toHaveBeenCalled();
-  });
-
-  test("should_refuse_with_503_when_mongodb_cannot_be_read", async () => {
-    jest.spyOn(console, "warn").mockImplementation(() => {});
-    mockTables();
-    venueDetailModel.getVenueDetail.mockRejectedValue(Object.assign(new Error("timeout"), { name: "MongoServerSelectionError" }));
+    venueDetailModel.getVenueDetailsByIds.mockRejectedValue(Object.assign(new Error("timeout"), { name: "MongoServerSelectionError" }));
 
     await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ code: "VENUE_DETAILS_UNAVAILABLE" });
-    expect(supabase.rpc).not.toHaveBeenCalled();
-    console.warn.mockRestore();
+    expect(decideParams()).toBeUndefined();
+    expect(statements()).toContain("ROLLBACK");
   });
 
   test("should_pass_missing_minutes_so_the_database_refuses_the_approval", async () => {
     mockTables();
-    venueDetailModel.getVenueDetail.mockResolvedValue({ setupMinutes: 15 });
+    venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([["45", { setupMinutes: 15 }]]));
+    decideError = pgError("VENUE_BUFFERS_NOT_SET");
 
-    await venueModel.approveVenueBooking(7, 110, {});
-
-    expect(supabase.rpc.mock.calls[0][1]).toEqual(expect.objectContaining({ p_setup_minutes: 15, p_turnaround_minutes: null }));
-    // No calendar read before the decision; the reload after it reads the checks.
-    const decidedAt = supabase.rpc.mock.invocationCallOrder[0];
-    expect(venueCalendarModel.findCalendarEntries.mock.invocationCallOrder.every((order) => order > decidedAt)).toBe(true);
+    await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ code: "VENUE_BUFFERS_NOT_SET" });
+    expect(decideParams()).toEqual([7, 110, null, 15, null]);
   });
 
   test("should_skip_mongodb_for_a_booking_that_is_no_longer_pending", async () => {
-    mockTables({ decision: bookingRow({ status: "REJECTED" }) });
-    supabase.rpc.mockResolvedValue({ data: null, error: { message: "BOOKING_ALREADY_DECIDED", details: "{\"status\":\"REJECTED\"}", code: "P0001" } });
+    mockTables();
+    locked = { ...locked, status: "REJECTED" };
+    decideError = pgError("BOOKING_ALREADY_DECIDED", "{\"status\":\"REJECTED\"}");
 
-    await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({
-      code: "BOOKING_ALREADY_DECIDED",
-      currentStatus: "REJECTED",
-    });
-    expect(venueDetailModel.getVenueDetail).not.toHaveBeenCalled();
-  });
-
-  test("should_answer_not_found_for_a_missing_booking", async () => {
-    mockTables({ decision: null });
-
-    await expect(venueModel.approveVenueBooking(7, 999, {})).rejects.toMatchObject({ code: "BOOKING_NOT_FOUND" });
-    expect(supabase.rpc).not.toHaveBeenCalled();
+    await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ code: "BOOKING_ALREADY_DECIDED", currentStatus: "REJECTED" });
+    expect(venueDetailModel.getVenueDetailsByIds).not.toHaveBeenCalled();
   });
 
   test.each([
-    "BOOKING_NOT_FOUND",
+    ["BOOKING_NOT_FOUND", "P0002"],
+    ["FORBIDDEN", "P0001"],
+  ])("should_map_a_refusal_while_locking_%s", async (message, code) => {
+    locked = pgError(message, null, code);
+
+    await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ name: "VenueError", code: message });
+    expect(decideParams()).toBeUndefined();
+  });
+
+  test.each([
     "EVENT_NOT_IN_PLANNING",
     "VENUE_NOT_AVAILABLE",
     "VENUE_CAPACITY_EXCEEDED",
     "VENUE_BUFFERS_NOT_SET",
     "VENUE_BOOKING_CONFLICT",
-    "FORBIDDEN",
   ])("should_map_the_database_refusal_%s", async (message) => {
     mockTables();
-    supabase.rpc.mockResolvedValue({ data: null, error: { message, code: "P0001" } });
+    decideError = pgError(message);
 
     await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ name: "VenueError", code: message });
   });
 
+  test.each(["55P03", "40P01", "40001"])("should_answer_a_retryable_lock_conflict_%s", async (code) => {
+    mockTables();
+    locked = pgError("could not obtain lock", null, code);
+
+    await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ code: "VENUE_LOCK_TIMEOUT" });
+  });
+
+  test("should_answer_unavailable_without_the_venue_lock_connection", async () => {
+    getVenueLockPool.mockImplementation(() => { throw new Error("VENUE_LOCK_DATABASE_URL is not set"); });
+
+    await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toMatchObject({ code: "VENUE_BOOKINGS_UNAVAILABLE" });
+  });
+
   test("should_rethrow_unexpected_database_errors", async () => {
     mockTables();
-    const failure = { message: "deadlock detected", code: "40P01" };
-    supabase.rpc.mockResolvedValue({ data: null, error: failure });
+    const failure = pgError("internal", null, "XX000");
+    decideError = failure;
 
     await expect(venueModel.approveVenueBooking(7, 110, {})).rejects.toBe(failure);
   });
