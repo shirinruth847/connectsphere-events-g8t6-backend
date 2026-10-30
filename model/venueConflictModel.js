@@ -310,11 +310,50 @@ const buildVenueCalendar = ({ venue, bookings, calendarEntries, from, to, now, r
   };
 };
 
+// ---------- operational blocks and restoration (SPM-195) ----------
+
+// Active holds at the venue whose occupied range overlaps the block (AC3). A
+// hold past its expiry is expired, whatever its stored status (Master 5.4.3).
+const findHoldsUnderBlock = (entries, { venueId, start, end }, now) =>
+  entries.filter((entry) => entry.type === ENTRY_TYPES.HOLD
+    && entry.venueId === venueId
+    && entry.eventId != null
+    && isHoldActive(entry, now)
+    && overlaps(occupied(entry), { start, end }));
+
+// Active blocks overlapping a booking's or hold's occupied range.
+const findActiveBlocks = (entries, range, { excludeBlockId = null } = {}) =>
+  entries.filter((entry) => entry.type === ENTRY_TYPES.BLOCK
+    && entry.status === "ACTIVE"
+    && entry.id !== excludeBlockId
+    && overlaps(occupied(entry), range));
+
+// A booking can be restored once its whole occupied range is free of blocks
+// (Master 5.4.4 option 1, AC9). Unknown when the range or the calendar is missing.
+const canBeRestored = (range, entries) => {
+  if (!range?.start || !range?.end || !Array.isArray(entries)) return null;
+  return findActiveBlocks(entries, range).length === 0;
+};
+
+// SHORTEN keeps the new interval inside the old one; anything longer is a new
+// block (AC9). UNCHANGED lets a repeated request succeed without a write.
+const BLOCK_CHANGE = Object.freeze({ SHORTEN: "SHORTEN", UNCHANGED: "UNCHANGED", EXTEND: "EXTEND" });
+const classifyBlockChange = (current, next) => {
+  const [start, end, nextStart, nextEnd] = [current.start, current.end, next.start, next.end].map(toTime);
+  if (nextStart === start && nextEnd === end) return BLOCK_CHANGE.UNCHANGED;
+  return nextStart >= start && nextEnd <= end ? BLOCK_CHANGE.SHORTEN : BLOCK_CHANGE.EXTEND;
+};
+
 module.exports = {
   ENTRY_TYPES,
   AVAILABILITY,
   AVAILABILITY_LABELS,
   BLOCK_REASON_LABELS,
+  BLOCK_CHANGE,
+  findHoldsUnderBlock,
+  findActiveBlocks,
+  canBeRestored,
+  classifyBlockChange,
   VENUE_UTC_OFFSET_MINUTES,
   overlaps,
   occupiedRange,

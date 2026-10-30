@@ -232,6 +232,14 @@ describe("requestVenueBookings (SPM-179)", () => {
   });
 });
 
+// SPM-195: the booking list also reads the event's incidents (none here).
+const noIncidents = () => ({
+  select: jest.fn().mockReturnThis(),
+  eq: jest.fn().mockReturnThis(),
+  order: jest.fn().mockReturnValueOnce({ order: jest.fn().mockResolvedValue({ data: [], error: null }) }),
+});
+const byTable = (bookingQuery) => (table) => (table === "resource_incidents" ? noIncidents() : bookingQuery);
+
 describe("listEventVenueBookings (SPM-179)", () => {
   test("[SPM-179-AC12] should_map_bookings_with_labels_and_the_occupied_range", async () => {
     const supabase = require("../../config/supabase");
@@ -250,7 +258,7 @@ describe("listEventVenueBookings (SPM-179)", () => {
           error: null,
         }) }),
     };
-    supabase.from.mockReturnValue(query);
+    supabase.from.mockImplementation(byTable(query));
 
     const [booking] = await venueModel.listEventVenueBookings(EVENT_ID);
     expect(booking).toEqual(expect.objectContaining({
@@ -268,11 +276,11 @@ describe("listEventVenueBookings (SPM-179)", () => {
       special_requirements: null, rejection_reason: null, is_primary: false, occupied_range: null,
       created_at: "2030-01-01T00:00:00+00:00", venue: { name: "Hall" }, ...overrides,
     });
-    supabase.from.mockReturnValue({
+    supabase.from.mockImplementation(byTable({
       select: jest.fn().mockReturnThis(),
       eq: jest.fn().mockReturnThis(),
       order: jest.fn().mockReturnValueOnce({ order: jest.fn().mockResolvedValue({ data: rows.map(row), error: null }) }),
-    });
+    }));
     return venueModel.listEventVenueBookings(EVENT_ID);
   };
 

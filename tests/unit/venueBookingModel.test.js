@@ -125,7 +125,9 @@ describe("findVenueBooking", () => {
     supabase.from
       .mockReturnValueOnce(queryReturning({ data: { event_id: 442 }, error: null }))
       .mockReturnValueOnce(queryReturning({ data: event, error: null }))
-      .mockReturnValueOnce(queryReturning({ data: bookings, error: null }));
+      .mockReturnValueOnce(queryReturning({ data: bookings, error: null }))
+      // SPM-195: the event's incidents (none).
+      .mockReturnValueOnce(queryReturning({ data: [], error: null }));
   };
 
   test("[SPM-181-AC2][SPM-181-AC3] should_return_requirements_event_details_and_sibling_bookings", async () => {
