@@ -112,8 +112,6 @@ describe("requestVenueBookings (SPM-179)", () => {
       { venueId: HALL, type: "BLOCK", status: "ACTIVE", reason: "MAINTENANCE", occupiedStart: "2030-03-10T00:00:00Z", occupiedEnd: "2030-03-10T01:30:00Z" },
       // Starts one minute before the requested turnaround ends (04:45): conflict.
       { venueId: HALL, type: "HOLD", status: "ACTIVE", eventId: 99, holdExpiresAt: "2030-03-01T00:00:00Z", occupiedStart: "2030-03-10T04:44:00Z", occupiedEnd: "2030-03-10T06:00:00Z" },
-      // The event's own hold never blocks its own booking.
-      { venueId: HALL, type: "HOLD", status: "ACTIVE", eventId: EVENT_ID, holdExpiresAt: "2030-03-01T00:00:00Z", occupiedStart: "2030-03-10T02:00:00Z", occupiedEnd: "2030-03-10T03:00:00Z" },
     ]);
     await expect(requestBookings()).rejects.toMatchObject({
       code: "BOOKING_CONFLICT",
@@ -121,6 +119,23 @@ describe("requestVenueBookings (SPM-179)", () => {
       conflicts: [{ type: "HOLD", occupiedStart: "2030-03-10T04:44:00.000Z", occupiedEnd: "2030-03-10T06:00:00.000Z", holdExpiresAt: "2030-03-01T00:00:00.000Z" }],
     });
     expect(statements()).toContain("ROLLBACK");
+  });
+
+  test("[SPM-179-AC7] should_refuse_its_own_active_hold_without_saving_any_booking", async () => {
+    venueCalendarModel.findCalendarEntries.mockResolvedValue([
+      { venueId: ANNEX, type: "HOLD", status: "ACTIVE", eventId: EVENT_ID,
+        holdExpiresAt: "2030-03-01T00:00:00Z",
+        occupiedStart: "2030-03-10T02:00:00Z", occupiedEnd: "2030-03-10T03:00:00Z" },
+    ]);
+    await expect(requestBookings([item(), item({ venueId: ANNEX })])).rejects.toMatchObject({
+      name: "VenueError", code: "BOOKING_CONFLICT", index: 1, venueId: ANNEX,
+      conflicts: [{ type: "HOLD", occupiedStart: "2030-03-10T02:00:00.000Z",
+        occupiedEnd: "2030-03-10T03:00:00.000Z", holdExpiresAt: "2030-03-01T00:00:00.000Z" }],
+    });
+    // The first venue is valid, but the whole request must stop before the SQL
+    // writer can create bookings, activity, notifications or a replay result.
+    expect(statements()).toEqual(["BEGIN", "SET LOCAL", "SELECT public.begin_venue_booking_request($1,", "ROLLBACK"]);
+    expect(client.release).toHaveBeenCalledWith(false);
   });
 
   test("[SPM-179-TC-11] should_ignore_expired_holds_and_lifted_blocks", async () => {
