@@ -58,10 +58,10 @@ const ids = (rows) => rows.map((row) => row.eventId);
 
 // Stands in for assign_event_coordinator (SPM-177): its current version needs
 // later migrations, and the overview only reads the rows it writes.
-const assignFromQueue = (db, eventId, coordinatorId, leadId) => db.exec(`
-  UPDATE public.event SET coordinator_id = ${coordinatorId}, status = 'UNDER_REVIEW' WHERE event_id = ${eventId};
-  INSERT INTO public.event_assignments(event_id, coordinator_id, assigned_by) VALUES (${eventId}, ${coordinatorId}, ${leadId});
-`);
+const assignFromQueue = (db, eventId, coordinatorId, leadId) => db.transaction(async (tx) => {
+  await tx.query("UPDATE public.event SET coordinator_id = $1, status = 'UNDER_REVIEW' WHERE event_id = $2", [coordinatorId, eventId]);
+  await tx.query("INSERT INTO public.event_assignments(event_id, coordinator_id, assigned_by) VALUES ($1, $2, $3)", [eventId, coordinatorId, leadId]);
+});
 
 test("[SPM-182-AC1][TC-01] lists supervised and legacy events by start time with the current coordinator", async () => {
   const db = await setup();

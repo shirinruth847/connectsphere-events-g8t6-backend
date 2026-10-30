@@ -71,7 +71,9 @@ const officerScopeFilter = (officerId) => {
 };
 // A Lead's scope comes from the open assignment row (SPM-72/74).
 const SUPERVISION_SELECT = `${COORDINATION_SELECT},event_assignments(assigned_by,ended_at)`;
-const SUPERVISION_CLOSED_STATUSES = ["DRAFT", "COMPLETED", "REJECTED", "CANCELLED"];
+// Every other state is active (Master 5.2): supervised and occupying a coordinator.
+const CLOSED_EVENT_STATUSES = ["DRAFT", "COMPLETED", "REJECTED", "CANCELLED"];
+const CLOSED_EVENT_STATUS_FILTER = `(${CLOSED_EVENT_STATUSES.map((status) => `"${status}"`).join(",")})`;
 const LIST_SELECT =
   "event_id,title,status,previously_confirmed,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 const UNASSIGNED_QUEUE_SELECT =
@@ -167,6 +169,23 @@ const parseAccessibility = (value) => {
 const toOrganisation = (organisation) =>
   organisation ? { organisationId: organisation.organisation_id, name: organisation.name } : null;
 
+// Accepts embedded event_venue_preference rows or plain venue IDs.
+const toVenuePreferenceIds = (preferences) =>
+  Array.isArray(preferences)
+    ? preferences
+        .slice()
+        .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
+        .map((item) => (typeof item === "number" ? item : item.venue_id))
+    : [];
+
+const toEquipmentRequirements = (requirements) =>
+  Array.isArray(requirements)
+    ? requirements.map((item) => ({
+        equipmentId: item.equipment_id,
+        quantity: item.quantity_requested ?? item.quantity,
+      }))
+    : [];
+
 const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
   const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
@@ -185,18 +204,8 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
     expectedAttendance: row.expected_attendance,
     preferredLayoutType: row.preferred_layout_type,
     accessibilityNeeds: parseAccessibility(row.accessibility_needs),
-    venuePreferences: Array.isArray(venuePreferences)
-      ? venuePreferences
-          .slice()
-          .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
-          .map((item) => (typeof item === "number" ? item : item.venue_id))
-      : [],
-    equipmentRequirements: Array.isArray(equipmentRequirements)
-      ? equipmentRequirements.map((item) => ({
-          equipmentId: item.equipment_id,
-          quantity: item.quantity_requested ?? item.quantity,
-        }))
-      : [],
+    venuePreferences: toVenuePreferenceIds(venuePreferences),
+    equipmentRequirements: toEquipmentRequirements(equipmentRequirements),
     isRegistrationEnabled: row.is_registration_enabled,
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
@@ -297,18 +306,8 @@ const toListItem = (row, viewerUserId, { includeStoredStatus = false } = {}) => 
 const toUnassignedQueueItem = (row) => ({
   ...toListItem(row, undefined, { includeStoredStatus: true }),
   purpose: row.purpose,
-  venuePreferences: Array.isArray(row.event_venue_preference)
-    ? row.event_venue_preference
-        .slice()
-        .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
-        .map((item) => item.venue_id)
-    : [],
-  equipmentRequirements: Array.isArray(row.event_equipment_requirement)
-    ? row.event_equipment_requirement.map((item) => ({
-        equipmentId: item.equipment_id,
-        quantity: item.quantity_requested,
-      }))
-    : [],
+  venuePreferences: toVenuePreferenceIds(row.event_venue_preference),
+  equipmentRequirements: toEquipmentRequirements(row.event_equipment_requirement),
 });
 
 const computeRegistrationAvailability = ({
@@ -637,7 +636,7 @@ const buildOrganiserVisibilityFilter = (user) => {
 // Same scope as list_lead_event_assignments: the Lead made the open assignment,
 // or it predates supervision (no assigning Lead, T23), and the event is active.
 const isSupervisedBy = (row, leadId) => {
-  if (row.coordinator_id == null || SUPERVISION_CLOSED_STATUSES.includes(row.status)) return false;
+  if (row.coordinator_id == null || CLOSED_EVENT_STATUSES.includes(row.status)) return false;
   const open = (row.event_assignments || []).find((assignment) => assignment.ended_at == null);
   return !open || open.assigned_by == null || open.assigned_by === leadId;
 };
@@ -725,18 +724,8 @@ const mapCalendarEvent = (row, coordinatorNames) => ({
   endDatetime: row.end_datetime,
   expectedAttendance: row.expected_attendance,
   organisation: toOrganisation(row.organisation),
-  venuePreferences: Array.isArray(row.event_venue_preference)
-    ? row.event_venue_preference
-        .slice()
-        .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
-        .map((item) => (typeof item === "number" ? item : item.venue_id))
-    : [],
-  equipmentRequirements: Array.isArray(row.event_equipment_requirement)
-    ? row.event_equipment_requirement.map((item) => ({
-        equipmentId: item.equipment_id,
-        quantity: item.quantity_requested ?? item.quantity,
-      }))
-    : [],
+  venuePreferences: toVenuePreferenceIds(row.event_venue_preference),
+  equipmentRequirements: toEquipmentRequirements(row.event_equipment_requirement),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   coordinatorId: row.coordinator_id,
@@ -762,7 +751,7 @@ const findCoordinatorAvailability = async () => {
       .from("event")
       .select(CALENDAR_SELECT)
       .not("coordinator_id", "is", null)
-      .not("status", "in", '("DRAFT","COMPLETED","REJECTED","CANCELLED")')
+      .not("status", "in", CLOSED_EVENT_STATUS_FILTER)
       .order("start_datetime", { ascending: true }),
   ]);
   if (usersError) throw dbError(usersError);
