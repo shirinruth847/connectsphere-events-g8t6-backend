@@ -154,6 +154,7 @@ afterAll(async () => {
     }
     await cleanupAuthFixtures(runId);
   } finally {
+    await require("../../config/venueLockDatabase").closeVenueLockPool();
     await closeMongoDb();
     if (mongoServer) await mongoServer.stop();
     process.env.MONGODB_URI = ORIGINAL_MONGODB_URI;
@@ -237,13 +238,14 @@ describe("SPM-186 approve a venue booking", () => {
     const late = await hostEvent("2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
     const later = await hostEvent("2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z", { coordinator_id: fixtures.accounts.coordinatorTwo.userId });
     const first = await insertBooking("Main", morning, "2027-05-01T10:00:00Z", "2027-05-01T12:00:00Z");
-    const overlapping = await insertBooking("Main", late, "2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
-    const adjacent = await insertBooking("Main", later, "2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z");
     expect((await approve(first)).status).toBe(200);
+    const overlapping = await insertBooking("Main", late, "2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
 
     const conflict = await approve(overlapping);
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe("VENUE_BOOKING_CONFLICT");
+    expect((await reject(overlapping, "Release the conflicting test request")).status).toBe(200);
+    const adjacent = await insertBooking("Main", later, "2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z");
     expect((await approve(adjacent)).status).toBe(200);
   });
 
@@ -387,7 +389,7 @@ describe("SPM-189 reject a venue booking", () => {
     const start = "2028-04-01T02:00:00Z";
     const end = "2028-04-01T04:00:00Z";
     const eventId = await hostEvent(start, end);
-    const otherEventId = await hostEvent(start, end);
+    const otherEventId = await hostEvent(start, end, { coordinator_id: fixtures.accounts.coordinatorTwo.userId });
     const target = await insertBooking("Main", eventId, start, end);
     const other = await insertBooking("Main", otherEventId, start, end);
     const before = await eventRow(eventId);
