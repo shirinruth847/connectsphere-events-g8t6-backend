@@ -136,6 +136,8 @@ describe("findVenueBooking", () => {
       .mockReturnValueOnce(queryReturning({ data: bookings, error: null }))
       // The venues and nearby active bookings for the per-booking checks (SPM-186).
       .mockReturnValueOnce(queryReturning({ data: [], error: null }))
+      .mockReturnValueOnce(queryReturning({ data: [], error: null }))
+      // SPM-195: the event's open incidents.
       .mockReturnValueOnce(queryReturning({ data: [], error: null }));
     venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
   };

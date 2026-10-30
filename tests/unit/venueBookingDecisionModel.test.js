@@ -67,6 +67,8 @@ const mockTables = ({ afterBookings = [bookingRow()], event = eventRow() } = {})
   ];
   supabase.from.mockImplementation((table) => {
     if (table === "event") return queryReturning({ data: event, error: null });
+    // SPM-195: the booking view also reads the event's open incidents.
+    if (table === "resource_incidents") return queryReturning({ data: [], error: null });
     if (table === "venue") return queryReturning({ data: [{ venue_id: 45, name: "Hall A", max_capacity: 300, operating_hours: "08:00-22:00", status: "ACTIVE", status_reason: null, is_active: true }], error: null });
     return bookingQueries.shift();
   });
@@ -291,8 +293,11 @@ describe("rejectVenueBooking", () => {
 
 describe("decision actions on the booking view (SPM-186 AC4, SPM-189 AC6, T32)", () => {
   const actionsFor = async (row, eventStatus) => {
-    supabase.from.mockImplementation((table) =>
-      table === "event" ? queryReturning({ data: eventRow(eventStatus), error: null }) : queryReturning({ data: [row], error: null }));
+    supabase.from.mockImplementation((table) => {
+      if (table === "event") return queryReturning({ data: eventRow(eventStatus), error: null });
+      if (table === "resource_incidents") return queryReturning({ data: [], error: null });
+      return queryReturning({ data: [row], error: null });
+    });
     const result = await venueModel.findEventBookings(442);
     return result.bookings[0].actions;
   };

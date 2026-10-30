@@ -30,6 +30,11 @@ const {
   updateVenuePhoto,
   replaceVenuePhotoImage,
   deleteVenuePhoto,
+  listVenueBlocks,
+  createVenueBlock,
+  shortenVenueBlock,
+  liftVenueBlock,
+  restoreVenueIncident,
 } = require("../controller/venueController");
 const { PHOTO_TYPES } = require("../validators/venuePhotoValidator");
 
@@ -64,6 +69,9 @@ router.get("/bookings/:bookingId/availability", ...venueStaffOnly, getBookingAva
 router.post("/bookings/:bookingId/approve", ...venueStaffOnly, approveVenueBooking);
 router.post("/bookings/:bookingId/reject", ...venueStaffOnly, rejectVenueBooking);
 
+// Restoring a booking after a block (SPM-195); declared before /:venueId.
+router.post("/incidents/:incidentId/restore", ...venueStaffOnly, restoreVenueIncident);
+
 // Venue maintenance (SPM-73). /manage is declared before /:venueId.
 router.get("/manage", ...venueStaffOnly, validatePagination, listManagedVenues);
 // Every non-deleted venue, for My Requests filters and pickers (SPM-181).
@@ -76,6 +84,12 @@ router.put("/:venueId/status", ...venueStaffOnly, changeVenueStatus);
 router.put("/:venueId/details", ...venueStaffOnly, updateVenueDetails);
 // The venue's own change history (SPM-186).
 router.get("/:venueId/history", ...venueStaffOnly, validateCursorPagination, getVenueHistory);
+
+// Operational blocks in the MongoDB venue calendar (SPM-195, Master 5.4.4).
+router.get("/:venueId/blocks", ...venueStaffOnly, listVenueBlocks);
+router.post("/:venueId/blocks", ...venueStaffOnly, createVenueBlock);
+router.put("/:venueId/blocks/:blockId", ...venueStaffOnly, shortenVenueBlock);
+router.post("/:venueId/blocks/:blockId/lift", ...venueStaffOnly, liftVenueBlock);
 
 // Photo gallery in MongoDB (T28): Venue Staff upload, edit and delete.
 router.get("/:venueId/photos", ...venueStaffOnly, listVenuePhotos);
