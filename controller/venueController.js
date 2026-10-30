@@ -4,6 +4,7 @@ const {
   parseBookingFilters, parseBookingDecision,
   parseId,
   validateVenueBookingRequest,
+  validateVenueBookingCheck,
   BOOKING_MESSAGES,
 } = require("../validators/venueBookingValidator");
 const { formatRequestId } = require("../model/eventModel");
@@ -52,6 +53,7 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_BUFFERS_NOT_SET: [409, "Set this venue's setup and turnaround times before approving bookings."],
   VENUE_BOOKING_CONFLICT: [409, "Another approved booking already occupies this venue at that time."],
   VENUE_BLOCKED: [409, "The venue is blocked for part of this booking's time."],
+  VENUE_HELD: [409, "The venue is held for another event during part of this booking's time."],
   BOOKING_ALREADY_STARTED: [409, "This booking has already started, so it can no longer be rejected here. Coordinate changes on the day directly."],
   // Never answer with partial availability (SPM-74 TC13, Master 7.4 step 5).
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],
@@ -592,6 +594,25 @@ const requestVenueBookings = async (req, res, next) => {
   }
 };
 
+// POST /api/events/:id/venue-bookings/check — SPM-186: the assigned coordinator
+// sees each booking's checks for its own venue and window while preparing a
+// request. Advisory: nothing is saved, and the request checks again under the
+// venue lock.
+const checkVenueBookings = async (req, res, next) => {
+  const { event, access } = req.visibleEvent;
+  if (!access.canRequestVenueBookings) {
+    const code = access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR ? "EVENT_NOT_IN_PLANNING" : "FORBIDDEN";
+    return sendError(res, BOOKING_REQUEST_ERRORS[code][0], code, BOOKING_REQUEST_ERRORS[code][1]);
+  }
+  const { items, fields } = validateVenueBookingCheck(req.body, { event });
+  if (fields) return validationFailed(res, fields);
+  try {
+    return res.status(200).json({ bookings: await venueModel.checkVenueBookings(items) });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 // GET /api/events/:id/venue-bookings — the assigned coordinator and the
 // supervising Lead (read-only) see every booking of the event.
 const listEventVenueBookings = async (req, res, next) => {
@@ -642,5 +663,6 @@ module.exports = {
   getVenueBooking,
   getEventVenueBookings,
   getEventBookingHistory,
+  checkVenueBookings,
   getVenueHistory,
 };

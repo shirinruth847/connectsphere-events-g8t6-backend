@@ -7,6 +7,7 @@
 // deletes it by its action key. Audit entries are append-only and are kept.
 const request = require("supertest");
 const { MongoMemoryServer } = require("mongodb-memory-server");
+const { ObjectId } = require("mongodb");
 const app = require("../../server");
 const supabase = require("../../config/supabase");
 const { getMongoDb, closeMongoDb } = require("../../config/mongodb");
@@ -261,6 +262,61 @@ describe("SPM-186 approve a venue booking", () => {
     expect(response.status).toBe(409);
     expect(response.body.code).toBe(code);
     expect((await bookingRow(target)).status).toBe("PENDING");
+  });
+
+  test("[SPM-186-AC7][SPM-186-AC10] should_check_each_booking_against_its_own_venue_and_window", async () => {
+    // One event, two venues, two windows; Main is blocked during its booking only.
+    const eventId = await hostEvent("2027-11-04T00:00:00Z", "2027-11-04T10:00:00Z");
+    const main = await insertBooking("Main", eventId, "2027-11-04T02:00:00Z", "2027-11-04T04:00:00Z");
+    const closing = await insertBooking("Closing", eventId, "2027-11-04T05:00:00Z", "2027-11-04T09:00:00Z");
+    const db = await getMongoDb();
+    await db.collection("venue_calendar").insertOne({
+      _id: new ObjectId(), venueId: String(venues.Main), type: "BLOCK", status: "ACTIVE", reason: "MAINTENANCE", note: null,
+      start: new Date("2027-11-04T03:00:00Z"), end: new Date("2027-11-04T03:30:00Z"),
+      occupiedStart: new Date("2027-11-04T03:00:00Z"), occupiedEnd: new Date("2027-11-04T03:30:00Z"),
+      createdAt: new Date(), version: 1, fixture: prefix,
+    });
+
+    const view = await call("venueStaff", "get", `/api/venues/bookings/events/${eventId}`);
+
+    expect(view.status).toBe(200);
+    const checksFor = (bookingId) => view.body.bookings.find((item) => item.bookingId === bookingId).checks;
+    // Main occupies 01:30–04:45 UTC with its 30/45 minutes; Closing has no buffers.
+    expect(checksFor(main)).toMatchObject({
+      availability: "UNAVAILABLE",
+      occupiedStart: "2027-11-04T01:30:00.000Z",
+      occupiedEnd: "2027-11-04T04:45:00.000Z",
+      blocking: [expect.objectContaining({ code: "VENUE_BLOCKED" })],
+    });
+    expect(checksFor(closing)).toMatchObject({ availability: "AVAILABLE", blocking: [] });
+
+    const refused = await approve(main);
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe("VENUE_BLOCKED");
+    expect((await approve(closing)).status).toBe(200);
+  });
+
+  test("[SPM-186-AC17] should_give_the_coordinator_advisory_checks_without_saving_anything", async () => {
+    const eventId = await hostEvent("2027-11-05T00:00:00Z", "2027-11-05T10:00:00Z");
+    const before = await eventRow(eventId);
+
+    const response = await call("coordinator", "post", `/api/events/${eventId}/venue-bookings/check`, {
+      bookings: [
+        { venueId: venues.Main, label: "Main", start: "2027-11-05T02:00:00Z", end: "2027-11-05T04:00:00Z", expectedAttendance: 100, layout: "Theatre" },
+        { venueId: venues.Small, label: "Breakout", start: "2027-11-05T05:00:00Z", end: "2027-11-05T06:00:00Z", expectedAttendance: 41, layout: "Theatre" },
+        { venueId: venues.NoMinutes, label: "Late", start: "2027-11-05T09:00:00Z", end: "2027-11-05T11:00:00Z", expectedAttendance: 10, layout: "Theatre" },
+      ],
+    });
+
+    expect(response.status).toBe(200);
+    const [main, small, late] = response.body.bookings;
+    expect(main).toMatchObject({ index: 0, checked: true, availability: "AVAILABLE", blocking: [] });
+    expect(small.blocking.map((check) => check.code)).toEqual(["VENUE_CAPACITY_EXCEEDED"]);
+    expect(late).toMatchObject({ index: 2, checked: false });
+    expect(late.fields["bookings.2.start"]).toEqual(expect.any(String));
+    const { count } = await supabase.from("venue_booking").select("booking_id", { count: "exact", head: true }).eq("event_id", eventId);
+    expect(count).toBe(0);
+    expect((await eventRow(eventId)).arrangement_version).toBe(before.arrangement_version);
   });
 
   test("[SPM-181-AC7] should_refuse_other_roles_and_hide_unknown_bookings", async () => {

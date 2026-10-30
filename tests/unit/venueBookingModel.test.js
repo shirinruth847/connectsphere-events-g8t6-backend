@@ -1,9 +1,11 @@
 jest.mock("../../config/supabase", () => ({ from: jest.fn() }));
 jest.mock("../../model/venueDetailModel", () => ({ getVenueDetailsByIds: jest.fn() }));
+jest.mock("../../model/venueCalendarModel", () => ({ findCalendarEntries: jest.fn() }));
 
 const supabase = require("../../config/supabase");
 const venueModel = require("../../model/venueModel");
 const venueDetailModel = require("../../model/venueDetailModel");
+const venueCalendarModel = require("../../model/venueCalendarModel");
 
 // A chainable stand-in for a supabase-js query that resolves to `result` and
 // records every filter call.
@@ -13,7 +15,7 @@ const queryReturning = (result) => {
     calls,
     then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
   };
-  for (const method of ["select", "eq", "lt", "gt", "order", "limit"]) {
+  for (const method of ["select", "eq", "in", "lt", "gt", "order", "limit"]) {
     query[method] = jest.fn((...args) => {
       calls.push([method, ...args]);
       return query;
@@ -131,7 +133,11 @@ describe("findVenueBooking", () => {
     supabase.from
       .mockReturnValueOnce(queryReturning({ data: { event_id: 442 }, error: null }))
       .mockReturnValueOnce(queryReturning({ data: event, error: null }))
-      .mockReturnValueOnce(queryReturning({ data: bookings, error: null }));
+      .mockReturnValueOnce(queryReturning({ data: bookings, error: null }))
+      // The venues and nearby active bookings for the per-booking checks (SPM-186).
+      .mockReturnValueOnce(queryReturning({ data: [], error: null }))
+      .mockReturnValueOnce(queryReturning({ data: [], error: null }));
+    venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
   };
 
   test("[SPM-181-AC2][SPM-181-AC3] should_return_requirements_event_details_and_sibling_bookings", async () => {

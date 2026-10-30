@@ -303,8 +303,45 @@ const validateVenueBookingRequest = (body, { event, now = new Date() } = {}) => 
   return Object.keys(fields).length ? { fields } : { bookings };
 };
 
+// POST /api/events/:id/venue-bookings/check (SPM-186): the same list as a
+// request, validated one booking at a time, so a half-filled form still gets
+// checks for the bookings whose venue and times are ready. A label, attendance
+// or requirement problem does not stop the check; a venue or time problem does.
+const CHECK_NEEDS = new Set(["venueId", "start", "end"]);
+
+const validateVenueBookingCheck = (body, { event, now = new Date() } = {}) => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { fields: { body: "Send a JSON object with a bookings list." } };
+  }
+  const fields = {};
+  for (const key of Object.keys(body)) {
+    if (key !== "bookings") fields[key.slice(0, 60)] = "This field cannot be set.";
+  }
+  const list = body.bookings;
+  if (!Array.isArray(list) || list.length < 1 || list.length > MAX_BOOKINGS_PER_REQUEST) {
+    fields.bookings = `Add between 1 and ${MAX_BOOKINGS_PER_REQUEST} venues.`;
+  }
+  if (Object.keys(fields).length) return { fields };
+
+  const seenVenues = new Set();
+  const items = list.map((item, index) => {
+    const itemFields = {};
+    const booking = validateBookingItem(item, index, {
+      fields: itemFields,
+      seenVenues,
+      eventStart: event?.start_datetime ? new Date(event.start_datetime) : null,
+      eventEnd: event?.end_datetime ? new Date(event.end_datetime) : null,
+      now,
+    });
+    const blocked = Object.keys(itemFields).some((key) => CHECK_NEEDS.has(key.split(".")[2]));
+    return { index, booking: booking && !blocked ? booking : null, fields: itemFields };
+  });
+  return { items };
+};
+
 module.exports = {
   validateVenueBookingRequest,
+  validateVenueBookingCheck,
   MAX_BOOKINGS_PER_REQUEST,
   BOOKING_LIMITS,
   BOOKING_MESSAGES,
