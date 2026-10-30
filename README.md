@@ -301,6 +301,10 @@ Database changes are recorded under `supabase/migrations/`. Do not apply ad hoc 
 
 ### Venue Booking Review (SPM-181)
 
+**SPM-186/189 corrective rollout:** apply `20261031020000_spm186_189_decision_review_fixes.sql` in one transaction before the backend. Approval checks both Pending and Approved bookings, using their stored occupied ranges with a legacy fallback. Withdrawing an approved future booking returns a Confirmed/Preparation event to Planning through the shared guarded `venue_approval_withdrawn` transition; Safety Review uses the existing supersession path. Pending rejection does not introduce this transition. Other bookings, event details, registrations, confirmation snapshots and `previously_confirmed` are retained. Registration rows and enablement flags are not modified; callers must retain the existing event-state eligibility rules. No attendee notifications are added. The coordinator and organiser retain their existing role-appropriate notices.
+
+This migration adds a shared lifecycle action and needs shared-lifecycle review before deployment. Its baseline guard refuses to discard newer transition rules from another branch; reconcile those rules before rerunning if it reports `LIFECYCLE_BASELINE_CHANGED`. Existing applied migrations are not edited. Rollback of this corrective function would restore the overlap/lifecycle defects; do not reset event states or delete history/registrations as a rollback. This migration has not been applied to the shared database by the local fix.
+
 Venue Staff review the venue booking requests that coordinators raise. Every route requires a `VENUE_STAFF` bearer token; any other role gets `403 FORBIDDEN`, no session `401 UNAUTHENTICATED`. Approving and rejecting a booking (SPM-186, SPM-189) are separate action routes, one booking per request.
 
 | Method & path | Input | Success | Errors |
