@@ -99,6 +99,9 @@ const getEventAccess = (user, event) => {
     // The suggestion RPC re-checks the coordinator and status under the event lock.
     canSuggestVenue:
       relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR && VENUE_SUGGESTION_STATUSES.includes(event.status),
+    // SPM-179, Master T15: bookings only in PLANNING. The booking functions
+    // re-check the coordinator and status under the event lock.
+    canRequestVenueBookings: isAssignedCoordinator && event.status === EVENT_STATUS.PLANNING,
   };
 };
 

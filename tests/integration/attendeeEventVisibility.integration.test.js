@@ -94,20 +94,25 @@ const insertSecondVenueRoom = async () => {
   return insertRow("room", { venue_id: venueId, layout_type: "THEATRE", capacity: 120 }, "room_id", "roomIds");
 };
 
-const insertBooking = async (eventId, roomId, status) =>
-  insertRow(
+// A booking lies within its event (Master 6.3, enforced by a trigger since
+// SPM-179), so each fixture booking uses its event's own times.
+const insertBooking = async (eventId, roomId, status) => {
+  const { data: event, error } = await supabase.from("event").select("start_datetime,end_datetime").eq("event_id", eventId).single();
+  if (error) throw new Error(`Fixture event read failed: ${error.message}`);
+  return insertRow(
     "venue_booking",
     {
       event_id: eventId,
       room_id: roomId,
       requested_by: fixtures.accounts.coordinator.userId,
-      start_datetime: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
-      end_datetime: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000).toISOString(),
+      start_datetime: event.start_datetime,
+      end_datetime: event.end_datetime,
       status,
     },
     "booking_id",
     "bookingIds",
   );
+};
 
 const insertRegistration = async (eventId, accountKey, status) =>
   insertRow(

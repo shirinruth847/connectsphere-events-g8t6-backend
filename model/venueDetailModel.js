@@ -34,13 +34,15 @@ const detailError = (code) => Object.assign(new Error(code), { name: "VenueError
 
 // Returns a Map keyed by the venue ID as a string; venues without a document
 // are absent from it.
-const getVenueDetailsByIds = async (venueIds) => {
+// maxTimeMS bounds the read when a caller holds a PostgreSQL lock meanwhile
+// (SPM-179 venue booking requests, Master 7.4).
+const getVenueDetailsByIds = async (venueIds, { maxTimeMS } = {}) => {
   if (!venueIds.length) return new Map();
 
   const db = await getMongoDb();
   const documents = await db
     .collection("venue_details")
-    .find({ _id: { $in: venueIds.map(String) } }, { projection: DETAIL_PROJECTION })
+    .find({ _id: { $in: venueIds.map(String) } }, { projection: DETAIL_PROJECTION, ...(maxTimeMS ? { maxTimeMS } : {}) })
     .toArray();
 
   return new Map(documents.map((document) => [document._id, document]));

@@ -57,13 +57,39 @@ const check = ({ data, error }, step) => {
 
 // Approved bookings reviewed by the fixture Venue Staff, and approved equipment
 // reviewed by Technical Support, so decisions have staff to notify.
+// An event has at most one active booking per venue (Master 6.3, enforced since
+// SPM-179), so every booking after the first uses an extra fixture venue.
+const extraRoomIds = [];
+const roomForBooking = async (index) => {
+  if (index === 0) return fixtures.venue.roomId;
+  while (extraRoomIds.length < index) {
+    const number = extraRoomIds.length + 1;
+    const venue = check(
+      await supabase.from("venue")
+        .insert({ name: `spm32-${runId} Extra ${number}`, address: `spm32-${runId} ${number} Extra Road`, max_capacity: 500 })
+        .select("venue_id").single(),
+      "extra venue"
+    );
+    recordFixtureIds(runId, "venueIds", [venue.venue_id]);
+    const room = check(
+      await supabase.from("room").insert({ venue_id: venue.venue_id, layout_type: "THEATRE", capacity: 500 }).select("room_id").single(),
+      "extra room"
+    );
+    recordFixtureIds(runId, "roomIds", [room.room_id]);
+    extraRoomIds.push(room.room_id);
+  }
+  return extraRoomIds[index - 1];
+};
+
 const addArrangements = async (event, bookingCount = 1) => {
+  const roomIds = [];
+  for (let index = 0; index < bookingCount; index += 1) roomIds.push(await roomForBooking(index));
   const bookings = check(
     await supabase
       .from("venue_booking")
-      .insert(Array.from({ length: bookingCount }, () => ({
+      .insert(roomIds.map((roomId) => ({
         event_id: event.event_id,
-        room_id: fixtures.venue.roomId,
+        room_id: roomId,
         requested_by: userId("coordinator"),
         reviewed_by: userId("venueStaff"),
         start_datetime: event.start_datetime,

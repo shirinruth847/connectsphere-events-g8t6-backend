@@ -23,7 +23,9 @@ const toEntry = (document) => ({
 
 // Every hold and block whose occupied range overlaps [from, to), whatever its
 // status: expired holds are still shown, as expired (SPM-74 TC7).
-const findCalendarEntries = async (venueIds, from, to) => {
+// maxTimeMS bounds the read when a caller holds a PostgreSQL lock meanwhile
+// (SPM-179 venue booking requests, Master 7.4).
+const findCalendarEntries = async (venueIds, from, to, { maxTimeMS } = {}) => {
   if (!venueIds.length) return [];
   const db = await getMongoDb();
   const documents = await db
@@ -33,7 +35,7 @@ const findCalendarEntries = async (venueIds, from, to) => {
       occupiedStart: { $lt: new Date(to) },
       occupiedEnd: { $gt: new Date(from) },
       status: { $in: ["ACTIVE", "EXPIRED"] },
-    })
+    }, maxTimeMS ? { maxTimeMS } : {})
     .sort({ occupiedStart: 1 })
     .toArray();
   return documents.map(toEntry);

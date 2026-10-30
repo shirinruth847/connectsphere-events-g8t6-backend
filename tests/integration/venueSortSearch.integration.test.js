@@ -52,25 +52,6 @@ beforeAll(async () => {
   runId = fixtureHelpers.newRunId();
   fixtures = await fixtureHelpers.createAuthFixtures(runId);
 
-  // A pending booking with attendance and a label, on the planning fixture event.
-  const { data: booking, error } = await supabase
-    .from("venue_booking")
-    .insert({
-      room_id: fixtures.venue.roomId,
-      event_id: fixtures.events.registeredPlanning,
-      requested_by: fixtures.accounts.coordinator.userId,
-      start_datetime: "2027-03-04T01:00:00Z",
-      end_datetime: "2027-03-04T03:00:00Z",
-      status: "PENDING",
-      label: `spm32-${runId} breakout`,
-      expected_attendance: 80,
-    })
-    .select("booking_id")
-    .single();
-  if (error) throw error;
-  pendingBookingId = booking.booking_id;
-  fixtureHelpers.recordFixtureIds(runId, "bookingIds", [pendingBookingId]);
-
   // A second venue so My Venues sorting has something to order.
   const { data: venue, error: venueError } = await supabase
     .from("venue")
@@ -80,6 +61,42 @@ beforeAll(async () => {
   if (venueError) throw venueError;
   secondVenueId = venue.venue_id;
   fixtureHelpers.recordFixtureIds(runId, "venueIds", [secondVenueId]);
+  const { data: annexRoom, error: roomError } = await supabase
+    .from("room")
+    .insert({ venue_id: secondVenueId, layout_type: "THEATRE", capacity: 50 })
+    .select("room_id")
+    .single();
+  if (roomError) throw roomError;
+  fixtureHelpers.recordFixtureIds(runId, "roomIds", [annexRoom.room_id]);
+
+  // A pending booking with attendance and a label, on the planning fixture event.
+  // It uses the Annex, because the event already has an active booking at the
+  // fixture Hall (Master 6.3: one active booking per event and venue), and the
+  // event's second hour: within the event (SPM-179 trigger) and after the Hall
+  // booking's first hour, so sorting by date has no ties.
+  const { data: host, error: hostError } = await supabase
+    .from("event")
+    .select("start_datetime,end_datetime")
+    .eq("event_id", fixtures.events.registeredPlanning)
+    .single();
+  if (hostError) throw hostError;
+  const { data: booking, error } = await supabase
+    .from("venue_booking")
+    .insert({
+      room_id: annexRoom.room_id,
+      event_id: fixtures.events.registeredPlanning,
+      requested_by: fixtures.accounts.coordinator.userId,
+      start_datetime: new Date(Date.parse(host.start_datetime) + 60 * 60000).toISOString(),
+      end_datetime: host.end_datetime,
+      status: "PENDING",
+      label: `spm32-${runId} breakout`,
+      expected_attendance: 80,
+    })
+    .select("booking_id")
+    .single();
+  if (error) throw error;
+  pendingBookingId = booking.booking_id;
+  fixtureHelpers.recordFixtureIds(runId, "bookingIds", [pendingBookingId]);
 
   const db = await mongo.getMongoDb();
   await db.collection("venue_details").insertMany([
