@@ -217,6 +217,7 @@ before(async () => {
   await db.exec(read("20261029140000_spm195_venue_blocks.sql"));
   await db.exec(read("20261029150000_spm195_block_change_notices.sql"));
   await db.exec(read("20261029160000_spm195_close_ended_incidents.sql"));
+  await db.exec(read("20261030160000_spm195_block_change_recovery.sql"));
 });
 
 test("[SPM-195-AC1][TC-03] only active Venue Staff can block, change or restore", async () => {
@@ -575,4 +576,53 @@ test("only the venue lock role may run the entry points", async () => {
     "SELECT has_function_privilege('venue_calendar_writer', 'public._lock_events_then_venue(integer[], integer)', 'EXECUTE') AS writer"
   );
   assert.equal(helper.writer, false);
+});
+
+
+test("[SPM-195] change receipts roll back with effects and make recovery exactly once", async () => {
+  const event = await createEvent();
+  await addBooking(event, ANNEX, "14:00", "16:00");
+  const { blockId } = await block(ANNEX, event.at("13:00"), event.at("15:00"), { eventIds: [event.eventId] });
+  const token = require("node:crypto").randomUUID();
+  const args = [VENUE_STAFF, VENUE_STAFF, token, ANNEX, blockId, "SHORTENED",
+    JSON.stringify({ start: event.at("13:00"), end: event.at("15:00") }),
+    JSON.stringify({ start: event.at("13:00"), end: event.at("14:00") }), 0, 0, [event.eventId]];
+  const execute = async (tx, values = args) => {
+    await tx.query("SELECT public.begin_venue_block_change($1,$2,$3,$4::integer[])", [VENUE_STAFF, ANNEX, blockId, [event.eventId]]);
+    return (await tx.query("SELECT public.record_venue_block_change_once($1,$2,$3::uuid,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11::integer[]) AS result", values)).rows[0].result;
+  };
+  await assert.rejects(db.transaction(async (tx) => { await execute(tx); throw new Error("Mongo write failed"); }), /Mongo write failed/);
+  assert.equal((await rows("SELECT * FROM public.venue_block_change_receipts WHERE write_token=$1", [token])).length, 0);
+  assert.equal((await activityOf("event", event.eventId)).filter(x => x.action === "VENUE_BLOCK_SHORTENED").length, 0);
+  const recovered = await db.transaction(tx => execute(tx));
+  const replayed = await db.transaction(tx => execute(tx));
+  assert.deepEqual(replayed, recovered);
+  assert.equal((await rows("SELECT * FROM public.venue_block_change_receipts WHERE write_token=$1", [token])).length, 1);
+  assert.equal((await activityOf("event", event.eventId)).filter(x => x.action === "VENUE_BLOCK_SHORTENED").length, 1);
+  assert.equal((await noticesOf(event.eventId)).filter(x => x.title === "Venue block shortened").length, 2);
+  const changed = [...args]; changed[5] = "LIFTED";
+  await refused(db.transaction(tx => execute(tx, changed)), "IDEMPOTENCY_KEY_REUSED");
+});
+
+test("[SPM-195] recovery retains original event history after the booking ended", async () => {
+  const event = await createEvent();
+  const bookingId = await addBooking(event, ANNEX, "14:00", "16:00");
+  const { blockId } = await block(ANNEX, event.at("13:00"), event.at("15:00"), { eventIds: [event.eventId] });
+  await db.query("UPDATE public.venue_booking SET status='REJECTED' WHERE booking_id=$1", [bookingId]);
+  await db.transaction(async (tx) => {
+    await tx.query("SELECT public.begin_venue_block_change($1,$2,$3,$4::integer[])", [VENUE_STAFF, ANNEX, blockId, [event.eventId]]);
+    await tx.query("SELECT public.record_venue_block_change_once($1,$1,$2::uuid,$3,$4,'LIFTED',$5::jsonb,$5::jsonb,0,0,$6::integer[])",
+      [VENUE_STAFF, require("node:crypto").randomUUID(), ANNEX, blockId,
+        JSON.stringify({ start: event.at("13:00"), end: event.at("15:00") }), [event.eventId]]);
+  });
+  assert.equal((await activityOf("event", event.eventId)).filter(x => x.action === "VENUE_BLOCK_LIFTED").length, 1);
+});
+
+test("[SPM-195] recovery receipts are private and only callable by the lock role", async () => {
+  const signature = "public.record_venue_block_change_once(integer,integer,uuid,integer,text,text,jsonb,jsonb,integer,integer,integer[])";
+  const privileges = await one(`SELECT has_function_privilege('venue_calendar_writer',$1,'EXECUTE') AS writer,
+    has_function_privilege('service_role',$1,'EXECUTE') AS service,
+    has_table_privilege('authenticated','public.venue_block_change_receipts','SELECT') AS browser,
+    has_table_privilege('venue_calendar_writer','public.venue_block_change_receipts','INSERT') AS direct_write`, [signature]);
+  assert.deepEqual(privileges, { writer: true, service: false, browser: false, direct_write: false });
 });

@@ -24,6 +24,7 @@ const toEntry = (document) => ({
   reason: document.reason ?? null,
   note: document.note ?? null,
   version: document.version ?? null,
+  writeRecovery: document.writeRecovery ?? null,
   createdAt: document.createdAt ?? null,
   updatedAt: document.updatedAt ?? null,
 });
@@ -131,7 +132,7 @@ const insertBlock = async ({ blockId, venueId, reason, note, start, end, created
 
 // Shortens or lifts an active block. Matches only the version the caller read
 // under the venue lock; returns the updated entry, or null when nothing matched.
-const updateBlock = async ({ blockId, venueId, expectedVersion, start, end, lift = false, writeToken }) => {
+const updateBlock = async ({ blockId, venueId, expectedVersion, start, end, lift = false, writeToken, writeRecovery }) => {
   const set = lift
     ? { status: "LIFTED", updatedAt: new Date() }
     : {
@@ -143,7 +144,7 @@ const updateBlock = async ({ blockId, venueId, expectedVersion, start, end, lift
     };
   const document = await (await calendar()).findOneAndUpdate(
     { _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", status: "ACTIVE", version: expectedVersion },
-    { $set: { ...set, writeToken }, $inc: { version: 1 } },
+    { $set: { ...set, writeToken, ...(writeRecovery ? { writeRecovery } : {}) }, $inc: { version: 1 } },
     { returnDocument: "after" }
   );
   return document ? toEntry(document) : null;
@@ -170,6 +171,7 @@ const revertBlock = async ({ blockId, venueId, version, start, end, writeToken }
         occupiedEnd: new Date(end),
         updatedAt: new Date(),
       },
+      $unset: { writeRecovery: "" },
       $inc: { version: 1 },
     }
   );
@@ -178,7 +180,16 @@ const revertBlock = async ({ blockId, venueId, version, start, end, writeToken }
 const ownsBlockWrite = async ({ blockId, venueId, writeToken }) =>
   Boolean(await (await calendar()).findOne({ _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", writeToken }, { projection: { _id: 1 }, readPreference: "primary", maxTimeMS: 2000 }));
 
+// Remove only this attempt's recovery metadata, after PostgreSQL commits.
+const clearBlockRecovery = async ({ blockId, venueId, writeToken }) => {
+  await (await calendar()).updateOne(
+    { _id: new ObjectId(blockId), venueId: String(venueId), writeToken },
+    { $unset: { writeRecovery: "" } }
+  );
+};
+
 module.exports = {
+  clearBlockRecovery,
   ownsBlockWrite,
   deleteBlock,
   revertBlock,

@@ -71,3 +71,17 @@ test("a stale undo cannot overwrite a later change", async () => {
   expect(await model.findCalendarEntry(blockId)).toMatchObject({ version: 3, end: new Date(later.end) });
   expect(await model.ownsBlockWrite(later)).toBe(true);
 });
+
+test("the intent is stored atomically, remains private and clears only for its token", async () => {
+  const original = input();
+  await model.insertBlock(original);
+  const writeToken = randomUUID();
+  const writeRecovery = { actorId: 30, action: "LIFTED", before: { start: original.start, end: original.end },
+    after: { start: original.start, end: original.end }, eventIds: [42], writeToken };
+  await model.updateBlock({ blockId, venueId: 7, expectedVersion: 1, lift: true, writeToken, writeRecovery });
+  expect((await model.findCalendarEntry(blockId)).writeRecovery).toEqual(writeRecovery);
+  await model.clearBlockRecovery({ blockId, venueId: 7, writeToken: randomUUID() });
+  expect((await model.findCalendarEntry(blockId)).writeRecovery).toEqual(writeRecovery);
+  await model.clearBlockRecovery({ blockId, venueId: 7, writeToken });
+  expect((await model.findCalendarEntry(blockId)).writeRecovery).toBeNull();
+});

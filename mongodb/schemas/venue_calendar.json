@@ -24,6 +24,7 @@
       "createdAt": { "bsonType": "date" },
       "updatedAt": { "bsonType": ["date", "null"] },
       "version": { "bsonType": "int", "minimum": 1 },
+      "writeRecovery": {"bsonType": "object", "required": ["actorId", "action", "before", "after", "eventIds", "writeToken"], "additionalProperties": false, "properties": {"actorId": {"bsonType": "int"}, "action": {"enum": ["SHORTENED", "LIFTED"]}, "before": {"bsonType": "object"}, "after": {"bsonType": "object"}, "eventIds": {"bsonType": "array", "items": {"bsonType": "int"}}, "writeToken": {"bsonType": "string", "maxLength": 36}}},
       "writeToken": { "bsonType": "string", "maxLength": 36 },
       "fixture": { "bsonType": "string", "maxLength": 64 }
     }

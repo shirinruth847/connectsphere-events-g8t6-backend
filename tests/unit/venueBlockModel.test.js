@@ -11,6 +11,7 @@ jest.mock("../../model/venueCalendarModel", () => ({
   findCalendarEntry: jest.fn(),
   findVenueBlocks: jest.fn(),
   findEntriesByIds: jest.fn(),
+  clearBlockRecovery: jest.fn(),
   ownsBlockWrite: jest.fn(),
   insertBlock: jest.fn(),
   updateBlock: jest.fn(),
@@ -93,6 +94,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   statements = [];
   venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([[String(HALL), { setupMinutes: 30, turnaroundMinutes: 0 }]]));
+  venueCalendarModel.clearBlockRecovery.mockResolvedValue(undefined);
   venueCalendarModel.ownsBlockWrite.mockResolvedValue(false);
   venueCalendarModel.deleteBlock.mockResolvedValue(undefined);
   venueCalendarModel.revertBlock.mockResolvedValue(undefined);
@@ -340,14 +342,14 @@ describe("changeVenueBlock (SPM-195 AC9)", () => {
     }] });
     const client = lockClient({
       begin_venue_block_change: { venue: { venueId: HALL }, affectedEventIds: [42] },
-      record_venue_block_change: { openIncidents: [] },
+      record_venue_block_change_once: { openIncidents: [] },
     });
     // After the change the block ends at 06:00, where the booking starts.
     venueCalendarModel.findCalendarEntries.mockResolvedValue([blockEntry({ end: "2030-03-10T06:00:00.000Z", occupiedEnd: "2030-03-10T06:00:00.000Z" })]);
 
     const result = await shorten({ start: BLOCK.start, end: "2030-03-10T06:00:00.000Z" });
 
-    expect(statements).toEqual(["BEGIN", "SET", "begin_venue_block_change", "record_venue_block_change", "updateBlock", "COMMIT"]);
+    expect(statements).toEqual(["BEGIN", "SET", "begin_venue_block_change", "record_venue_block_change_once", "updateBlock", "COMMIT"]);
     expect(client.query.mock.calls.find(([sql]) => sql.includes("begin_venue_block_change"))[1][3]).toEqual([42]);
     expect(result.changed).toBe(true);
     expect(result.incidents[0]).toEqual(expect.objectContaining({
@@ -362,7 +364,7 @@ describe("changeVenueBlock (SPM-195 AC9)", () => {
       booking: { venue_id: HALL, status: "APPROVED", start_datetime: "2030-03-10T06:00:00Z", end_datetime: "2030-03-10T08:00:00Z",
         occupied_range: '["2030-03-10 06:00:00+00","2030-03-10 08:00:00+00")' },
     }] });
-    lockClient({ begin_venue_block_change: { affectedEventIds: [42] }, record_venue_block_change: { openIncidents: [] } });
+    lockClient({ begin_venue_block_change: { affectedEventIds: [42] }, record_venue_block_change_once: { openIncidents: [] } });
     venueCalendarModel.findCalendarEntries.mockResolvedValue([blockEntry({ end: "2030-03-10T06:30:00.000Z", occupiedEnd: "2030-03-10T06:30:00.000Z" })]);
 
     const result = await shorten({ start: BLOCK.start, end: "2030-03-10T06:30:00.000Z" });
@@ -370,7 +372,7 @@ describe("changeVenueBlock (SPM-195 AC9)", () => {
   });
 
   test("should_lift_and_answer_unchanged_for_a_lifted_block", async () => {
-    lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change: { openIncidents: [] } });
+    lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change_once: { openIncidents: [] } });
     const lifted = await lift();
     expect(lifted.block.status).toBe("LIFTED");
     expect(venueCalendarModel.updateBlock).toHaveBeenCalledWith(expect.objectContaining({ lift: true, expectedVersion: 1 }));
@@ -383,7 +385,7 @@ describe("changeVenueBlock (SPM-195 AC9)", () => {
   test("[SPM-195-AC11] should_put_the_block_back_when_the_server_refuses_the_COMMIT", async () => {
     lockClient({
       begin_venue_block_change: { affectedEventIds: [] },
-      record_venue_block_change: { openIncidents: [] },
+      record_venue_block_change_once: { openIncidents: [] },
       COMMIT: () => { throw Object.assign(new Error("deferred check failed"), { code: "23514" }); },
     });
     await expect(shorten({ start: BLOCK.start, end: "2030-03-10T06:00:00.000Z" })).rejects.toMatchObject({ code: "23514" });
@@ -393,7 +395,7 @@ describe("changeVenueBlock (SPM-195 AC9)", () => {
   });
 
   test("should_roll_back_when_the_block_changed_under_the_lock", async () => {
-    lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change: { openIncidents: [] } });
+    lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change_once: { openIncidents: [] } });
     venueCalendarModel.updateBlock.mockResolvedValue(null);
     await expect(lift()).rejects.toMatchObject({ code: "BLOCK_VERSION_CONFLICT" });
     expect(statements).toContain("ROLLBACK");
@@ -580,7 +582,7 @@ describe("SPM-195 acknowledgement-loss recovery", () => {
 
   test.each([false, true])("recovers a persisted change (lift=%s) before PostgreSQL commit", async (lift) => {
     venueCalendarModel.findCalendarEntry.mockResolvedValue(blockEntry());
-    lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change: { openIncidents: [] } });
+    lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change_once: { openIncidents: [] } });
     venueCalendarModel.updateBlock.mockImplementation(async () => {
       venueCalendarModel.findCalendarEntry.mockResolvedValue(blockEntry({ version: 2, status: lift ? "LIFTED" : "ACTIVE" }));
       throw new Error("acknowledgement lost");
@@ -608,7 +610,7 @@ describe("SPM-195 acknowledgement-loss recovery", () => {
 
 test.each([false, true])("registers change undo before the write returns (lift=%s)", async (lift) => {
   venueCalendarModel.findCalendarEntry.mockResolvedValue(blockEntry());
-  lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change: { openIncidents: [] } });
+  lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change_once: { openIncidents: [] } });
   venueCalendarModel.updateBlock.mockRejectedValue(new Error("ack lost"));
   let undoWasBeforeRollback = false;
   venueCalendarModel.revertBlock.mockImplementation(async () => {
@@ -625,3 +627,46 @@ test.each([false, true])("registers change undo before the write returns (lift=%
   expect(statements).toContain("ROLLBACK");
   expect(statements).not.toContain("COMMIT");
 });
+
+describe("durable block change recovery", () => {
+  test.each([false, true])("repairs an uncertain change on retry before returning unchanged (lift=%s)", async (lift) => {
+    let persisted = blockEntry();
+    venueCalendarModel.findCalendarEntry.mockImplementation(async () => persisted);
+    venueCalendarModel.updateBlock.mockImplementation(async (input) => {
+      persisted = blockEntry({ start: input.start, end: input.end, version: 2,
+        status: lift ? "LIFTED" : "ACTIVE", writeRecovery: input.writeRecovery });
+      throw new Error("saved but disconnected");
+    });
+    venueCalendarModel.ownsBlockWrite.mockRejectedValue(new Error("offline"));
+    venueCalendarModel.revertBlock.mockRejectedValue(new Error("offline"));
+    venueCalendarModel.clearBlockRecovery.mockImplementation(async () => { persisted = { ...persisted, writeRecovery: null }; });
+    lockClient({ begin_venue_block_change: { affectedEventIds: [] }, record_venue_block_change_once: { openIncidents: [] } });
+    const args = { actorId: VENUE_STAFF_ID, venueId: HALL, blockId: BLOCK_ID };
+    if (lift) args.lift = { version: 1 };
+    else args.change = { version: 1, start: BLOCK.start, end: "2030-03-10T06:00:00.000Z" };
+    await expect(venueModel.changeVenueBlock(args)).rejects.toMatchObject({ code: "VENUE_CALENDAR_OUTCOME_UNKNOWN" });
+    expect(persisted.writeRecovery).toMatchObject({ actorId: VENUE_STAFF_ID, action: lift ? "LIFTED" : "SHORTENED" });
+    expect(statements).toContain("ROLLBACK");
+    // A new request needs only the intent read from MongoDB, no process memory.
+    const beforeRetry = statements.length;
+    await expect(venueModel.changeVenueBlock(args)).resolves.toMatchObject({ changed: false });
+    expect(statements.slice(beforeRetry)).toEqual(["BEGIN", "SET", "begin_venue_block_change", "record_venue_block_change_once", "COMMIT"]);
+    expect(persisted.writeRecovery).toBeNull();
+    const beforeThird = statements.length;
+    await expect(venueModel.changeVenueBlock(args)).resolves.toMatchObject({ changed: false });
+    expect(statements.length).toBe(beforeThird);
+  });
+
+  test("retains the intent if recovery fails again, rather than reporting unchanged", async () => {
+    const intent = { actorId: VENUE_STAFF_ID, action: "LIFTED", before: { start: BLOCK.start, end: BLOCK.end },
+      after: { start: BLOCK.start, end: BLOCK.end }, eventIds: [42], writeToken: cryptoToken() };
+    venueCalendarModel.findCalendarEntry.mockResolvedValue(blockEntry({ status: "LIFTED", version: 2, writeRecovery: intent }));
+    lockClient({ begin_venue_block_change: { affectedEventIds: [42] },
+      record_venue_block_change_once: () => { throw new Error("database unavailable"); } });
+    await expect(venueModel.changeVenueBlock({ actorId: VENUE_STAFF_ID, venueId: HALL, blockId: BLOCK_ID, lift: { version: 1 } }))
+      .rejects.toThrow("database unavailable");
+    expect(venueCalendarModel.clearBlockRecovery).not.toHaveBeenCalled();
+    expect(venueCalendarModel.updateBlock).not.toHaveBeenCalled();
+  });
+});
+const cryptoToken = () => require("node:crypto").randomUUID();

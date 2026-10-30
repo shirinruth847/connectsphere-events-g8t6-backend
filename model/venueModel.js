@@ -1899,14 +1899,60 @@ const listVenueBlocks = async (venueId) => {
   };
 };
 
+// A MongoDB intent survives process restarts and network outages. Its receipt
+// commits with the PostgreSQL effects, so recovery is safe even after a lost
+// COMMIT response. Never take a no-change shortcut before settling the intent.
+const clearCommittedBlockRecovery = async (identity) => {
+  if (!identity.writeToken) return;
+  try {
+    await venueCalendarModel.clearBlockRecovery(identity);
+  } catch {
+    // Retain the durable intent. A later request replays the committed receipt.
+    console.warn("[venue-block] committed change still has recovery metadata");
+  }
+};
+
+const recordBlockChangeOnce = (client, actorId, venueId, blockId, intent, minutes, locked) => selectResult(client,
+  "SELECT public.record_venue_block_change_once($1, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11::integer[]) AS result",
+  [actorId, intent.actorId, intent.writeToken, venueId, blockId, intent.action,
+    JSON.stringify(intent.before), JSON.stringify(intent.after), minutes.setup, minutes.turnaround, locked]
+);
+
+const recoverBlockChange = async (actorId, venueId, current) => {
+  const intent = current.writeRecovery;
+  if (!intent) return;
+  const minutes = await calendarCall(() => readVenueMinutes(venueId));
+  const eventIds = [...intent.eventIds, ...await findOpenIncidentEventIds(current.id)];
+  await withAffectedEventLocks(eventIds, async (client, locked) => {
+    const started = await selectResult(client,
+      "SELECT public.begin_venue_block_change($1, $2, $3, $4::integer[]) AS result",
+      [actorId, venueId, current.id, locked]
+    );
+    requireLocked(started.affectedEventIds, locked);
+    const latest = await calendarCall(() => venueCalendarModel.findCalendarEntry(current.id, {
+      readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS,
+    }));
+    if (!latest?.writeRecovery) return;
+    if (latest.writeRecovery.writeToken !== intent.writeToken) throw venueError("BLOCK_VERSION_CONFLICT");
+    await recordBlockChangeOnce(client, actorId, venueId, current.id, intent, minutes, locked);
+  });
+  await clearCommittedBlockRecovery({ blockId: current.id, venueId, writeToken: intent.writeToken });
+};
+
 // PUT /api/venues/:venueId/blocks/:blockId (shorten) and POST .../lift (AC9,
 // AC11, AC14). A repeated request that matches the block's current state
 // changes nothing and returns 200. Open incidents stay open: Venue Staff then
 // restore each booking that is free again (AC10).
 const changeVenueBlock = async ({ actorId, venueId, blockId, change = null, lift = null }) => {
-  const current = await calendarCall(() => venueCalendarModel.findCalendarEntry(blockId));
+  let current = await calendarCall(() => venueCalendarModel.findCalendarEntry(blockId));
   if (!current || current.type !== venueConflictModel.ENTRY_TYPES.BLOCK || current.venueId !== venueId) {
     throw venueError("BLOCK_NOT_FOUND");
+  }
+
+  if (current.writeRecovery) {
+    await recoverBlockChange(actorId, venueId, current);
+    current = await calendarCall(() => venueCalendarModel.findCalendarEntry(blockId, { readPreference: "primary" }));
+    if (!current) throw venueError("BLOCK_NOT_FOUND");
   }
 
   const unchanged = async () => ({
@@ -1939,24 +1985,23 @@ const changeVenueBlock = async ({ actorId, venueId, blockId, change = null, lift
     const latest = await calendarCall(() => venueCalendarModel.findCalendarEntry(blockId, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
     if (!latest || latest.status !== "ACTIVE" || latest.version !== expectedVersion) throw venueError("BLOCK_VERSION_CONFLICT");
 
-    await client.query(
-      "SELECT public.record_venue_block_change($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9::integer[]) AS result",
-      [actorId, venueId, blockId, action, JSON.stringify(before), JSON.stringify(after), minutes.setup, minutes.turnaround, locked]
-    );
     const writeToken = crypto.randomUUID();
+    const writeRecovery = { actorId, action, before, after, eventIds: locked, writeToken };
+    await recordBlockChangeOnce(client, actorId, venueId, blockId, writeRecovery, minutes, locked);
     transaction.onRollback(() => venueCalendarModel.revertBlock({
       blockId, venueId, version: expectedVersion + 1, start: latest.start, end: latest.end, writeToken,
     }));
     const written = await writeCalendarBlock(
       { blockId, venueId, writeToken },
       () => venueCalendarModel.updateBlock({
-        blockId, venueId, expectedVersion, start: after.start, end: after.end, lift: Boolean(lift), writeToken,
+        blockId, venueId, expectedVersion, start: after.start, end: after.end, lift: Boolean(lift), writeToken, writeRecovery,
       })
     );
     if (!written) throw venueError("BLOCK_VERSION_CONFLICT");
     return written;
   });
 
+  await clearCommittedBlockRecovery({ blockId, venueId, writeToken: updated.writeRecovery?.writeToken });
   return {
     block: toBlock(updated),
     incidents: await describeBlockIncidents([blockId]),
