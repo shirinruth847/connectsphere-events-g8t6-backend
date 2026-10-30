@@ -161,6 +161,26 @@ const getVenueBooking = async (req, res, next) => {
 
 const invalidCursor = (res) => validationFailed(res, { cursor: "Invalid page cursor." });
 
+// GET /api/venues/bookings/:bookingId/availability (SPM-186): the booking's
+// venue calendar over ?from&to, with the booking's own window as the checked
+// period. The venue, window and excluded event come from the booking, never
+// from the query.
+const getBookingAvailability = async (req, res, next) => {
+  const bookingId = parseId(req.params.bookingId);
+  if (!bookingId) return res.status(404).json(BOOKING_NOT_FOUND);
+  const extra = Object.keys(req.query).filter((key) => key !== "from" && key !== "to");
+  const { query, fields } = validateAvailabilityQuery({ from: req.query.from, to: req.query.to });
+  const allFields = { ...(fields || {}), ...Object.fromEntries(extra.map((key) => [key.slice(0, 60), "This parameter is not supported."])) };
+  if (hasErrors(allFields)) return validationFailed(res, allFields);
+  try {
+    const result = await venueModel.findBookingAvailability(bookingId, query, req.user);
+    if (!result) return res.status(404).json(BOOKING_NOT_FOUND);
+    return res.status(200).json(result);
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
 // The venue-relevant part of an event's history (SPM-186, Master 4.2).
 const getEventBookingHistory = async (req, res, next) => {
   try {
@@ -667,4 +687,5 @@ module.exports = {
   getEventBookingHistory,
   checkVenueBookings,
   getVenueHistory,
+  getBookingAvailability,
 };

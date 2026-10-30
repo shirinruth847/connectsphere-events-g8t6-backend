@@ -21,6 +21,7 @@ const {
   getEventVenueBookings,
   getEventBookingHistory,
   getVenueHistory,
+  getBookingAvailability,
   approveVenueBooking,
   rejectVenueBooking,
   listVenuePhotos,
@@ -57,6 +58,8 @@ router.get("/bookings/events/:eventId", ...venueStaffOnly, getEventVenueBookings
 // The venue-relevant part of the event's history (SPM-186).
 router.get("/bookings/events/:eventId/history", ...venueStaffOnly, validateCursorPagination, getEventBookingHistory);
 router.get("/bookings/:bookingId", ...venueStaffOnly, getVenueBooking);
+// The booking's venue calendar with its own window as the checked period (SPM-186).
+router.get("/bookings/:bookingId/availability", ...venueStaffOnly, getBookingAvailability);
 // One booking per decision; there is no bulk decision (SPM-186 AC6).
 router.post("/bookings/:bookingId/approve", ...venueStaffOnly, approveVenueBooking);
 router.post("/bookings/:bookingId/reject", ...venueStaffOnly, rejectVenueBooking);

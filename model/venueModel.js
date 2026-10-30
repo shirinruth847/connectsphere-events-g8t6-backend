@@ -1185,6 +1185,29 @@ const findVenueBookings = async ({ status, venueId, eventId, from, to, limit, q 
 // The event and every booking under it, or null when the event has no
 // bookings or is still a private draft: Venue Staff reach events only
 // through their bookings.
+// One booking's venue calendar for Venue Staff (SPM-186): the booking's own
+// window is the checked period, and its event's own bookings and holds are left
+// out, so the request is not shown overlapping itself. Null when the booking
+// does not exist or its event is a private draft.
+const findBookingAvailability = async (bookingId, { from, to }, viewer) => {
+  const { data, error } = await supabase
+    .from("venue_booking")
+    .select("booking_id,event_id,venue_id,start_datetime,end_datetime,room:room(venue_id),event:event!inner(status)")
+    .eq("booking_id", bookingId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data || data.event.status === EVENT_STATUS.DRAFT) return null;
+  const venueId = data.venue_id ?? data.room?.venue_id;
+  const availability = await getVenueAvailability({
+    from,
+    to,
+    venueIds: [venueId],
+    check: { start: new Date(data.start_datetime), end: new Date(data.end_datetime) },
+    excludeEventId: data.event_id,
+  }, viewer);
+  return { bookingId: data.booking_id, venueId, ...availability };
+};
+
 // Venue Staff reach an event only through its venue bookings, and never a
 // private draft (SPM-181); the same rule gates its history (SPM-186).
 const hasReviewableBookings = async (eventId) => {
@@ -1854,6 +1877,7 @@ module.exports = {
   findVenueBookings,
   findEventBookings,
   hasReviewableBookings,
+  findBookingAvailability,
   findVenueHistory,
   findVenueBooking,
   approveVenueBooking,

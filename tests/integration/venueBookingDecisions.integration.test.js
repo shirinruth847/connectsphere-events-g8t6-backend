@@ -290,6 +290,16 @@ describe("SPM-186 approve a venue booking", () => {
     });
     expect(checksFor(closing)).toMatchObject({ availability: "AVAILABLE", blocking: [] });
 
+    // The booking's own calendar: its window is the checked period, the block
+    // is a conflict, and the booking is not shown overlapping itself.
+    const calendar = await call("venueStaff", "get", `/api/venues/bookings/${main}/availability?from=2027-11-03T16:00:00Z&to=2027-11-05T16:00:00Z`);
+    expect(calendar.status).toBe(200);
+    const [venueCalendar] = calendar.body.venues;
+    expect(venueCalendar.venueId).toBe(venues.Main);
+    expect(venueCalendar.check).toMatchObject({ canRequest: false });
+    expect(venueCalendar.check.conflicts.map((conflict) => conflict.type)).toEqual(["BLOCK"]);
+    expect(venueCalendar.entries.some((entry) => entry.bookingId === main)).toBe(false);
+
     const refused = await approve(main);
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe("VENUE_BLOCKED");
