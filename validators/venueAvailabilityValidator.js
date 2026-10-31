@@ -45,4 +45,11 @@ const validateAvailabilityQuery = (query) => {
   return { query: { from, to, venueIds, check } };
 };
 
-module.exports = { validateAvailabilityQuery, MAX_RANGE_DAYS, MAX_VENUES };
+// GET /api/venues/options/:venueId/availability (SPM-76): the organiser's
+// calendar for one venue, named by the path.
+const validateRequestAvailabilityQuery = (query) => {
+  if (query.venueId !== undefined) return { fields: { venueId: "This parameter is not supported." } };
+  return validateAvailabilityQuery(query);
+};
+
+module.exports = { validateAvailabilityQuery, validateRequestAvailabilityQuery, MAX_RANGE_DAYS, MAX_VENUES };

@@ -920,11 +920,42 @@ const buildVenueOptions = async (catalogueVenues, need, viewer, { requiredFacili
   return { options, availabilityChecked: !hasDates || !ids.length || calendars !== null };
 };
 
-const preferredVenueIds = (event) =>
+// The organiser's ranked choices; null times mean the whole event (SPM-76).
+const preferredVenues = (event) =>
   (Array.isArray(event.event_venue_preference) ? event.event_venue_preference : [])
     .slice()
     .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
-    .map((item) => item.venue_id);
+    .map((item) => ({
+      venueId: item.venue_id,
+      requestedStart: item.requested_start ? new Date(item.requested_start).toISOString() : null,
+      requestedEnd: item.requested_end ? new Date(item.requested_end).toISOString() : null,
+    }));
+
+// Availability of each choice the organiser narrowed, over its own time; choices
+// sharing a time are checked together. Keyed by venue ID.
+const findRequestedTimeAvailability = async (choices, viewer, excludeEventId) => {
+  const byWindow = new Map();
+  for (const choice of choices.filter((item) => item.requestedStart)) {
+    const key = `${choice.requestedStart}/${choice.requestedEnd}`;
+    byWindow.set(key, [...(byWindow.get(key) || []), choice.venueId]);
+  }
+  const result = new Map();
+  for (const [key, venueIds] of byWindow) {
+    const [start, end] = key.split("/").map((value) => new Date(value));
+    let calendars = new Map();
+    try {
+      const availability = await getVenueAvailability({ from: start, to: end, venueIds, check: { start, end }, excludeEventId }, viewer);
+      calendars = new Map(availability.venues.map((venue) => [venue.venueId, venue]));
+    } catch (error) {
+      if (error.name !== "VenueError" || error.code !== "AVAILABILITY_UNAVAILABLE") throw error;
+    }
+    for (const venueId of venueIds) {
+      const { requirementStatus, detail, ...shown } = toOptionAvailability(calendars.get(venueId) ?? null);
+      result.set(venueId, shown);
+    }
+  }
+  return result;
+};
 
 const findVenueNames = async (venueIds) => {
   if (!venueIds.length) return new Map();
@@ -939,7 +970,8 @@ const findVenueNames = async (venueIds) => {
 // event is the visible event row; nothing here writes.
 const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities, sort, order }) => {
   const catalogue = await getVenueCatalogue(filters);
-  const preferredIds = preferredVenueIds(event);
+  const choices = preferredVenues(event);
+  const preferredIds = choices.map((choice) => choice.venueId);
   const listedIds = new Set(catalogue.venues.map((venue) => venue.venueId));
   const unlistedIds = preferredIds.filter((venueId) => !listedIds.has(venueId));
   const extra = unlistedIds.length ? (await getVenueCatalogue({ venueIds: unlistedIds })).venues : [];
@@ -950,6 +982,11 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
   });
   const byId = new Map(options.map((option) => [option.venueId, option]));
   const names = await findVenueNames(preferredIds.filter((venueId) => !byId.has(venueId)));
+  const requestedAvailability = await findRequestedTimeAvailability(
+    choices.filter((choice) => byId.has(choice.venueId)),
+    viewer,
+    event.event_id
+  );
 
   return {
     event: {
@@ -962,15 +999,88 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
       accessibilityNeeds: toNeedList(event.accessibility_needs),
     },
     venues: catalogue.venues.map((venue) => byId.get(venue.venueId)).sort(compareOptions(sort, order)),
-    preferredVenues: preferredIds.map((venueId, index) => ({
+    preferredVenues: choices.map(({ venueId, requestedStart, requestedEnd }, index) => ({
       rank: index + 1,
       venueId,
       name: byId.get(venueId)?.name ?? names.get(venueId) ?? null,
       option: byId.get(venueId) ?? null,
+      requestedStart,
+      requestedEnd,
+      // Over the organiser's requested time; null when the choice covers the whole event.
+      requestedAvailability: requestedAvailability.get(venueId) ?? null,
     })),
     detailsAvailable: catalogue.detailsAvailable,
     availabilityChecked,
     filtersNotChecked: catalogue.filtersNotChecked,
+  };
+};
+
+// ---------- organiser venue options (SPM-76) ----------
+
+// An organiser learns what kind of entry makes a venue unavailable and when,
+// never whose it is or why (SPM-76 AC3).
+const ORGANISER_UNAVAILABLE_LABELS = Object.freeze({
+  BOOKING: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_BOOKING,
+  HOLD: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_HOLD,
+  BLOCK: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_BLOCK,
+});
+const toBusyPeriod = ({ type, occupiedStart, occupiedEnd }) => ({
+  type,
+  label: ORGANISER_UNAVAILABLE_LABELS[type] ?? "Unavailable",
+  occupiedStart,
+  occupiedEnd,
+});
+const toOrganiserAvailability = (availability) => ({
+  ...availability,
+  conflicts: (availability.conflicts || []).map(toBusyPeriod),
+});
+
+// Available venues checked against the organiser's unsaved form values.
+const getRequestVenueOptions = async (need, viewer, { filters, requiredFacilities, sort, order }) => {
+  const catalogue = await getVenueCatalogue(filters);
+  const { options, availabilityChecked } = await buildVenueOptions(catalogue.venues, need, viewer, { requiredFacilities });
+  return {
+    venues: options
+      .sort(compareOptions(sort, order))
+      .map((option) => ({ ...option, availability: toOrganiserAvailability(option.availability) })),
+    detailsAvailable: catalogue.detailsAvailable,
+    availabilityChecked,
+    filtersNotChecked: catalogue.filtersNotChecked,
+  };
+};
+
+// One venue's calendar for the organiser: busy periods by kind only, with the
+// requested time checked when given. Unavailable venues are not found.
+const getRequestVenueAvailability = async (venueId, { from, to, check }, viewer) => {
+  await requireSelectableVenue(venueId);
+  const result = await getVenueAvailability({ from, to, venueIds: [venueId], check }, viewer);
+  const venue = result.venues[0];
+  if (!venue) throw venueError("VENUE_NOT_FOUND");
+  return {
+    from: result.from,
+    to: result.to,
+    generatedAt: result.generatedAt,
+    venue: {
+      venueId: venue.venueId,
+      name: venue.name,
+      operatingHours: venue.operatingHours,
+      setupMinutes: venue.setupMinutes,
+      turnaroundMinutes: venue.turnaroundMinutes,
+      buffersRecorded: venue.buffersRecorded,
+      busyPeriods: venue.entries.filter((entry) => entry.blocking).map(toBusyPeriod),
+      check: venue.check
+        ? {
+            start: venue.check.start,
+            end: venue.check.end,
+            occupiedStart: venue.check.occupiedStart,
+            occupiedEnd: venue.check.occupiedEnd,
+            availability: venue.check.availability,
+            availabilityLabel: venue.check.availabilityLabel,
+            conflicts: venue.check.conflicts.map(toBusyPeriod),
+            operatingHoursWarning: venue.check.operatingHoursWarning,
+          }
+        : null,
+    },
   };
 };
 
@@ -1002,7 +1112,7 @@ const suggestEventVenue = async ({ actorId, eventId, venueId, expectedVersion, i
   return data.suggestion;
 };
 
-// Photos of a venue coordinators and Leads can choose: only
+// Photos of a venue organisers, coordinators and Leads can choose: only
 // available venues (Master 6.2). Venue Staff use the gallery routes (T28).
 const requireSelectableVenue = async (venueId) => {
   const { data, error } = await supabase
@@ -3118,6 +3228,8 @@ module.exports = {
   deleteVenuePhoto,
   getVenueAvailability,
   getEventVenueOptions,
+  getRequestVenueOptions,
+  getRequestVenueAvailability,
   suggestEventVenue,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,

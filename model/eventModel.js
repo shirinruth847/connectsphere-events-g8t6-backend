@@ -15,7 +15,7 @@ const {
   LIFECYCLE_ACTIONS,
   SAFETY_ROUND_STATUS,
 } = require("../config/eventConstants");
-const { MESSAGES, MAX_INTEGER, toWholeNumber } = require("../validators/eventValidator");
+const { MESSAGES, MAX_INTEGER, toWholeNumber, preferenceVenueId } = require("../validators/eventValidator");
 
 // Allowlist: the ONLY fields a client may set. status, organiser_id, coordinator_id etc.
 // are set by the server, so a user cannot send { status: "CONFIRMED" } themselves.
@@ -37,7 +37,7 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested),venue_suggestion:event_venue_suggestion(venue_id,suggested_at,version,venue(name,address,max_capacity),suggester:user(name))";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end),event_equipment_requirement(equipment_id,quantity_requested),venue_suggestion:event_venue_suggestion(venue_id,suggested_at,version,venue(name,address,max_capacity),suggester:user(name))";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
@@ -114,10 +114,19 @@ const toRow = (input) => {
   return row;
 };
 
+// A venue choice for part of the event (SPM-76) goes to the RPC as an object;
+// one for the whole event stays a bare venue ID.
+const toPreferencePayload = (item) => {
+  if (item && typeof item === "object" && item.requestedStart && item.requestedEnd) {
+    return { venue_id: Number(item.venueId), requested_start: item.requestedStart, requested_end: item.requestedEnd };
+  }
+  return Number(preferenceVenueId(item));
+};
+
 // The RPC accepts JSON numbers only, so numeric strings from form controls are converted here.
 const toRequirementPayload = (input) => ({
   venuePreferences: Array.isArray(input.venuePreferences)
-    ? input.venuePreferences.map(Number)
+    ? input.venuePreferences.map(toPreferencePayload)
     : input.venuePreferences,
   equipmentRequirements: Array.isArray(input.equipmentRequirements)
     ? input.equipmentRequirements.map(({ equipmentId, quantity }) => ({
@@ -167,6 +176,21 @@ const parseAccessibility = (value) => {
 const toOrganisation = (organisation) =>
   organisation ? { organisationId: organisation.organisation_id, name: organisation.name } : null;
 
+const sortPreferences = (list) =>
+  list.slice().sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0));
+
+const toIsoOrNull = (value) => (value ? new Date(value).toISOString() : null);
+
+// Each choice's requested time (SPM-76); null times mean the whole event.
+const toVenuePreferenceTimes = (list) =>
+  Array.isArray(list)
+    ? sortPreferences(list).map((item) => ({
+        venueId: typeof item === "number" ? item : item.venue_id,
+        requestedStart: typeof item === "number" ? null : toIsoOrNull(item.requested_start),
+        requestedEnd: typeof item === "number" ? null : toIsoOrNull(item.requested_end),
+      }))
+    : [];
+
 const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
   const venuePreferences = row.venue_preferences || row.event_venue_preference;
   const equipmentRequirements = row.equipment_requirements || row.event_equipment_requirement;
@@ -186,11 +210,9 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
     preferredLayoutType: row.preferred_layout_type,
     accessibilityNeeds: parseAccessibility(row.accessibility_needs),
     venuePreferences: Array.isArray(venuePreferences)
-      ? venuePreferences
-          .slice()
-          .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
-          .map((item) => (typeof item === "number" ? item : item.venue_id))
+      ? sortPreferences(venuePreferences).map((item) => (typeof item === "number" ? item : item.venue_id))
       : [],
+    venuePreferenceTimes: toVenuePreferenceTimes(venuePreferences),
     equipmentRequirements: Array.isArray(equipmentRequirements)
       ? equipmentRequirements.map((item) => ({
           equipmentId: item.equipment_id,
@@ -454,6 +476,7 @@ const toFieldErrors = (details, messages) => {
 const RPC_FIELD_ERRORS = Object.freeze({
   DRAFT_TITLE_REQUIRED: { title: MESSAGES.titleRequired },
   INVALID_VENUE_PREFERENCES: { venuePreferences: MESSAGES.venuePreferencesInvalid },
+  VENUE_PREFERENCE_OUTSIDE_EVENT: { venuePreferences: MESSAGES.venuePreferenceOutsideEvent },
   INVALID_EQUIPMENT_REQUIREMENTS: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
   AMENDMENT_EMPTY: { changes: MESSAGES.amendmentEmpty },
 });
@@ -474,6 +497,7 @@ const CONSTRAINT_FIELD_ERRORS = Object.freeze({
   event_datetime_order_check: { endDatetime: MESSAGES.endBeforeStart },
   event_venue_preference_pkey: { venuePreferences: MESSAGES.venuePreferencesInvalid },
   event_venue_preference_venue_id_fkey: { venuePreferences: MESSAGES.venuePreferencesInvalid },
+  event_venue_preference_requested_window_check: { venuePreferences: MESSAGES.venuePreferenceTimeInvalid },
   event_equipment_requirement_pkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
   event_equipment_requirement_equipment_id_fkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },
 });
@@ -1262,7 +1286,7 @@ const NO_ROWS = { data: [], error: null };
 // every save resends all requirements and existing requests are kept (AC9).
 const findValidationContext = async (input, keptEquipmentIds = []) => {
   const layout = typeof input.preferredLayoutType === "string" ? input.preferredLayoutType.trim() : "";
-  const venueIds = toLookupIds(input.venuePreferences);
+  const venueIds = toLookupIds(Array.isArray(input.venuePreferences) ? input.venuePreferences.map(preferenceVenueId) : []);
   const equipmentIds = toLookupIds(
     Array.isArray(input.equipmentRequirements)
       ? input.equipmentRequirements.map((item) => (item && typeof item === "object" ? item.equipmentId : null))
