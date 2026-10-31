@@ -185,6 +185,7 @@ before(async () => {
   await db.exec(read("20261028162013_spm179_request_venue_bookings.sql"));
   await db.exec(read("20261029080000_spm179_booking_range_hardening.sql"));
   await db.exec(read("20261029090000_spm179_booking_history_entry.sql"));
+  await db.exec(read("20261031010000_spm185_booking_conflict_details.sql"));
 });
 
 test("backfill: every booking gets its room's venue and only single-booking events get a primary", async () => {
@@ -371,6 +372,8 @@ test("TC-09 / TC-10: other bookings conflict over occupied ranges; adjacency is 
 
   const conflict = await refused(request(day.eventId, [booking(day, HALL, "13:14", "14:00")]), "BOOKING_CONFLICT");
   assert.equal(conflict.index, 0);
+  assert.equal(new Date(conflict.conflicts[0].start).toISOString(), new Date(day.at("10:00")).toISOString());
+  assert.equal(new Date(conflict.conflicts[0].end).toISOString(), new Date(day.at("12:00")).toISOString());
   assert.equal(new Date(conflict.conflicts[0].occupiedStart).toISOString(), new Date(day.at("09:30")).toISOString());
   assert.equal(new Date(conflict.conflicts[0].occupiedEnd).toISOString(), new Date(day.at("12:45")).toISOString());
 

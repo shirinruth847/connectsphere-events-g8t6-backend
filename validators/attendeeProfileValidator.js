@@ -53,4 +53,5 @@ const validateProfileSave = (body) => {
     : { profile: { dietaryRestrictions, accessibilityRequirements, version } };
 };
 
-module.exports = { validateProfileSave, MAX_PROFILE_TEXT_LENGTH, MESSAGES };
+// Event registration (SPM-134) applies the same rule to the answers it stores.
+module.exports = { validateProfileSave, readAttendeeText: readText, MAX_PROFILE_TEXT_LENGTH, MESSAGES };
