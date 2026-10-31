@@ -126,3 +126,30 @@ test("[SPM-147] withdrawing twice frees one place, makes one offer and writes ea
   );
   assert.equal(withdrawals, 1);
 });
+
+// Regression for PR 39 Finding 2: withdrawal refused when event started after
+// waiting for locks. clock_timestamp() is used after locks are acquired.
+test("[SPM-147/PR39-F2] withdrawal refused when event started after lock wait", async () => {
+  const eventId = await createEvent({ startsIn: "5 seconds" });
+  await register(A, eventId);
+
+  // Move event start to the past
+  await one("UPDATE public.event SET start_datetime = clock_timestamp() - interval '1 second' WHERE event_id = $1", [eventId]);
+
+  await assert.rejects(withdraw(A, eventId), /EVENT_STARTED/);
+  assert.equal((await placeOf(A, eventId)).registration_status, "REGISTERED");
+});
+
+// Regression for PR 39 Finding 2: late withdrawal classification uses fresh
+// post-lock time, not transaction-start time. 24-hour boundary is accurate.
+test("[SPM-147/PR39-F2] late withdrawal classification uses post-lock time", async () => {
+  const eventId = await createEvent({ startsIn: "25 hours" });
+  await register(A, eventId);
+
+  // Move event start to 23 hours from now (within late window)
+  await one("UPDATE public.event SET start_datetime = clock_timestamp() + interval '23 hours' WHERE event_id = $1", [eventId]);
+
+  const result = await withdraw(A, eventId);
+  assert.equal(result.registration.late_withdrawal, true);
+  assert.equal((await noticesFor(ORGANISER, eventId)).filter((notice) => notice.type === "REGISTRATION_ALERT").length, 1);
+});

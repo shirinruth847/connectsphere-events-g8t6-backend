@@ -169,3 +169,15 @@ test("[SPM-38] organiser history uses backend labels while staff retain detailed
   expect(change).toMatchObject({ beforeLabel: "Approved & Planning", afterLabel: "Approved & Planning" });
   expect(activityModel.toHistoryEntry(row).changes[0]).not.toHaveProperty("afterLabel");
 });
+
+test('[SPM-40] rejection reason reads only the latest organiser-safe rejection for this event',async()=>{
+  const query=queryReturning({data:{details:'Capacity is insufficient.'},error:null});
+  query.limit.mockReturnValue(query);
+  supabase.from.mockReturnValue(query);
+  await expect(activityModel.findRejectionReason(42)).resolves.toBe('Capacity is insufficient.');
+  expect(query.eq).toHaveBeenCalledWith('entity_id',42);
+  expect(query.eq).toHaveBeenCalledWith('action','EVENT_REJECTED');
+  expect(query.eq).toHaveBeenCalledWith('audience','ORGANISER_SAFE');
+  expect(query.order).toHaveBeenCalledWith('log_id',{ascending:false});
+  expect(query.limit).toHaveBeenCalledWith(1);
+});

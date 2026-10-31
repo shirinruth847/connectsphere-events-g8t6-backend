@@ -950,3 +950,13 @@ version and state conflicts return 409; unrelated events return 404.
 Deploy migration `20261026190415_spm39_accept_feasibility.sql` before this API.
 See [the SPM-39 test plan](docs/test-plans/spm-39.md) for validation, transaction
 boundaries, approved Jira/Master alignment and hosted verification requirements.
+
+### Reject an under-review request (SPM-40)
+
+`POST /api/events/:id/reject` accepts `{ "version": 1, "reason": "Reason of at least ten characters" }`
+with an `Idempotency-Key`. Only the active assigned coordinator can reject an
+`UNDER_REVIEW` request that has never been confirmed. Trimmed notes require
+10–2,000 characters. Rejection, audit, organiser notification with notes and
+idempotency result commit together. Deploy the reviewed
+`20261030022851_spm40_reject_submitted_event.sql` migration before this API.
+See [SPM-40 test plan](docs/test-plans/spm-40.md) for scope and rollout details.

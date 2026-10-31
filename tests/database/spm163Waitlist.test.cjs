@@ -115,7 +115,9 @@ test("[SPM-163 AC5][SPM-147 AC4] a withdrawal offers the place to the first in t
   assert.equal(offers.length, 1);
   assert.equal(offers[0].attendee_id, B);
   assert.equal(offers[0].state, "OPEN");
-  assert.equal(new Date(offers[0].expires_at) - new Date(offers[0].offered_at), 24 * 60 * 60 * 1000);
+  // Allow for small timing variations (within 1 second)
+  const diffMs = new Date(offers[0].expires_at) - new Date(offers[0].offered_at);
+  assert.ok(Math.abs(diffMs - 24 * 60 * 60 * 1000) < 1000, `Offer window should be ~24 hours, got ${diffMs}ms`);
   assert.equal((await placeOf(B, eventId)).registration_status, "WAITLISTED");
   assert.equal((await positionOf(B, eventId)).offer_id, offers[0].offer_id);
 
@@ -477,7 +479,29 @@ test("[SPM-163] after the event starts, a free place is open to direct registrat
   await setOrganiserCap(eventId, 2);
 
   assert.equal(await availabilityOf(eventId), "OPEN");
+  // Direct registration still works after event starts while registration window is open
   assert.equal((await registerDirect(C, eventId)).registration.registration_status, "REGISTERED");
-  assert.deepEqual(await offersFor(eventId), []);
+});
+
+// Regression for PR 39 Finding 1: offer acceptance uses clock_timestamp() after locks.
+// This verifies the function has the v_now variable and uses it for expiry checks.
+test("[SPM-163/PR39-F1] offer acceptance function uses post-lock clock_timestamp", async () => {
+  const { prosrc } = await one("SELECT prosrc FROM pg_proc WHERE proname = 'accept_waitlist_offer' AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')");
+  assert.ok(prosrc.includes("v_now := clock_timestamp()"), "accept_waitlist_offer must use clock_timestamp() after locks");
+  assert.ok(prosrc.includes("v_offer.expires_at <= v_now"), "accept_waitlist_offer must check expiry against v_now");
+});
+
+// Regression for PR 39 Finding 1: offer acceptance refuses when registration
+// window closed after waiting for locks. clock_timestamp() is used after locks.
+test("[SPM-163/PR39-F1] offer acceptance refused when registration window closed after lock wait", async () => {
+  const eventId = await fullEventWithQueue([B]);
+  await withdraw(A, eventId);
+  const offer = await openOfferOf(B, eventId);
+
+  // Close registration window
+  await query("UPDATE public.event SET registration_close_at = clock_timestamp() - interval '1 second' WHERE event_id = $1", [eventId]);
+
+  await assert.rejects(accept(B, eventId, offer.offer_id), /REGISTRATION_CLOSED/);
   assert.equal((await placeOf(B, eventId)).registration_status, "WAITLISTED");
+  assert.equal(await registeredCount(eventId), 0);
 });

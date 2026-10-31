@@ -188,6 +188,8 @@ before(async () => {
   await db.exec(readBySuffix("_spm147_withdraw_registration.sql"));
   await db.exec(readBySuffix("_spm163_venue_capacity_places.sql"));
   await db.exec(readBySuffix("_spm163_offers_hold_places.sql"));
+  // The deadline correction must remain last: preserve fresh post-lock time
+  // together with the real waitlist offer reservations and queue priority.
   await db.exec(readBySuffix("_spm134_registration_deadline_clock.sql"));
 });
 after(async () => { if (db) await db.close(); });
@@ -666,15 +668,18 @@ test("[TC-REG-013] should_keep_the_submitted_answers_when_the_attendee_profile_c
 const withWaitlist = async operation => {
   await db.exec('BEGIN');
   try {
+    // Keep reduced delegation tests separate from the real installed schema.
+    // Transaction rollback restores the original table and helper definitions.
     await db.exec(`
+      ALTER TABLE public.waitlist_offer RENAME TO installed_waitlist_offer;
       CREATE TABLE public.waitlist_offer (
         registration_id integer REFERENCES public.registration(registration_id),
         state text NOT NULL, expires_at timestamptz NOT NULL
       );
       CREATE TABLE public.compatibility_calls(kind text);
-      CREATE FUNCTION public._expire_overdue_waitlist_offers(integer) RETURNS integer
+      CREATE OR REPLACE FUNCTION public._expire_overdue_waitlist_offers(p_event_id integer) RETURNS integer
         LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.compatibility_calls VALUES('EXPIRE'); RETURN 0; END $$;
-      CREATE FUNCTION public._offer_freed_places(integer) RETURNS integer
+      CREATE OR REPLACE FUNCTION public._offer_freed_places(p_event_id integer) RETURNS integer
         LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.compatibility_calls VALUES('OFFER'); RETURN 0; END $$;
     `);
     await operation();
@@ -727,7 +732,7 @@ test('[SPM-134/SPM-163] admission delegates expiry then allocation before writin
 test('[SPM-134/SPM-163] helper work cannot use a clock captured before it crosses closing', async () => withWaitlist(async () => {
   const eventId = await createEvent();
   await db.query("UPDATE public.event SET registration_close_at=clock_timestamp()+interval '100 milliseconds' WHERE event_id=$1",[eventId]);
-  await db.exec(`CREATE OR REPLACE FUNCTION public._offer_freed_places(integer) RETURNS integer
+  await db.exec(`CREATE OR REPLACE FUNCTION public._offer_freed_places(p_event_id integer) RETURNS integer
     LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.25); RETURN 0; END $$;`);
   await db.exec('SAVEPOINT admission');
   await assert.rejects(register(ATTENDEE,eventId),hasCode('REGISTRATION_CLOSED'));
@@ -758,7 +763,9 @@ test('[SPM-134/SPM-163] migration can replace shared functions after waitlist in
 test('[SPM-134/SPM-163] partial waitlist installation refuses migration before replacing entry points', async () => {
   await db.exec('BEGIN');
   try {
-    await db.exec('CREATE TABLE public.waitlist_offer(registration_id integer,state text,expires_at timestamptz)');
+    await db.exec(`ALTER TABLE public.waitlist_offer RENAME TO installed_waitlist_offer;
+      ALTER FUNCTION public._offer_freed_places(integer) RENAME TO installed_offer_freed_places;
+      CREATE TABLE public.waitlist_offer(registration_id integer,state text,expires_at timestamptz)`);
     const before = (await one("SELECT prosrc FROM pg_proc WHERE oid='public.register_for_event(integer,integer,text,text,text,text)'::regprocedure")).prosrc;
     await db.exec('SAVEPOINT migration_attempt');
     const sql = readBySuffix('_spm134_registration_deadline_clock.sql')
