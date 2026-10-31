@@ -190,6 +190,9 @@ describe("POST /api/events/:id/venue-bookings (SPM-179)", () => {
     ["VENUE_BOOKINGS_UNAVAILABLE", 503, "Venue bookings cannot be requested right now. Try again shortly."],
     ["VENUE_LOCK_TIMEOUT", 409, "Another change to this event or venue is in progress. Try again."],
     ["IDEMPOTENCY_KEY_REUSED", 409, "This Idempotency-Key was already used for a different request."],
+    // SPM-188 / T35: a refused conversion whose MongoDB undo failed.
+    ["VENUE_CALENDAR_OUTCOME_UNKNOWN", 503, "The hold's outcome could not be confirmed. Reload the event before trying again."],
+    ["HOLD_EXPIRED", 409, "This hold has expired, so it can no longer be confirmed. Request a booking instead."],
   ])("[SPM-179-TC-13] should_map_%s", async (code, status, message) => {
     venueModel.requestVenueBookings.mockRejectedValue(venueError(code));
     const response = await send("post", "/api/events/42/venue-bookings", { bookings: [item()] });

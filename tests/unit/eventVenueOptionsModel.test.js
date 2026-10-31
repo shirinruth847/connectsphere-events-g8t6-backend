@@ -27,7 +27,7 @@ describe("venueRequirements (SPM-72 AC5)", () => {
   test("should_not_mark_unrelated_facilities_or_accessibility_as_met_from_shared_words", () => {
     const list = venueRequirements({
       venue: venue({ facilities: ["Fire alarm system"], accessibilityFeatures: ["Hearing protection available"] }),
-      event: event({ accessibility_needs: JSON.stringify(["Hearing loop"]) }),
+      event: event({ accessibility_needs: JSON.stringify(["Assistive listening system / hearing loop"]) }),
       requiredFacilities: ["PA system"],
       availability: available,
       detailsRead: true,
@@ -46,6 +46,27 @@ describe("venueRequirements (SPM-72 AC5)", () => {
     });
     expect(statuses(list)["facility-0"]).toBe("MET");
     expect(statuses(list)["accessibility-0"]).toBe("MET");
+  });
+
+  test("[SPM-200-TC3] should_match_the_form's_canonical_needs_to_recorded_capabilities", () => {
+    const list = venueRequirements({
+      venue: venue(),
+      event: event({ accessibility_needs: JSON.stringify([
+        "Wheelchair / barrier-free access", "Assistive listening system / hearing loop", "Live CART / ASL captioning space",
+      ]) }),
+      requiredFacilities: [], availability: available, detailsRead: true,
+    });
+    expect(list.filter((need) => need.key.startsWith("accessibility-")).map((need) => need.status))
+      .toEqual(["MET", "MET", "UNMET"]);
+  });
+
+  test("[SPM-200-AC6][Master M4] should_not_treat_legacy_fallbacks_as_verified_during_an_outage", () => {
+    const list = venueRequirements({
+      venue: venue({ rooms: [{ layoutType: "THEATRE" }], supportedLayouts: null, facilities: null }),
+      event: event(), requiredFacilities: ["Projector"],
+      availability: { requirementStatus: "NOT_CHECKED", detail: "Unknown" }, detailsRead: false,
+    });
+    expect(statuses(list)).toEqual({ capacity: "MET", availability: "NOT_CHECKED", layout: "NOT_CHECKED", "accessibility-0": "NOT_CHECKED", "facility-0": "NOT_CHECKED" });
   });
 
   test("[SPM-72-AC5] should_mark_every_stated_requirement_met", () => {
@@ -69,6 +90,58 @@ describe("venueRequirements (SPM-72 AC5)", () => {
   test("[SPM-72-AC5] should_treat_capacity_equal_to_attendance_as_met", () => {
     const list = venueRequirements({ venue: venue({ maxCapacity: 150 }), event: event(), requiredFacilities: [], availability: available, detailsRead: true });
     expect(statuses(list).capacity).toBe("MET");
+  });
+
+  describe("capacity assessment (SPM-198)", () => {
+    const capacityFor = (maxCapacity, expected = 150) => venueRequirements({
+      venue: venue({ maxCapacity }), event: event({ expected_attendance: expected }), requiredFacilities: [], availability: available, detailsRead: true,
+    }).find((item) => item.key === "capacity");
+
+    test("[SPM-198-AC1] should_call_more_places_than_guests_sufficient", () => {
+      expect(capacityFor(200)).toMatchObject({
+        status: "MET",
+        assessment: {
+          level: "SUFFICIENT",
+          title: "Capacity Sufficient",
+          message: "Venue capacity is adequate (200 seats for 150 guests). Comfortable spacing available.",
+        },
+      });
+    });
+
+    test("[SPM-198-AC2] should_call_exactly_full_adequate_and_still_met", () => {
+      expect(capacityFor(150)).toMatchObject({
+        status: "MET",
+        assessment: {
+          level: "EXACT",
+          title: "Capacity Adequate",
+          message: "Venue exactly meets expected attendance (150 seats for 150 guests). No buffer space. May feel crowded.",
+        },
+      });
+    });
+
+    test("[SPM-198-AC3] should_call_fewer_places_than_guests_insufficient", () => {
+      expect(capacityFor(100)).toMatchObject({
+        status: "UNMET",
+        assessment: {
+          level: "INSUFFICIENT",
+          title: "Capacity Insufficient",
+          message: "Venue is too small (100 seats for 150 expected guests). Cannot accommodate. Recommend alternative venue.",
+        },
+      });
+    });
+
+    test("[SPM-198] should_apply_the_boundaries_one_either_side_and_group_thousands", () => {
+      expect(capacityFor(151).assessment.level).toBe("SUFFICIENT");
+      expect(capacityFor(149).assessment.level).toBe("INSUFFICIENT");
+      expect(capacityFor(1500, 1200).assessment.message).toBe(
+        "Venue capacity is adequate (1,500 seats for 1,200 guests). Comfortable spacing available."
+      );
+    });
+
+    test("[SPM-198] should_give_no_assessment_without_expected_attendance", () => {
+      const list = venueRequirements({ venue: venue(), event: event({ expected_attendance: null }), requiredFacilities: [], availability: available, detailsRead: true });
+      expect(list.find((item) => item.key === "capacity")).toBeUndefined();
+    });
   });
 
   test("[SPM-72-AC6] should_report_details_not_checked_when_mongodb_is_unavailable", () => {

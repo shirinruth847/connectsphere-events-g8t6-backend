@@ -129,9 +129,13 @@ const operatingHoursWarning = (range, operatingHoursText) => {
   const hours = parseOperatingHours(operatingHoursText);
   const outside = outsideOperatingHours(range, hours);
   if (!outside.length) return null;
-  const parts = outside.map((part) => `${formatLocal(toTime(part.start))}–${formatLocal(toTime(part.end))}`);
+  // One message, however many nights a multi-day range crosses (SPM-76).
+  const [only] = outside;
+  const message = outside.length === 1
+    ? `Occupied time ${formatLocal(toTime(only.start))}–${formatLocal(toTime(only.end))} is outside operating hours (${operatingHoursText.trim()}).`
+    : `Parts of the occupied time are outside operating hours (${operatingHoursText.trim()}).`;
   return {
-    message: `Occupied time ${parts.join(", ")} is outside operating hours (${operatingHoursText.trim()}).`,
+    message,
     outside: outside.map((part) => ({ start: part.start.toISOString(), end: part.end.toISOString() })),
   };
 };

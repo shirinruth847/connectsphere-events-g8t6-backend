@@ -710,6 +710,8 @@ const CAPABILITY_ALIASES = new Map([
   ["wheelchair accessible entrance", "wheelchair access"],
   ["wheelchair accessible", "wheelchair access"],
   ["wheelchair barrier free access", "wheelchair access"],
+  ["assistive listening system hearing loop", "hearing loop"],
+  ["assistive listening system", "hearing loop"],
 ]);
 const capability = (text) => {
   const label = normalise(text);
@@ -729,20 +731,50 @@ const toNeedList = (value) => {
 
 const requirement = (key, label, status, detail) => ({ key, label, status, detail });
 
-// detailsRead is false when MongoDB was unavailable: PostgreSQL rooms and the
-// accessibility note can still show a need as met, but never as unmet.
+// SPM-198: how well the venue's capacity suits the expected attendance. More
+// room than people is sufficient, exactly full is adequate (still met, but
+// with no spare space), fewer places than people is insufficient.
+const CAPACITY_LEVEL = Object.freeze({ SUFFICIENT: "SUFFICIENT", EXACT: "EXACT", INSUFFICIENT: "INSUFFICIENT" });
+const capacityAssessment = (capacity, attendance) => {
+  const seats = capacity.toLocaleString("en-SG");
+  const guests = attendance.toLocaleString("en-SG");
+  if (capacity > attendance) {
+    return {
+      level: CAPACITY_LEVEL.SUFFICIENT,
+      title: "Capacity Sufficient",
+      message: `Venue capacity is adequate (${seats} seats for ${guests} guests). Comfortable spacing available.`,
+    };
+  }
+  if (capacity === attendance) {
+    return {
+      level: CAPACITY_LEVEL.EXACT,
+      title: "Capacity Adequate",
+      message: `Venue exactly meets expected attendance (${seats} seats for ${guests} guests). No buffer space. May feel crowded.`,
+    };
+  }
+  return {
+    level: CAPACITY_LEVEL.INSUFFICIENT,
+    title: "Capacity Insufficient",
+    message: `Venue is too small (${seats} seats for ${guests} expected guests). Cannot accommodate. Recommend alternative venue.`,
+  };
+};
+
+// Legacy PostgreSQL detail is display-only during an outage (Master M4).
 const venueRequirements = ({ venue, event, requiredFacilities, availability, detailsRead }) => {
   const list = [];
-  const unknownUnlessMet = (met) => (met ? REQUIREMENT_STATUS.MET : detailsRead ? REQUIREMENT_STATUS.UNMET : REQUIREMENT_STATUS.NOT_CHECKED);
+  const detailStatus = (met) => (!detailsRead ? REQUIREMENT_STATUS.NOT_CHECKED : met ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET);
 
   if (event.expected_attendance != null) {
     const fits = venue.maxCapacity >= event.expected_attendance;
-    list.push(requirement(
-      "capacity",
-      "Capacity",
-      fits ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET,
-      `Holds ${venue.maxCapacity.toLocaleString("en-SG")}; ${event.expected_attendance.toLocaleString("en-SG")} expected`
-    ));
+    list.push({
+      ...requirement(
+        "capacity",
+        "Capacity",
+        fits ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET,
+        `Holds ${venue.maxCapacity.toLocaleString("en-SG")}; ${event.expected_attendance.toLocaleString("en-SG")} expected`
+      ),
+      assessment: capacityAssessment(venue.maxCapacity, event.expected_attendance),
+    });
   }
 
   list.push(requirement("availability", "Availability", availability.requirementStatus, availability.detail));
@@ -751,11 +783,11 @@ const venueRequirements = ({ venue, event, requiredFacilities, availability, det
   if (layout && layout !== NO_LAYOUT_PREFERENCE) {
     const layouts = [...(venue.supportedLayouts || []), ...venue.rooms.map((room) => room.layoutType)];
     const met = layouts.some((item) => normalise(item) === normalise(layout));
-    list.push(requirement("layout", "Layout", unknownUnlessMet(met), `${layout} layout`));
+    list.push(requirement("layout", "Layout", detailStatus(met), `${layout} layout`));
   }
 
   toNeedList(event.accessibility_needs).forEach((need, index) => {
-    list.push(requirement(`accessibility-${index}`, "Accessibility", unknownUnlessMet(listMeets(venue.accessibilityFeatures, need)), need));
+    list.push(requirement(`accessibility-${index}`, "Accessibility", detailStatus(listMeets(venue.accessibilityFeatures, need)), need));
   });
 
   requiredFacilities.forEach((facility, index) => {
@@ -889,11 +921,42 @@ const buildVenueOptions = async (catalogueVenues, need, viewer, { requiredFacili
   return { options, availabilityChecked: !hasDates || !ids.length || calendars !== null };
 };
 
-const preferredVenueIds = (event) =>
+// The organiser's ranked choices; null times mean the whole event (SPM-76).
+const preferredVenues = (event) =>
   (Array.isArray(event.event_venue_preference) ? event.event_venue_preference : [])
     .slice()
     .sort((left, right) => (left.preference_order || 0) - (right.preference_order || 0))
-    .map((item) => item.venue_id);
+    .map((item) => ({
+      venueId: item.venue_id,
+      requestedStart: item.requested_start ? new Date(item.requested_start).toISOString() : null,
+      requestedEnd: item.requested_end ? new Date(item.requested_end).toISOString() : null,
+    }));
+
+// Availability of each choice the organiser narrowed, over its own time; choices
+// sharing a time are checked together. Keyed by venue ID.
+const findRequestedTimeAvailability = async (choices, viewer, excludeEventId) => {
+  const byWindow = new Map();
+  for (const choice of choices.filter((item) => item.requestedStart)) {
+    const key = `${choice.requestedStart}/${choice.requestedEnd}`;
+    byWindow.set(key, [...(byWindow.get(key) || []), choice.venueId]);
+  }
+  const result = new Map();
+  for (const [key, venueIds] of byWindow) {
+    const [start, end] = key.split("/").map((value) => new Date(value));
+    let calendars = new Map();
+    try {
+      const availability = await getVenueAvailability({ from: start, to: end, venueIds, check: { start, end }, excludeEventId }, viewer);
+      calendars = new Map(availability.venues.map((venue) => [venue.venueId, venue]));
+    } catch (error) {
+      if (error.name !== "VenueError" || error.code !== "AVAILABILITY_UNAVAILABLE") throw error;
+    }
+    for (const venueId of venueIds) {
+      const { requirementStatus, detail, ...shown } = toOptionAvailability(calendars.get(venueId) ?? null);
+      result.set(venueId, shown);
+    }
+  }
+  return result;
+};
 
 const findVenueNames = async (venueIds) => {
   if (!venueIds.length) return new Map();
@@ -908,7 +971,8 @@ const findVenueNames = async (venueIds) => {
 // event is the visible event row; nothing here writes.
 const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities, sort, order }) => {
   const catalogue = await getVenueCatalogue(filters);
-  const preferredIds = preferredVenueIds(event);
+  const choices = preferredVenues(event);
+  const preferredIds = choices.map((choice) => choice.venueId);
   const listedIds = new Set(catalogue.venues.map((venue) => venue.venueId));
   const unlistedIds = preferredIds.filter((venueId) => !listedIds.has(venueId));
   const extra = unlistedIds.length ? (await getVenueCatalogue({ venueIds: unlistedIds })).venues : [];
@@ -919,6 +983,11 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
   });
   const byId = new Map(options.map((option) => [option.venueId, option]));
   const names = await findVenueNames(preferredIds.filter((venueId) => !byId.has(venueId)));
+  const requestedAvailability = await findRequestedTimeAvailability(
+    choices.filter((choice) => byId.has(choice.venueId)),
+    viewer,
+    event.event_id
+  );
 
   return {
     event: {
@@ -931,15 +1000,64 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
       accessibilityNeeds: toNeedList(event.accessibility_needs),
     },
     venues: catalogue.venues.map((venue) => byId.get(venue.venueId)).sort(compareOptions(sort, order)),
-    preferredVenues: preferredIds.map((venueId, index) => ({
+    preferredVenues: choices.map(({ venueId, requestedStart, requestedEnd }, index) => ({
       rank: index + 1,
       venueId,
       name: byId.get(venueId)?.name ?? names.get(venueId) ?? null,
       option: byId.get(venueId) ?? null,
+      requestedStart,
+      requestedEnd,
+      // Over the organiser's requested time; null when the choice covers the whole event.
+      requestedAvailability: requestedAvailability.get(venueId) ?? null,
     })),
     detailsAvailable: catalogue.detailsAvailable,
     availabilityChecked,
     filtersNotChecked: catalogue.filtersNotChecked,
+  };
+};
+
+// ---------- organiser venue options (SPM-76) ----------
+
+// An organiser learns only what kind of entry makes a venue unavailable: never
+// when it is, whose it is or why (SPM-76 AC3, TC-VS-003).
+const ORGANISER_UNAVAILABLE_LABELS = Object.freeze({
+  BOOKING: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_BOOKING,
+  HOLD: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_HOLD,
+  BLOCK: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_BLOCK,
+});
+const toUnavailableKind = ({ type }) => ({ type, label: ORGANISER_UNAVAILABLE_LABELS[type] ?? "Unavailable" });
+const toOrganiserAvailability = (availability) => ({
+  ...availability,
+  conflicts: (availability.conflicts || []).map(toUnavailableKind),
+});
+
+// Available venues checked against the organiser's unsaved form values.
+const getRequestVenueOptions = async (need, viewer, { filters, requiredFacilities, sort, order }) => {
+  const catalogue = await getVenueCatalogue(filters);
+  const { options, availabilityChecked } = await buildVenueOptions(catalogue.venues, need, viewer, { requiredFacilities });
+  return {
+    venues: options
+      .sort(compareOptions(sort, order))
+      .map((option) => ({ ...option, availability: toOrganiserAvailability(option.availability) })),
+    detailsAvailable: catalogue.detailsAvailable,
+    availabilityChecked,
+    filtersNotChecked: catalogue.filtersNotChecked,
+  };
+};
+
+// One chosen venue checked over the organiser's requested time: the status and
+// the kinds of entry in the way, as in the venue list. There is no calendar:
+// the organiser never sees when other entries are (SPM-76 AC3, TC-VS-001/003).
+// Unavailable venues are not found.
+const getRequestVenueAvailability = async (venueId, { start, end }, viewer) => {
+  await requireSelectableVenue(venueId);
+  const result = await getVenueAvailability({ from: start, to: end, venueIds: [venueId], check: { start, end } }, viewer);
+  const venue = result.venues[0];
+  if (!venue) throw venueError("VENUE_NOT_FOUND");
+  const { status, label, conflicts, operatingHoursWarning } = toOptionAvailability(venue);
+  return {
+    venueId: venue.venueId,
+    availability: { status, label, conflicts: conflicts.map(toUnavailableKind), operatingHoursWarning },
   };
 };
 
@@ -971,7 +1089,7 @@ const suggestEventVenue = async ({ actorId, eventId, venueId, expectedVersion, i
   return data.suggestion;
 };
 
-// Photos of a venue coordinators and Leads can choose: only
+// Photos of a venue organisers, coordinators and Leads can choose: only
 // available venues (Master 6.2). Venue Staff use the gallery routes (T28).
 const requireSelectableVenue = async (venueId) => {
   const { data, error } = await supabase
@@ -1002,7 +1120,7 @@ const getSelectableVenuePhotoImage = async (venueId, photoId) => {
 const BOOKING_VENUE_SELECT =
   "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours))";
 const BOOKING_FIELDS =
-  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,reviewer:user!venue_booking_reviewed_by_fkey(name)";
+  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,calendar_hold_id,reviewer:user!venue_booking_reviewed_by_fkey(name)";
 const BOOKING_LIST_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT},event:event!inner(event_id,title,event_type,status)`;
 const BOOKING_DETAIL_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT}`;
 // Venue Staff see the event's venue-relevant details and the coordinator's
@@ -1049,6 +1167,8 @@ const toBookingSummary = (row) => ({
   expectedAttendance: row.expected_attendance,
   submittedAt: row.created_at,
   updatedAt: row.updated_at,
+  // Requested by confirming a tentative hold (SPM-188 AC9).
+  fromHold: Boolean(row.calendar_hold_id),
 });
 
 const toBookingListItem = (row) => ({
@@ -1404,6 +1524,11 @@ const BOOKING_REQUEST_ERRORS = new Set([
   "BOOKING_CONFLICT",
   "PRIMARY_VENUE_REQUIRED",
   "PRIMARY_VENUE_ALREADY_SET",
+  // record_venue_hold_conversion (SPM-188 AC9).
+  "HOLD_NOT_FOUND",
+  "HOLD_ALREADY_CONVERTED",
+  "HOLD_WINDOW_CHANGED",
+  "HOLD_DETAILS_CHANGED",
 ]);
 // Another transaction holds a lock this one needs (lock_timeout), or PostgreSQL
 // ended this one to break a deadlock or serialisation clash: the coordinator
@@ -1495,9 +1620,14 @@ const bookingWarnings = (item, range, venue, document) => {
 // The MongoDB holds and blocks one booking's occupied range overlaps (Master
 // 5.4). Normal booking requests must respect every active hold, including the
 // event's own. Converting a hold is a separate workflow (SPM-188/SPM-283).
-const findCalendarConflicts = (entries, { venueId, range, now, request }) =>
+// skipHold ({ id, eventId }): the event's own hold that a booking confirms
+// (SPM-188 AC9); it is never a conflict for that booking.
+const isSkippedHold = (entry, skipHold) =>
+  Boolean(skipHold) && entry.id === skipHold.id && String(entry.eventId) === String(skipHold.eventId);
+const findCalendarConflicts = (entries, { venueId, range, now, request, skipHold = null }) =>
   entries
     .filter((entry) => entry.venueId === venueId)
+    .filter((entry) => !isSkippedHold(entry, skipHold))
     .filter((entry) => (entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
       ? entry.status === "ACTIVE"
       : venueConflictModel.isHoldActive(entry, now)))
@@ -1518,7 +1648,7 @@ const findCalendarConflicts = (entries, { venueId, range, now, request }) =>
 // (Master 7.4 step 2): reads each venue's setup/turnaround minutes and its holds
 // and blocks from MongoDB, refuses overlaps with active holds and blocks, and
 // returns the minutes for the PostgreSQL booking-against-booking check.
-const checkVenueCalendar = async (bookings, venues) => {
+const checkVenueCalendar = async (bookings, venues, { eventId = null } = {}) => {
   const venueById = new Map(venues.map((venue) => [venue.venueId, venue]));
   const venueIds = [...venueById.keys()];
   const times = bookings.flatMap((item) => [Date.parse(item.start), Date.parse(item.end)]);
@@ -1554,7 +1684,8 @@ const checkVenueCalendar = async (bookings, venues) => {
     minutes[item.venueId] = { setupMinutes, turnaroundMinutes };
 
     const range = venueConflictModel.occupiedRange(item.start, item.end, setupMinutes, turnaroundMinutes);
-    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, range, now, request: item });
+    const skipHold = item.holdId ? { id: item.holdId, eventId } : null;
+    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, range, now, request: item, skipHold });
     if (conflicts.length) throw venueError("BOOKING_CONFLICT", { index, venueId: item.venueId, conflicts });
 
     const messages = bookingWarnings(item, range, venue, document);
@@ -1644,7 +1775,7 @@ const blockingCheck = (code, message) => ({ code, message });
 // One booking against its own venue and its own window: blocking problems
 // (Approve and requests are refused) and warnings (Venue Staff decide). Other
 // bookings of the same event at other venues never affect the result.
-const assessBookingFit = (item, context, { excludeBookingId = null, now = new Date() } = {}) => {
+const assessBookingFit = (item, context, { excludeBookingId = null, eventId = null, now = new Date() } = {}) => {
   const venue = context.venues.get(item.venueId);
   const blocking = [];
   const result = (availability, range = null, warnings = []) => ({
@@ -1690,7 +1821,8 @@ const assessBookingFit = (item, context, { excludeBookingId = null, now = new Da
       "VENUE_BOOKING_CONFLICT",
       `Overlaps ${booking.status === "APPROVED" ? "an approved" : "a pending"} booking for ${formatRequestId(booking.eventId)} (${formatRange(booking.range.start, booking.range.end)}).`,
     )));
-  findCalendarConflicts(context.entries, { venueId: item.venueId, range, now }).forEach((conflict) => blocking.push(
+  const skipHold = item.holdId && eventId != null ? { id: item.holdId, eventId } : null;
+  findCalendarConflicts(context.entries, { venueId: item.venueId, range, now, skipHold }).forEach((conflict) => blocking.push(
     conflict.type === venueConflictModel.ENTRY_TYPES.BLOCK
       ? blockingCheck("VENUE_BLOCKED", `Blocked${conflict.reasonLabel ? ` (${conflict.reasonLabel})` : ""} ${formatRange(conflict.occupiedStart, conflict.occupiedEnd)}.`)
       : blockingCheck("VENUE_HELD", `Held for another event ${formatRange(conflict.occupiedStart, conflict.occupiedEnd)}, until ${formatInstant(conflict.holdExpiresAt)}.`),
@@ -1702,11 +1834,11 @@ const assessBookingFit = (item, context, { excludeBookingId = null, now = new Da
 // POST /api/events/:id/venue-bookings/check (SPM-186): advisory checks for a
 // request being prepared; nothing is written and nothing is locked. The
 // request itself checks again under the venue lock (Master 7.4).
-const checkVenueBookings = async (items, { now = new Date() } = {}) => {
+const checkVenueBookings = async (items, { eventId = null, now = new Date() } = {}) => {
   const ready = items.filter((item) => item.booking);
   const context = await loadFitContext(ready.map((item) => item.booking));
   return items.map((item) => (item.booking
-    ? { index: item.index, checked: true, fields: {}, ...assessBookingFit(item.booking, context, { now }) }
+    ? { index: item.index, checked: true, fields: {}, ...assessBookingFit(item.booking, context, { eventId, now }) }
     : { index: item.index, checked: false, fields: item.fields, venueId: null, availability: "NOT_CHECKED", occupiedStart: null, occupiedEnd: null, blocking: [], warnings: [] }));
 };
 
@@ -1830,29 +1962,110 @@ const withVenueLockTransaction = async (work) => {
   }
 };
 
+// The booking a hold was converted into, or null when none names it. Read with
+// the service connection while the event and venue locks are held: every
+// conversion runs under those locks, so any that committed is visible here
+// and none can be in flight.
+const findHoldBooking = async (holdId) => {
+  const { data, error } = await supabase.from("venue_booking").select("booking_id").eq("calendar_hold_id", holdId).maybeSingle();
+  if (error) throw venueError("VENUE_BOOKINGS_UNAVAILABLE");
+  return data?.booking_id ?? null;
+};
+
+// SPM-188 AC9: read, under the locks, each hold a booking confirms. It must be
+// this event's hold at this venue, still active and unexpired, and the booking
+// keeps its window (so the booking takes the hold's occupied range). A hold
+// that says CONVERTED although no booking names it lost its COMMIT after
+// MongoDB was written (Master T35); it is restored to ACTIVE and checked again,
+// so the coordinator's retry completes.
+const readConvertingHolds = async (bookings, eventId, now) => {
+  const converting = [];
+  for (const [index, item] of bookings.entries()) {
+    if (!item.holdId) continue;
+    let hold = await calendarCall(() => venueCalendarModel.findCalendarEntry(item.holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
+    const at = { index, venueId: item.venueId };
+    if (!hold || hold.type !== venueConflictModel.ENTRY_TYPES.HOLD || String(hold.eventId) !== String(eventId) || hold.venueId !== item.venueId) {
+      throw venueError("HOLD_NOT_FOUND", at);
+    }
+    if (hold.status === "CONVERTED") {
+      if (await findHoldBooking(hold.id)) throw venueError("HOLD_ALREADY_CONVERTED", at);
+      hold = await calendarCall(() => venueCalendarModel.restoreOrphanConversion({
+        holdId: hold.id, venueId: hold.venueId, expectedVersion: hold.version, convertedBookingId: hold.convertedBookingId,
+      }));
+      if (!hold) throw venueError("HOLD_NOT_ACTIVE", at);
+    }
+    if (hold.status !== "ACTIVE") throw venueError("HOLD_NOT_ACTIVE", at);
+    if (!venueConflictModel.isHoldActive(hold, now)) throw venueError("HOLD_EXPIRED", at);
+    if (Date.parse(hold.start) !== Date.parse(item.start) || Date.parse(hold.end) !== Date.parse(item.end)) {
+      throw venueError("HOLD_WINDOW_CHANGED", at);
+    }
+    converting.push({ index, hold });
+  }
+  return converting;
+};
+
+// SPM-188 AC9/AC10: after request_venue_bookings has saved the bookings, link
+// each to its hold in PostgreSQL and mark the MongoDB hold CONVERTED, both
+// before COMMIT. The expiry job takes the same event and venue locks and the
+// same database clock, and convertHold needs the version read here and an
+// expiry still ahead, so a hold is converted or expired, never both; a refused
+// conversion rolls everything back.
+const convertHolds = async (client, transaction, { actorId, eventId, converting, saved }) => {
+  for (const { index, hold } of converting) {
+    const booking = (saved.bookings || []).find((item) => item.index === index);
+    if (!booking) throw venueError("HOLD_NOT_FOUND", { index, venueId: hold.venueId });
+    await selectResult(client,
+      "SELECT public.record_venue_hold_conversion($1, $2, $3, $4) AS result",
+      [actorId, eventId, booking.bookingId, hold.id]
+    );
+    // The earlier check may have preceded slow calendar and PostgreSQL work.
+    // Use a fresh database clock immediately before the MongoDB transition.
+    const now = new Date(await selectResult(client, "SELECT clock_timestamp() AS result", []));
+    if (!venueConflictModel.isHoldActive(hold, now)) throw venueError("HOLD_EXPIRED", { index, venueId: hold.venueId });
+    const writeToken = crypto.randomUUID();
+    transaction.onRollback(() => venueCalendarModel.revertConvertedHold({ holdId: hold.id, venueId: hold.venueId, version: hold.version + 1, writeToken }));
+    const converted = await writeCalendarHold({ holdId: hold.id, venueId: hold.venueId, writeToken }, () => venueCalendarModel.convertHold({
+      holdId: hold.id, venueId: hold.venueId, expectedVersion: hold.version, bookingId: booking.bookingId, now, writeToken,
+    }));
+    if (!converted || converted.status !== "CONVERTED") {
+      const expired = !venueConflictModel.isHoldActive(hold, now);
+      throw venueError(expired ? "HOLD_EXPIRED" : "HOLD_NOT_ACTIVE", { index, venueId: hold.venueId });
+    }
+  }
+};
+
 // Lock the event then the venues, check MongoDB holds and blocks under those
 // locks, then save the bookings, version, activity and notice, all in one
 // venue lock transaction (Master 7, 7.4). Nothing is announced before COMMIT;
-// any failure rolls everything back.
+// any failure rolls everything back. A booking with a holdId confirms that
+// hold (SPM-188 AC9): the hold is not a conflict for it and becomes CONVERTED.
 const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey }) => {
   const requestHash = hashRequest({ bookings }, {}, [eventId]);
   const venueIds = [...new Set(bookings.map((item) => item.venueId))].sort((left, right) => left - right);
 
   let checkedMinutes = {};
   try {
-    const result = await withVenueLockTransaction(async (client) => {
+    const result = await withVenueLockTransaction(async (client, transaction) => {
       const started = await selectResult(client,
         "SELECT public.begin_venue_booking_request($1, $2, $3::integer[], $4, $5) AS result",
         [actorId, eventId, venueIds, idempotencyKey, requestHash]
       );
       if (started.replay) return started.replay;
 
-      const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || []);
+      // Database time, as the hold expiry job uses under the same locks, so the
+      // two agree on whether a hold has expired (SPM-188 AC10).
+      const now = bookings.some((item) => item.holdId)
+        ? new Date(await selectResult(client, "SELECT clock_timestamp() AS result", []))
+        : new Date();
+      const converting = await readConvertingHolds(bookings, eventId, now);
+      const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || [], { eventId });
       checkedMinutes = minutes;
-      return selectResult(client,
+      const saved = await selectResult(client,
         "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
         [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
       );
+      await convertHolds(client, transaction, { actorId, eventId, converting, saved });
+      return saved;
     });
     return toBookingRequestResult(result);
   } catch (error) {
@@ -2293,11 +2506,48 @@ const describeBlockIncidents = async (blockIds) =>
 
 // GET /api/venues/:venueId/blocks: the venue's current and upcoming blocks,
 // lifted ones included, each with its incidents (Venue Staff venue page, AC9).
+const CLOSED_EVENT_STATUSES = [EVENT_STATUS.COMPLETED, EVENT_STATUS.CANCELLED, EVENT_STATUS.REJECTED];
+
+// Bookings a block overlaps but never affects, because their event has
+// finished, been cancelled or rejected (SPM-195): counted per block so the
+// block can say why they have no incident.
+const countClosedEventOverlaps = async (venueId, blocks) => {
+  const counts = new Map(blocks.map((block) => [block.id, 0]));
+  if (!blocks.length) return counts;
+  const from = Math.min(...blocks.map((block) => new Date(block.start).getTime()));
+  const to = Math.max(...blocks.map((block) => new Date(block.end).getTime()));
+  const { data, error } = await supabase
+    .from("venue_booking")
+    .select("booking_id,start_datetime,end_datetime,occupied_range,event:event!inner(status)")
+    .eq("venue_id", venueId)
+    .in("status", ACTIVE_BOOKING_STATUSES)
+    .in("event.status", CLOSED_EVENT_STATUSES)
+    .lt("start_datetime", new Date(to + BUFFER_MARGIN_MS).toISOString())
+    .gt("end_datetime", new Date(from - BUFFER_MARGIN_MS).toISOString());
+  if (error) throw error;
+  for (const booking of data || []) {
+    const { occupiedStart, occupiedEnd } = parseOccupiedRange(booking.occupied_range);
+    const range = {
+      start: Date.parse(occupiedStart ?? booking.start_datetime),
+      end: Date.parse(occupiedEnd ?? booking.end_datetime),
+    };
+    for (const block of blocks) {
+      if (range.start < new Date(block.end).getTime() && new Date(block.start).getTime() < range.end) {
+        counts.set(block.id, counts.get(block.id) + 1);
+      }
+    }
+  }
+  return counts;
+};
+
 const listVenueBlocks = async (venueId) => {
   const venue = await findManagedVenueRow(venueId);
   if (!venue) throw venueError("VENUE_NOT_FOUND");
   const { blocks, hasMore } = await calendarCall(() => venueCalendarModel.findVenueBlocks(venueId, new Date()));
-  const incidents = blocks.length ? await describeBlockIncidents(blocks.map((block) => block.id)) : [];
+  const [incidents, closedOverlaps] = await Promise.all([
+    blocks.length ? describeBlockIncidents(blocks.map((block) => block.id)) : [],
+    countClosedEventOverlaps(venueId, blocks),
+  ]);
   return {
     venueId,
     venueName: venue.name,
@@ -2305,6 +2555,7 @@ const listVenueBlocks = async (venueId) => {
     blocks: blocks.map((block) => ({
       ...toBlock(block),
       incidents: incidents.filter((incident) => incident.calendarBlockId === block.id),
+      closedEventBookings: closedOverlaps.get(block.id) ?? 0,
     })),
   };
 };
@@ -2517,6 +2768,7 @@ const HOLD_ERRORS = new Set([
 ]);
 
 // Backend labels (Master 3.5: the frontend never maps states itself).
+const HOLD_BOOKING_MISSING_LABEL = "Booking not saved – confirm again";
 const HOLD_STATUS_LABELS = Object.freeze({
   ACTIVE: "On hold (tentative)",
   EXPIRED: "Hold expired",
@@ -2556,16 +2808,33 @@ const callHoldRpc = async (name, args) => {
 const holdStateAt = (hold, now) =>
   (hold.status === "ACTIVE" && !venueConflictModel.isHoldActive(hold, now) ? "EXPIRED" : hold.status);
 
+// A CONVERTED hold whose booking was never saved (a lost COMMIT, Master T35):
+// still unexpired, the coordinator confirms it again; once past its expiry it
+// is shown as expired.
 const toHold = (hold, now) => {
-  const status = holdStateAt(hold, now);
+  const bookingUnavailable = hold.status === "CONVERTED" && hold.convertedBooking === undefined;
+  const bookingMissing = hold.status === "CONVERTED" && hold.convertedBooking === null;
+  const unexpired = venueConflictModel.isHoldActive({ ...hold, status: "ACTIVE" }, now);
+  const status = bookingMissing && !unexpired ? "EXPIRED" : holdStateAt(hold, now);
+  const confirmAgain = bookingMissing && unexpired;
   return {
     holdId: hold.id,
     status,
-    statusLabel: HOLD_STATUS_LABELS[status] || status,
+    statusLabel: bookingUnavailable ? "Booking outcome unavailable" : confirmAgain ? HOLD_BOOKING_MISSING_LABEL : HOLD_STATUS_LABELS[status] || status,
     expiresAt: toIsoOrNull(hold.holdExpiresAt),
     extended: Boolean(hold.extendedAt),
     occupiedStart: toIsoOrNull(hold.occupiedStart),
     occupiedEnd: toIsoOrNull(hold.occupiedEnd),
+    // The booking a confirmed hold became (SPM-188 AC9), with the backend's
+    // booking status; null when unknown or never saved.
+    convertedBookingId: bookingUnavailable ? null : hold.convertedBookingId ?? null,
+    convertedBooking: hold.convertedBooking ? {
+      bookingId: hold.convertedBooking.bookingId,
+      status: hold.convertedBooking.status,
+      statusLabel: VENUE_BOOKING_STATUS_LABELS[hold.convertedBooking.status] || hold.convertedBooking.status,
+    } : null,
+    bookingMissing: confirmAgain,
+    bookingUnavailable,
   };
 };
 
@@ -2599,15 +2868,30 @@ const toHoldRequest = (row, hold, now) => {
 };
 
 // The placed requests' holds by ID, or undefined when MongoDB cannot be read.
+// A converted hold also carries the booking that names it (convertedBooking:
+// the booking, null when none does, undefined when that could not be read).
 const readRequestHolds = async (rows) => {
   const ids = rows.filter((row) => row.calendar_hold_id).map((row) => row.calendar_hold_id);
   if (!ids.length) return new Map();
+  let holds;
   try {
-    return await venueCalendarModel.findEntriesByIds(ids);
+    holds = await venueCalendarModel.findEntriesByIds(ids);
   } catch (error) {
     console.warn("[venue-hold] MongoDB unavailable", { code: error?.code, name: error?.name });
     return undefined;
   }
+  const converted = [...holds.values()].filter((hold) => hold.status === "CONVERTED").map((hold) => hold.id);
+  if (converted.length) {
+    try {
+      const { data, error } = await supabase.from("venue_booking").select("booking_id,status,calendar_hold_id").in("calendar_hold_id", converted);
+      if (error) throw error;
+      const byHold = new Map((data || []).map((row) => [row.calendar_hold_id, { bookingId: row.booking_id, status: row.status }]));
+      for (const id of converted) holds.get(id).convertedBooking = byHold.get(id) ?? null;
+    } catch (error) {
+      console.warn("[venue-hold] converted bookings unavailable", { code: error?.code });
+    }
+  }
+  return holds;
 };
 
 const holdFor = (holds, row) => (holds === undefined ? undefined : holds.get(row.calendar_hold_id) ?? null);
@@ -2967,11 +3251,14 @@ module.exports = {
   deleteVenuePhoto,
   getVenueAvailability,
   getEventVenueOptions,
+  getRequestVenueOptions,
+  getRequestVenueAvailability,
   suggestEventVenue,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,
   venueRequirements,
   toOptionAvailability,
+  toOrganiserAvailability,
   compareOptions,
   findVenueBookings,
   findEventBookings,
