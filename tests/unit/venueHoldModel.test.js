@@ -15,7 +15,8 @@ jest.mock("../../model/venueCalendarModel", () => ({
   revertHold: jest.fn(),
   ownsHoldWrite: jest.fn(),
   findHoldsExpiringBy: jest.fn(),
-  markHoldExpired: jest.fn(),
+  acknowledgeHoldNotice: jest.fn(),
+  markHoldReminded: jest.fn(),
 }));
 
 const supabase = require("../../config/supabase");
@@ -57,7 +58,7 @@ const lockClient = (answers) => {
       const answer = answers[name];
       if (answer === undefined) return { rows: [] };
       const value = typeof answer === "function" ? answer(params) : answer;
-      return { rows: [{ result: value }] };
+      return { rows: [{ result: name.startsWith("begin_venue_hold_") && value ? { serverNow: new Date().toISOString(), ...value } : value }] };
     }),
   };
   getVenueLockPool.mockReturnValue({ connect: jest.fn().mockResolvedValue(client) });
@@ -75,6 +76,7 @@ const place = () => venueModel.placeVenueHold({ actorId: VENUE_STAFF_ID, request
 beforeEach(() => {
   jest.clearAllMocks();
   statements = [];
+  venueCalendarModel.markHoldReminded.mockResolvedValue(undefined);
   supabase.from.mockImplementation(() => chain({ data: requestRow(), error: null }));
   venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([[String(HALL), { setupMinutes: 30, turnaroundMinutes: 15 }]]));
   venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
@@ -280,29 +282,89 @@ describe("extend and release (SPM-190 AC6)", () => {
   });
 });
 
-describe("hold expiry job (SPM-190 AC5)", () => {
-  test("[SPM-190-AC5] should_remind_before_expiry_and_expire_overdue_holds", async () => {
-    const now = new Date();
-    venueCalendarModel.findHoldsExpiringBy.mockResolvedValue([
-      activeHold({ id: "e".repeat(24), holdExpiresAt: new Date(now.getTime() - 1000).toISOString() }),
-      activeHold({ holdExpiresAt: new Date(now.getTime() + 3600 * 1000).toISOString() }),
-    ]);
-    venueCalendarModel.markHoldExpired.mockResolvedValue(true);
-    supabase.rpc.mockResolvedValue({ data: {}, error: null });
-
-    const result = await runHoldExpiry(now);
-
-    expect(result).toEqual({ checked: 2, reminded: 1, expired: 1 });
-    expect(venueCalendarModel.findHoldsExpiringBy).toHaveBeenCalledWith(new Date(now.getTime() + DAY), { limit: 100 });
-    expect(supabase.rpc.mock.calls.map(([, args]) => args.p_kind)).toEqual(["EXPIRED", "EXPIRING"]);
-    expect(venueCalendarModel.markHoldExpired).toHaveBeenCalledWith({ holdId: "e".repeat(24), now });
+describe("hold expiry job review regressions", () => {
+  let now;
+  let stored;
+  let claims;
+  beforeEach(() => {
+    now = new Date();
+    stored = [activeHold({ holdExpiresAt: new Date(now.getTime() + 3600000).toISOString() })];
+    claims = new Set();
+    supabase.rpc.mockResolvedValue({ data: now.toISOString(), error: null });
+    venueCalendarModel.findHoldsExpiringBy.mockImplementation(async (_until, { limit }) => stored
+      .filter(h => h.status === "ACTIVE" && (new Date(h.holdExpiresAt) <= now || h.remindedForExpiry !== h.holdExpiresAt))
+      .slice(0, limit).map(h => ({ ...h })));
+    venueCalendarModel.findCalendarEntry.mockImplementation(async id => ({ ...stored.find(h => h.id === id) }));
+    venueCalendarModel.acknowledgeHoldNotice.mockImplementation(async ({ holdId, expectedVersion, expiresAt, kind }) => {
+      const h = stored.find(x => x.id === holdId);
+      if (h.version !== expectedVersion || h.holdExpiresAt !== expiresAt) return false;
+      if (kind === "EXPIRED") h.status = "EXPIRED";
+      else h.remindedForExpiry = expiresAt;
+      return true;
+    });
+    lockClient({
+      begin_venue_hold_expiry: { serverNow: now.toISOString() },
+      record_venue_hold_expiry: args => {
+        const key = `${args[0]}:${args[2]}:${args[4]}`;
+        if (claims.has(key)) return false;
+        claims.add(key); return true;
+      },
+    });
   });
 
-  test("should_not_mark_a_hold_expired_when_the_notice_failed", async () => {
-    venueCalendarModel.findHoldsExpiringBy.mockResolvedValue([activeHold({ holdExpiresAt: inDays(-0.1).toISOString() })]);
-    supabase.rpc.mockResolvedValue({ data: null, error: { code: "08006", message: "connection failure" } });
+  test("uses database time, advances beyond a full reminder batch, and does not recount completed notices", async () => {
+    stored = Array.from({ length: 101 }, (_, i) => activeHold({ id: i.toString(16).padStart(24, "0"),
+      holdExpiresAt: new Date(now.getTime() + 3600000).toISOString() }));
+    expect(await runHoldExpiry()).toEqual({ checked: 100, reminded: 100, expired: 0 });
+    expect(await runHoldExpiry()).toEqual({ checked: 1, reminded: 1, expired: 0 });
+    expect(await runHoldExpiry()).toEqual({ checked: 0, reminded: 0, expired: 0 });
+    expect(claims.size).toBe(101);
+    expect(supabase.rpc).toHaveBeenCalledWith("venue_hold_clock", {});
+  });
 
-    await expect(runHoldExpiry()).rejects.toBeDefined();
-    expect(venueCalendarModel.markHoldExpired).not.toHaveBeenCalled();
+  test("rechecks an extension which won the venue lock before sending an expired notice", async () => {
+    stored[0].holdExpiresAt = new Date(now.getTime() - 1000).toISOString();
+    venueCalendarModel.findHoldsExpiringBy.mockImplementationOnce(async () => {
+      const stale = { ...stored[0] };
+      stored[0].holdExpiresAt = new Date(now.getTime() + 7 * DAY).toISOString(); stored[0].version++;
+      return [stale];
+    });
+    expect(await runHoldExpiry()).toEqual({ checked: 1, reminded: 0, expired: 0 });
+    expect(claims.size).toBe(0);
+    expect(venueCalendarModel.acknowledgeHoldNotice).not.toHaveBeenCalled();
+  });
+
+  test("repairs a lost post-commit acknowledgement without sending a second notice", async () => {
+    venueCalendarModel.acknowledgeHoldNotice.mockRejectedValueOnce(new Error("synthetic lost acknowledgement"));
+    await expect(runHoldExpiry()).rejects.toThrow("synthetic lost acknowledgement");
+    expect(claims.size).toBe(1);
+    expect(await runHoldExpiry()).toEqual({ checked: 1, reminded: 0, expired: 0 });
+    expect(claims.size).toBe(1);
+    expect(await runHoldExpiry()).toMatchObject({ checked: 0 });
+  });
+
+  test("a release that won the lock produces no expiry notice", async () => {
+    venueCalendarModel.findHoldsExpiringBy.mockImplementationOnce(async () => {
+      const stale = { ...stored[0] }; stored[0].status = "RELEASED"; return [stale];
+    });
+    expect(await runHoldExpiry()).toMatchObject({ reminded: 0, expired: 0 });
+    expect(claims.size).toBe(0);
+  });
+
+  test("records overdue holds once and acknowledges only after COMMIT", async () => {
+    stored[0].holdExpiresAt = new Date(now.getTime() - 1000).toISOString();
+    venueCalendarModel.acknowledgeHoldNotice.mockImplementationOnce(async () => {
+      expect(statements.at(-1)).toBe("COMMIT"); stored[0].status = "EXPIRED";
+    });
+    expect(await runHoldExpiry()).toEqual({ checked: 1, reminded: 0, expired: 1 });
+    expect(await runHoldExpiry()).toEqual({ checked: 0, reminded: 0, expired: 0 });
+  });
+
+  test("a rolled-back notice transaction never acknowledges or hides the hold", async () => {
+    lockClient({ begin_venue_hold_expiry: { serverNow: now.toISOString() },
+      record_venue_hold_expiry: () => { throw new Error("synthetic notification failure"); } });
+    await expect(runHoldExpiry()).rejects.toThrow("synthetic notification failure");
+    expect(statements).toContain("ROLLBACK");
+    expect(venueCalendarModel.acknowledgeHoldNotice).not.toHaveBeenCalled();
   });
 });

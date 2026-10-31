@@ -278,21 +278,21 @@ describeLive("SPM-190 tentative venue holds (live)", () => {
     const placed = await placeHold(requested.body.holdRequest.holdRequestId);
     expect(placed.status).toBe(200);
     const { holdId } = placed.body.holdRequest.hold;
-    const expiresAt = new Date((await calendarEntry(holdId)).holdExpiresAt).getTime();
 
     // One notice to the coordinator and one to Venue Staff; a repeat run adds none.
     const count = async (title) => (await noticeTitles(eventId)).filter((each) => each === title).length;
-    const soon = new Date(expiresAt - 60 * 60 * 1000);
-    expect(await venueModel.processDueHolds({ now: soon })).toMatchObject({ reminded: 1, expired: 0 });
+    const soonExpiry = new Date(Date.now() + 60 * 60 * 1000);
+    await (await getMongoDb()).collection("venue_calendar").updateOne({ _id: new ObjectId(holdId) }, { $set: { holdExpiresAt: soonExpiry } });
+    expect(await venueModel.processDueHolds()).toMatchObject({ reminded: 1, expired: 0 });
     const reminders = await count("Venue hold expiring");
     expect(reminders).toBe(2);
-    await venueModel.processDueHolds({ now: soon });
+    await venueModel.processDueHolds();
     expect(await count("Venue hold expiring")).toBe(reminders);
 
-    const after = new Date(expiresAt + 60 * 1000);
-    expect(await venueModel.processDueHolds({ now: after })).toMatchObject({ expired: 1 });
+    await (await getMongoDb()).collection("venue_calendar").updateOne({ _id: new ObjectId(holdId) }, { $set: { holdExpiresAt: new Date(Date.now() - 1000) } });
+    expect(await venueModel.processDueHolds()).toMatchObject({ expired: 1 });
     expect((await calendarEntry(holdId)).status).toBe("EXPIRED");
-    expect(await venueModel.processDueHolds({ now: after })).toMatchObject({ checked: 0, expired: 0 });
+    expect(await venueModel.processDueHolds()).toMatchObject({ checked: 0, expired: 0 });
     expect(await count("Venue hold expired")).toBe(2);
   });
 

@@ -2759,7 +2759,7 @@ const placeVenueHold = async ({ actorId, requestId, idempotencyKey }) => {
       if (started.replay) return started.replay;
       if ((started.bookingConflicts || []).length) throw venueError("VENUE_BOOKING_CONFLICT");
 
-      const now = new Date();
+      const now = new Date(started.serverNow);
       const expiresAt = venueConflictModel.holdExpiryFor(range.start, now);
       if (!expiresAt) throw venueError("HOLD_TOO_LATE");
       const entries = await calendarCall(() => venueCalendarModel.findCalendarEntries(
@@ -2810,12 +2810,12 @@ const changeVenueHold = async ({ actorId, holdId, action, days = null }) => {
 
   try {
     await withVenueLockTransaction(async (client, transaction) => {
-      await selectResult(client,
+      const started = await selectResult(client,
         "SELECT public.begin_venue_hold_change($1, $2, $3, $4) AS result",
         [actorId, hold.eventId, hold.venueId, action]
       );
       const current = await calendarCall(() => venueCalendarModel.findCalendarEntry(holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
-      const now = new Date();
+      const now = new Date(started.serverNow);
       if (!current || current.status !== "ACTIVE") throw venueError("HOLD_NOT_ACTIVE", { currentStatus: current?.status ?? null });
       if (!venueConflictModel.isHoldActive(current, now)) throw venueError("HOLD_EXPIRED");
 
@@ -2852,29 +2852,45 @@ const changeVenueHold = async ({ actorId, holdId, action, days = null }) => {
 const extendVenueHold = ({ actorId, holdId, days }) => changeVenueHold({ actorId, holdId, action: "EXTEND", days });
 const releaseVenueHold = ({ actorId, holdId }) => changeVenueHold({ actorId, holdId, action: "RELEASE" });
 
-// The hold expiry job (Master 5.4.3, 8): holds expiring within 24 hours get the
-// reminder (at once for a shorter hold), overdue ones the expiry notice and
-// then the EXPIRED status. Notices have unique keys, so repeated runs or
-// several processes send nothing twice; an overdue hold already counts as
-// expired everywhere, so a late run only delays the notice.
-const processDueHolds = async ({ now = new Date(), limit = 100 } = {}) => {
-  const due = await venueCalendarModel.findHoldsExpiringBy(new Date(now.getTime() + venueConflictModel.HOLD_CUTOFF_MS), { limit });
+// Each bounded scan advances past reminders already recorded for this expiry.
+// PostgreSQL supplies time and a durable claim. Extension, release and expiry
+// share event -> venue locks; the hold is re-read from the primary under them.
+// MongoDB acknowledgement follows COMMIT and is guarded by version + expiry.
+// If it fails (or the process stops), a retry sees the durable claim, sends no
+// duplicate notice, and repairs the marker. No marker can hide rolled-back work.
+const processDueHolds = async ({ limit = 100 } = {}) => {
+  const now = new Date(await callHoldRpc("venue_hold_clock", {}));
+  const due = await venueCalendarModel.findHoldsExpiringBy(new Date(now.getTime() + venueConflictModel.HOLD_CUTOFF_MS), { limit, now });
   let reminded = 0;
   let expired = 0;
-  for (const hold of due) {
-    if (!hold.eventId) continue;
-    const overdue = new Date(hold.holdExpiresAt).getTime() <= now.getTime();
-    await callHoldRpc("notify_venue_hold_expiry", {
-      p_kind: overdue ? "EXPIRED" : "EXPIRING",
-      p_event_id: hold.eventId,
-      p_hold_id: hold.id,
-      p_venue_id: hold.venueId,
-      p_expires_at: toIsoOrNull(hold.holdExpiresAt),
+  for (const candidate of due) {
+    if (!candidate.eventId) continue;
+    const work = await withVenueLockTransaction(async (client) => {
+      const locked = await selectResult(client,
+        "SELECT public.begin_venue_hold_expiry($1, $2) AS result", [candidate.eventId, candidate.venueId]);
+      if (!locked) return null;
+      const current = await calendarCall(() => venueCalendarModel.findCalendarEntry(candidate.id, {
+        readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS,
+      }));
+      if (!current || current.type !== "HOLD" || current.status !== "ACTIVE"
+          || current.eventId !== candidate.eventId || current.venueId !== candidate.venueId) return null;
+      const dbNow = new Date(locked.serverNow);
+      const expiry = new Date(current.holdExpiresAt);
+      if (expiry.getTime() > dbNow.getTime() + venueConflictModel.HOLD_CUTOFF_MS) return null;
+      const kind = expiry <= dbNow ? "EXPIRED" : "EXPIRING";
+      const claimed = await selectResult(client,
+        "SELECT public.record_venue_hold_expiry($1,$2,$3,$4,$5) AS result",
+        [kind, current.eventId, current.id, current.venueId, expiry.toISOString()]);
+      return { current, kind, claimed };
     });
-    if (overdue) {
-      if (await venueCalendarModel.markHoldExpired({ holdId: hold.id, now })) expired += 1;
-    } else {
-      reminded += 1;
+    if (!work) continue;
+    await venueCalendarModel.acknowledgeHoldNotice({
+      holdId: work.current.id, expectedVersion: work.current.version,
+      expiresAt: work.current.holdExpiresAt, kind: work.kind,
+    });
+    if (work.claimed) {
+      if (work.kind === "EXPIRED") expired += 1;
+      else reminded += 1;
     }
   }
   return { checked: due.length, reminded, expired };

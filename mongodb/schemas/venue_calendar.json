@@ -16,6 +16,7 @@
       "eventId": { "bsonType": ["int", "null"] },
       "label": { "bsonType": ["string", "null"], "maxLength": 100 },
       "holdExpiresAt": { "bsonType": ["date", "null"] },
+      "remindedForExpiry": { "bsonType": ["date", "null"] },
       "extendedAt": { "bsonType": ["date", "null"] },
       "convertedBookingId": { "bsonType": ["int", "null"] },
       "reason": { "enum": ["MAINTENANCE", "EQUIPMENT_FAILURE", "RENOVATION", "SAFETY", "OTHER", null] },

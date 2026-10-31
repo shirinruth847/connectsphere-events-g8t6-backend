@@ -332,6 +332,10 @@ Venue Staff review the venue booking requests that coordinators raise. Every rou
 
 ### Tentative Holds (SPM-190)
 
+**Corrective rollout:** stop older hold-expiry workers (`HOLD_EXPIRY_INTERVAL_MS=0`), then apply PostgreSQL migration `20261031040000_spm190_hold_review_fixes.sql` in one transaction and MongoDB migration `0008_venue_hold_reminder_progress` before deploying this backend/job. Placement rechecks the current event window and preserves setup/turnaround fallback for legacy bookings without stored occupied ranges. The expiry worker uses PostgreSQL time, takes event then venue locks, and re-reads the hold from the MongoDB primary before recording a notice. Durable `venue_hold_notice_claim` rows commit with notification/history writes; rolled-back claims can retry, while committed claims prevent duplicate work after a lost response. Optional `remindedForExpiry` progress is acknowledged only after commit and guarded by hold version and expiry. This advances batches beyond previously reminded holds and cannot overwrite a concurrent extension. Overdue holds remain eligible until expiry is recorded.
+
+Both corrective migrations remain unapplied by this local fix. Preserve additive claim rows and MongoDB fields/indexes on application rollback; removing the validator field while documents contain it would invalidate those documents. Reverting to the old worker restores the batching/race defects. No business data backfill or deletion is required.
+
 The assigned coordinator asks Venue Staff to hold one venue for one window of an event in `PLANNING`; Venue Staff place or decline the hold (Master 5.4.3, T34). A hold is a MongoDB `venue_calendar` `HOLD` entry; the request and decision are a `venue_hold_request` row (migration `20261030143144_spm190_venue_holds`).
 
 | Method & path | Who | Input | Success | Errors |

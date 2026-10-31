@@ -264,20 +264,38 @@ const ownsHoldWrite = async ({ holdId, venueId, writeToken }) =>
   ));
 
 // Active holds expiring by `until`, soonest first, for the expiry job.
-const findHoldsExpiringBy = async (until, { limit = 100 } = {}) => {
+const findHoldsExpiringBy = async (until, { limit = 100, now } = {}) => {
   const documents = await (await calendar())
-    .find({ type: "HOLD", status: "ACTIVE", holdExpiresAt: { $lte: new Date(until) } })
+    .find({ type: "HOLD", status: "ACTIVE", holdExpiresAt: { $lte: new Date(until) },
+      $or: [
+        { holdExpiresAt: { $lte: new Date(now) } },
+        { $expr: { $ne: [{ $ifNull: ["$remindedForExpiry", null] }, "$holdExpiresAt"] } },
+      ],
+    })
     .sort({ holdExpiresAt: 1, _id: 1 })
     .limit(limit)
     .toArray();
   return documents.map(toEntry);
 };
 
-// Records an overdue hold as EXPIRED; true when this call changed it.
-const markHoldExpired = async ({ holdId, now }) => {
+// Post-commit acknowledgement only. A concurrent extension changes version
+// and expiry, so an old reminder/expiry acknowledgement cannot touch it.
+const acknowledgeHoldNotice = async ({ holdId, expectedVersion, expiresAt, kind }) => {
   const result = await (await calendar()).updateOne(
-    { _id: new ObjectId(holdId), type: "HOLD", status: "ACTIVE", holdExpiresAt: { $lte: new Date(now) } },
-    { $set: { status: "EXPIRED", updatedAt: new Date() }, $inc: { version: 1 } }
+    { _id: new ObjectId(holdId), type: "HOLD", status: "ACTIVE", version: expectedVersion, holdExpiresAt: new Date(expiresAt) },
+    kind === "EXPIRED"
+      ? { $set: { status: "EXPIRED", updatedAt: new Date() }, $inc: { version: 1 } }
+      : { $set: { remindedForExpiry: new Date(expiresAt) } }
+  );
+  return result.modifiedCount === 1;
+};
+
+// Reminder-only progress helper: an extension changes expiry, so an old
+// acknowledgement cannot suppress a reminder for the new expiry.
+const markHoldReminded = async ({ holdId, expiresAt }) => {
+  const result = await (await calendar()).updateOne(
+    { _id: new ObjectId(holdId), type: "HOLD", status: "ACTIVE", holdExpiresAt: new Date(expiresAt) },
+    { $set: { remindedForExpiry: new Date(expiresAt) } }
   );
   return result.modifiedCount === 1;
 };
@@ -289,7 +307,8 @@ module.exports = {
   revertHold,
   ownsHoldWrite,
   findHoldsExpiringBy,
-  markHoldExpired,
+  markHoldReminded,
+  acknowledgeHoldNotice,
   clearBlockRecovery,
   ownsBlockWrite,
   deleteBlock,
