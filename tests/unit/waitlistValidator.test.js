@@ -1,0 +1,45 @@
+// SPM-163 / SPM-147 request bodies: allowlisted fields only; the backend
+// decides the attendee, position, offer state and deadline.
+const { validateWaitlistJoin, validateOfferResponse, validateNoFields, MESSAGES } = require("../../validators/waitlistValidator");
+const { validateRegistration, MESSAGES: REGISTRATION_MESSAGES } = require("../../validators/registrationValidator");
+
+describe("validateWaitlistJoin", () => {
+  test("[SPM-163 AC1] is SPM-134's registration answer check, so both forms ask the same", () => {
+    expect(validateWaitlistJoin).toBe(validateRegistration);
+  });
+
+  test("[SPM-163 AC1] keeps both answers, trimmed, and refuses missing, invalid or extra fields", () => {
+    expect(validateWaitlistJoin({ dietaryRestrictions: "  Vegetarian ", accessibilityRequirements: "   " })).toEqual({
+      answers: { dietaryRestrictions: "Vegetarian", accessibilityRequirements: null },
+    });
+    expect(validateWaitlistJoin({ dietaryRestrictions: "a\u0000b", queueOrder: 1 }).fields).toEqual({
+      dietaryRestrictions: REGISTRATION_MESSAGES.textInvalid,
+      accessibilityRequirements: REGISTRATION_MESSAGES.textRequired,
+      queueOrder: REGISTRATION_MESSAGES.unknownField,
+    });
+    expect(validateWaitlistJoin([]).fields).toEqual({ body: REGISTRATION_MESSAGES.bodyInvalid });
+  });
+});
+
+describe("validateOfferResponse", () => {
+  test("[SPM-163 AC6/AC7] needs the positive whole offer ID", () => {
+    expect(validateOfferResponse({ offerId: 12 })).toEqual({ offerId: 12 });
+    for (const offerId of [0, -1, 1.5, "12", null, undefined, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(validateOfferResponse({ offerId }).fields).toEqual({ offerId: MESSAGES.offerIdInvalid });
+    }
+  });
+
+  test("[SPM-163] refuses other fields and non-object bodies", () => {
+    expect(validateOfferResponse({ offerId: 3, state: "ACCEPTED" }).fields).toEqual({ state: MESSAGES.unknownField });
+    expect(validateOfferResponse("3").fields).toEqual({ body: MESSAGES.bodyInvalid });
+  });
+});
+
+describe("validateNoFields", () => {
+  test("[SPM-163 AC4][SPM-147 AC3] accepts no body or an empty object only", () => {
+    expect(validateNoFields(undefined)).toEqual({});
+    expect(validateNoFields({})).toEqual({});
+    expect(validateNoFields({ reason: "busy" }).fields).toEqual({ reason: MESSAGES.unknownField });
+    expect(validateNoFields(null).fields).toEqual({ body: MESSAGES.bodyInvalid });
+  });
+});
