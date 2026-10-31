@@ -80,6 +80,11 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'HOLD_WINDOW_CHANGED';
   END IF;
 
+  IF v_booking.label <> v_request.label
+     OR (v_request.expected_attendance IS NOT NULL AND v_booking.expected_attendance <> v_request.expected_attendance) THEN
+    RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'HOLD_DETAILS_CHANGED';
+  END IF;
+
   BEGIN
     UPDATE public.venue_booking SET calendar_hold_id = p_hold_id WHERE booking_id = p_booking_id;
   EXCEPTION WHEN unique_violation THEN

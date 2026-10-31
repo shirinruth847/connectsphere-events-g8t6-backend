@@ -1892,7 +1892,7 @@ const findHoldBooking = async (holdId) => {
 // that says CONVERTED although no booking names it lost its COMMIT after
 // MongoDB was written (Master T35); it is restored to ACTIVE and checked again,
 // so the coordinator's retry completes.
-const readConvertingHolds = async (client, bookings, eventId, now) => {
+const readConvertingHolds = async (bookings, eventId, now) => {
   const converting = [];
   for (const [index, item] of bookings.entries()) {
     if (!item.holdId) continue;
@@ -1912,14 +1912,6 @@ const readConvertingHolds = async (client, bookings, eventId, now) => {
     if (!venueConflictModel.isHoldActive(hold, now)) throw venueError("HOLD_EXPIRED", at);
     if (Date.parse(hold.start) !== Date.parse(item.start) || Date.parse(hold.end) !== Date.parse(item.end)) {
       throw venueError("HOLD_WINDOW_CHANGED", at);
-    }
-    const { rows } = await client.query(
-      "SELECT label, expected_attendance FROM public.venue_hold_request WHERE calendar_hold_id = $1 AND event_id = $2 AND venue_id = $3 AND status = 'PLACED' FOR UPDATE",
-      [hold.id, eventId, item.venueId]
-    );
-    if (!rows.length) throw venueError("HOLD_NOT_FOUND", at);
-    if (item.label !== rows[0].label || (rows[0].expected_attendance !== null && item.expectedAttendance !== rows[0].expected_attendance)) {
-      throw venueError("HOLD_DETAILS_CHANGED", at);
     }
     converting.push({ index, hold });
   }
@@ -1979,7 +1971,7 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
       const now = bookings.some((item) => item.holdId)
         ? new Date(await selectResult(client, "SELECT clock_timestamp() AS result", []))
         : new Date();
-      const converting = await readConvertingHolds(client, bookings, eventId, now);
+      const converting = await readConvertingHolds(bookings, eventId, now);
       const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || [], { eventId });
       checkedMinutes = minutes;
       const saved = await selectResult(client,
