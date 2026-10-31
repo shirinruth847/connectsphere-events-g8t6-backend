@@ -10,6 +10,7 @@ jest.mock("../../model/eventModel", () => {
     findVisibleEvent: jest.fn(),
     findOrganiserEventRequests: jest.fn(),
     runLifecycleAction: jest.fn(),
+    rejectSubmittedEvent: jest.fn(),
     getEventReadiness: jest.fn(),
   };
 });
@@ -385,5 +386,48 @@ describe("SPM-39 feasibility acceptance", () => {
     const failed = await approve();
     expect(failed.status).toBe(500);
     expect(JSON.stringify(failed.body)).not.toContain("private SQL");
+  });
+});
+
+describe("SPM-40 rejection", () => {
+  const reject = (body = { version: 7, reason: "Reason text" }, headers = { "Idempotency-Key": KEY }) => send("post", "/api/events/42/reject", body, headers);
+  test("returns rejection only after database confirmation", async () => {
+    eventModel.rejectSubmittedEvent.mockResolvedValue({ replayed: false });
+    eventModel.findVisibleEvent.mockResolvedValueOnce(eventRow({ status: "UNDER_REVIEW" })).mockResolvedValueOnce(eventRow({ status: "REJECTED", version: 8 }));
+    const response = await reject();
+    expect(response.status).toBe(200);
+    expect(response.body.event).toMatchObject({ status: "REJECTED", version: 8 });
+    expect(eventModel.rejectSubmittedEvent).toHaveBeenCalledWith({ eventId: 42, actorId: COORDINATOR_ID, expectedVersion: 7, reason: "Reason text", idempotencyKey: KEY });
+  });
+  test.each(["", "   ", "123456789", "a".repeat(2001)])("rejects invalid notes %s", async reason => {
+    const response = await reject({ version: 7, reason });
+    expect(response.status).toBe(400); expect(response.body.fields.reason).toBeTruthy();
+    expect(eventModel.rejectSubmittedEvent).not.toHaveBeenCalled();
+  });
+  test.each(["ORGANISER","COORDINATOR_LEAD","VENUE_STAFF","TECH_SUPPORT","SAFETY_OFFICER","ATTENDEE"])("denies %s", async role => {
+    signedInAs(role,11); expect((await reject()).status).toBe(403);
+    expect(eventModel.rejectSubmittedEvent).not.toHaveBeenCalled();
+  });
+  test("denies unauthenticated and unrelated coordinators",async()=>{
+    userModel.verifyAccessToken.mockResolvedValue(null); expect((await reject()).status).toBe(401);
+    signedInAs("COORDINATOR"); eventModel.findVisibleEvent.mockResolvedValue(null); expect((await reject()).status).toBe(404);
+  });
+  test.each([
+    [{reason:"Reason text"},{"Idempotency-Key":KEY}],
+    [{version:7,reason:"Reason text"},{}],
+    [{version:7,reason:"Reason text",actorId:99},{"Idempotency-Key":KEY}],
+  ])("requires command guards and rejects controlled fields",async(body,headers)=>{
+    expect((await reject(body,headers)).status).toBe(400);
+    expect(eventModel.rejectSubmittedEvent).not.toHaveBeenCalled();
+  });
+  test("refuses invalid states without success",async()=>{
+    eventModel.rejectSubmittedEvent.mockRejectedValue(domainError("TRANSITION_NOT_ALLOWED",{currentStatus:"CANCELLED"}));
+    const response=await reject(); expect(response.status).toBe(409); expect(response.body.event).toBeUndefined();
+  });
+  test("marks replay and hides private database failures",async()=>{
+    eventModel.rejectSubmittedEvent.mockResolvedValue({replayed:true});
+    expect((await reject()).headers["idempotent-replayed"]).toBe("true");
+    eventModel.rejectSubmittedEvent.mockRejectedValue(new Error("private database diagnostic"));
+    const response=await reject();expect(response.status).toBe(500);expect(JSON.stringify(response.body)).not.toContain("private database");
   });
 });

@@ -28,6 +28,7 @@ const {
   getCoordinatorAvailability,
   getEventReadiness,
   acceptFeasibility,
+  rejectSubmittedEvent,
   submitForSafetyReview,
   confirmEvent,
   startPreparation,
@@ -82,6 +83,7 @@ router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/
 router.post("/:id/coordinator", leadOnly, assignCoordinatorAsLead);
 router.patch("/:id/coordinator", leadOnly, patchCoordinator);
 router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
+router.post("/:id/reject", assignedCoordinatorOnly, rejectSubmittedEvent);
 router.get("/:id/readiness", assignedCoordinatorOnly, getEventReadiness);
 router.post("/:id/accept-feasibility", assignedCoordinatorOnly, acceptFeasibility);
 router.post("/:id/submit-for-safety-review", assignedCoordinatorOnly, submitForSafetyReview);

@@ -180,3 +180,15 @@ test("[SPM-286][SPM-287] a technical request entry shows only its labelled statu
   const sent = activityModel.toHistoryEntry({ log_id: 3, changes: { technicalRequestStatus: { before: null, after: "PENDING" } } });
   expect(sent.changes[0]).toMatchObject({ beforeLabel: null, afterLabel: "Pending" });
 });
+
+test('[SPM-40] rejection reason reads only the latest organiser-safe rejection for this event',async()=>{
+  const query=queryReturning({data:{details:'Capacity is insufficient.'},error:null});
+  query.limit.mockReturnValue(query);
+  supabase.from.mockReturnValue(query);
+  await expect(activityModel.findRejectionReason(42)).resolves.toBe('Capacity is insufficient.');
+  expect(query.eq).toHaveBeenCalledWith('entity_id',42);
+  expect(query.eq).toHaveBeenCalledWith('action','EVENT_REJECTED');
+  expect(query.eq).toHaveBeenCalledWith('audience','ORGANISER_SAFE');
+  expect(query.order).toHaveBeenCalledWith('log_id',{ascending:false});
+  expect(query.limit).toHaveBeenCalledWith(1);
+});
