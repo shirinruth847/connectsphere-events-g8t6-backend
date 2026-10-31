@@ -99,7 +99,6 @@ describe("POST /api/events/:id/venue-bookings (SPM-179)", () => {
         accessibilityNeeds: [],
         specialRequirements: null,
         isPrimary: false,
-        holdId: null,
       }],
     });
   });

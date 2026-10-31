@@ -8,6 +8,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 const { ObjectId } = require("mongodb");
 const venueModel = require("../../model/venueModel");
 const { validateVenueBookingRequest } = require("../../validators/venueBookingValidator");
+const { hashRequest } = require("../../model/eventModel");
 
 jest.setTimeout(120000);
 
@@ -60,9 +61,18 @@ describe("holdId on a booking item (SPM-188 AC9)", () => {
   });
   const validate = (holdId) => validateVenueBookingRequest({ bookings: [item(holdId)] }, { event, now: new Date("2030-01-01T00:00:00Z") });
 
+  test("ordinary bookings retain their pre-conversion idempotency hash after deployment", () => {
+    const body = { bookings: [{ ...item(), label: "Synthetic replay", expectedAttendance: 120 }] };
+    for (const holdId of [undefined, null]) {
+      const { bookings } = validateVenueBookingRequest({ bookings: [{ ...body.bookings[0], holdId }] }, { event, now: new Date("2030-01-01T00:00:00Z") });
+      // Captured from the main-branch normalizer before hold conversion existed.
+      expect(hashRequest({ bookings }, {}, [42])).toBe("439b6b6c188b0097de8ac4c906bfefbfc255418fb0577ca4180c04f37640c77f");
+    }
+  });
+
   test("should_accept_a_hold_id_and_default_to_none", () => {
     expect(validate(HOLD_ID).bookings[0].holdId).toBe(HOLD_ID);
-    expect(validate(undefined).bookings[0].holdId).toBeNull();
+    expect(validate(undefined).bookings[0]).not.toHaveProperty("holdId");
   });
 
   test.each([["not-a-hold"], [42], ["6720A1B2C3D4E5F60718293A"]])("should_refuse_a_malformed_hold_id_%p", (holdId) => {

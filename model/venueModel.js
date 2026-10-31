@@ -710,6 +710,8 @@ const CAPABILITY_ALIASES = new Map([
   ["wheelchair accessible entrance", "wheelchair access"],
   ["wheelchair accessible", "wheelchair access"],
   ["wheelchair barrier free access", "wheelchair access"],
+  ["assistive listening system hearing loop", "hearing loop"],
+  ["assistive listening system", "hearing loop"],
 ]);
 const capability = (text) => {
   const label = normalise(text);
@@ -757,11 +759,10 @@ const capacityAssessment = (capacity, attendance) => {
   };
 };
 
-// detailsRead is false when MongoDB was unavailable: PostgreSQL rooms and the
-// accessibility note can still show a need as met, but never as unmet.
+// Legacy PostgreSQL detail is display-only during an outage (Master M4).
 const venueRequirements = ({ venue, event, requiredFacilities, availability, detailsRead }) => {
   const list = [];
-  const unknownUnlessMet = (met) => (met ? REQUIREMENT_STATUS.MET : detailsRead ? REQUIREMENT_STATUS.UNMET : REQUIREMENT_STATUS.NOT_CHECKED);
+  const detailStatus = (met) => (!detailsRead ? REQUIREMENT_STATUS.NOT_CHECKED : met ? REQUIREMENT_STATUS.MET : REQUIREMENT_STATUS.UNMET);
 
   if (event.expected_attendance != null) {
     const fits = venue.maxCapacity >= event.expected_attendance;
@@ -782,11 +783,11 @@ const venueRequirements = ({ venue, event, requiredFacilities, availability, det
   if (layout && layout !== NO_LAYOUT_PREFERENCE) {
     const layouts = [...(venue.supportedLayouts || []), ...venue.rooms.map((room) => room.layoutType)];
     const met = layouts.some((item) => normalise(item) === normalise(layout));
-    list.push(requirement("layout", "Layout", unknownUnlessMet(met), `${layout} layout`));
+    list.push(requirement("layout", "Layout", detailStatus(met), `${layout} layout`));
   }
 
   toNeedList(event.accessibility_needs).forEach((need, index) => {
-    list.push(requirement(`accessibility-${index}`, "Accessibility", unknownUnlessMet(listMeets(venue.accessibilityFeatures, need)), need));
+    list.push(requirement(`accessibility-${index}`, "Accessibility", detailStatus(listMeets(venue.accessibilityFeatures, need)), need));
   });
 
   requiredFacilities.forEach((facility, index) => {
@@ -2682,6 +2683,7 @@ const holdStateAt = (hold, now) =>
 // still unexpired, the coordinator confirms it again; once past its expiry it
 // is shown as expired.
 const toHold = (hold, now) => {
+  const bookingUnavailable = hold.status === "CONVERTED" && hold.convertedBooking === undefined;
   const bookingMissing = hold.status === "CONVERTED" && hold.convertedBooking === null;
   const unexpired = venueConflictModel.isHoldActive({ ...hold, status: "ACTIVE" }, now);
   const status = bookingMissing && !unexpired ? "EXPIRED" : holdStateAt(hold, now);
@@ -2689,20 +2691,21 @@ const toHold = (hold, now) => {
   return {
     holdId: hold.id,
     status,
-    statusLabel: confirmAgain ? HOLD_BOOKING_MISSING_LABEL : HOLD_STATUS_LABELS[status] || status,
+    statusLabel: bookingUnavailable ? "Booking outcome unavailable" : confirmAgain ? HOLD_BOOKING_MISSING_LABEL : HOLD_STATUS_LABELS[status] || status,
     expiresAt: toIsoOrNull(hold.holdExpiresAt),
     extended: Boolean(hold.extendedAt),
     occupiedStart: toIsoOrNull(hold.occupiedStart),
     occupiedEnd: toIsoOrNull(hold.occupiedEnd),
     // The booking a confirmed hold became (SPM-188 AC9), with the backend's
     // booking status; null when unknown or never saved.
-    convertedBookingId: hold.convertedBookingId ?? null,
+    convertedBookingId: bookingUnavailable ? null : hold.convertedBookingId ?? null,
     convertedBooking: hold.convertedBooking ? {
       bookingId: hold.convertedBooking.bookingId,
       status: hold.convertedBooking.status,
       statusLabel: VENUE_BOOKING_STATUS_LABELS[hold.convertedBooking.status] || hold.convertedBooking.status,
     } : null,
     bookingMissing: confirmAgain,
+    bookingUnavailable,
   };
 };
 
@@ -2750,12 +2753,13 @@ const readRequestHolds = async (rows) => {
   }
   const converted = [...holds.values()].filter((hold) => hold.status === "CONVERTED").map((hold) => hold.id);
   if (converted.length) {
-    const { data, error } = await supabase.from("venue_booking").select("booking_id,status,calendar_hold_id").in("calendar_hold_id", converted);
-    if (error) {
-      console.warn("[venue-hold] converted bookings unavailable", { code: error.code });
-    } else {
+    try {
+      const { data, error } = await supabase.from("venue_booking").select("booking_id,status,calendar_hold_id").in("calendar_hold_id", converted);
+      if (error) throw error;
       const byHold = new Map((data || []).map((row) => [row.calendar_hold_id, { bookingId: row.booking_id, status: row.status }]));
       for (const id of converted) holds.get(id).convertedBooking = byHold.get(id) ?? null;
+    } catch (error) {
+      console.warn("[venue-hold] converted bookings unavailable", { code: error?.code });
     }
   }
   return holds;
