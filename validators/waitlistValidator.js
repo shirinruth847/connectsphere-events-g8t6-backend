@@ -1,22 +1,16 @@
 // Waitlist, place-offer and withdrawal request bodies (SPM-163, SPM-147).
 // Pure; no database access. The attendee, event, queue position, offer state
 // and deadline are all decided by the backend.
-const { MAX_PROFILE_TEXT_LENGTH, MESSAGES: PROFILE_MESSAGES } = require("./attendeeProfileValidator");
+const { validateRegistration, MESSAGES: REGISTRATION_MESSAGES } = require("./registrationValidator");
 
-const ANSWER_FIELDS = new Set(["dietaryRestrictions", "accessibilityRequirements"]);
 const OFFER_FIELDS = new Set(["offerId"]);
 const NO_FIELDS = new Set();
 
 const MESSAGES = Object.freeze({
   bodyInvalid: "Send the request as a JSON object.",
-  textRequired: PROFILE_MESSAGES.textRequired,
-  textInvalid: PROFILE_MESSAGES.textInvalid,
-  unknownField: PROFILE_MESSAGES.unknownField,
+  unknownField: REGISTRATION_MESSAGES.unknownField,
   offerIdInvalid: "offerId must be the ID of the place offer you were sent.",
 });
-
-// PostgreSQL text cannot store U+0000, so it is refused here as a 400.
-const NUL_CHARACTER = "\u0000";
 
 const isObject = (body) => body !== null && typeof body === "object" && !Array.isArray(body);
 
@@ -28,30 +22,9 @@ const unknownFields = (body, allowed) => {
   return fields;
 };
 
-// Same rule as the attendee profile: text or null, blank stored as null.
-const readAnswer = (body, key, fields) => {
-  if (!Object.hasOwn(body, key)) {
-    fields[key] = MESSAGES.textRequired;
-    return null;
-  }
-  const value = body[key];
-  if (value === null) return null;
-  if (typeof value !== "string" || value.includes(NUL_CHARACTER) || value.trim().length > MAX_PROFILE_TEXT_LENGTH) {
-    fields[key] = MESSAGES.textInvalid;
-    return null;
-  }
-  return value.trim() || null;
-};
-
-// Joining keeps the answers the attendee confirmed on the registration form,
-// so both are sent (text, or null to leave blank).
-const validateWaitlistJoin = (body) => {
-  if (!isObject(body)) return { fields: { body: MESSAGES.bodyInvalid } };
-  const fields = unknownFields(body, ANSWER_FIELDS);
-  const dietaryRestrictions = readAnswer(body, "dietaryRestrictions", fields);
-  const accessibilityRequirements = readAnswer(body, "accessibilityRequirements", fields);
-  return Object.keys(fields).length > 0 ? { fields } : { answers: { dietaryRestrictions, accessibilityRequirements } };
-};
+// Joining asks the same questions as registering (SPM-134): both answers are
+// sent, as text or null to leave blank.
+const validateWaitlistJoin = validateRegistration;
 
 // Accept and decline name the offer, so a late click never answers a newer one.
 const validateOfferResponse = (body) => {
