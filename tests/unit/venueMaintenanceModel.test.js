@@ -26,7 +26,7 @@ const row = (overrides = {}) => ({
 
 const chain = (result) => {
   const query = {};
-  for (const method of ["select", "eq", "in", "ilike", "order", "range"]) query[method] = jest.fn(() => query);
+  for (const method of ["select", "eq", "in", "ilike", "or", "order", "range"]) query[method] = jest.fn(() => query);
   query.maybeSingle = jest.fn().mockResolvedValue(result);
   query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return query;
@@ -43,11 +43,11 @@ beforeEach(() => {
 });
 
 describe("listManagedVenues", () => {
-  test("[SPM-73-TC11] should_filter_name_and_location_case_insensitively_and_by_status", async () => {
+  test("[SPM-73-TC11][SPM-186] should_search_name_or_location_and_filter_by_location_and_status", async () => {
     await venueModel.listManagedVenues({ search: "marina", location: "Bayfront", status: "INACTIVE" }, { limit: 20, offset: 40 });
 
     expect(venues.eq).toHaveBeenCalledWith("is_active", true);
-    expect(venues.ilike).toHaveBeenCalledWith("name", "%marina%");
+    expect(venues.or).toHaveBeenCalledWith('name.ilike."%marina%",address.ilike."%marina%"');
     expect(venues.ilike).toHaveBeenCalledWith("address", "%Bayfront%");
     expect(venues.eq).toHaveBeenCalledWith("status", "INACTIVE");
     expect(venues.range).toHaveBeenCalledWith(40, 60);
@@ -57,6 +57,7 @@ describe("listManagedVenues", () => {
     await venueModel.listManagedVenues({}, { limit: 50, offset: 0 });
 
     expect(venues.ilike).not.toHaveBeenCalled();
+    expect(venues.or).not.toHaveBeenCalled();
     expect(venues.eq).toHaveBeenCalledTimes(1);
     expect(venues.eq).toHaveBeenCalledWith("is_active", true);
   });
@@ -64,7 +65,9 @@ describe("listManagedVenues", () => {
   test("should_search_wildcard_characters_literally", async () => {
     await venueModel.listManagedVenues({ search: "100%_hall\\" }, { limit: 50, offset: 0 });
 
-    expect(venues.ilike).toHaveBeenCalledWith("name", "%100\\%\\_hall\\\\%");
+    // LIKE wildcards are escaped, then the value is quoted for the or() filter.
+    const pattern = '"%100\\\\%\\\\_hall\\\\\\\\%"';
+    expect(venues.or).toHaveBeenCalledWith(`name.ilike.${pattern},address.ilike.${pattern}`);
   });
 
   test("[SPM-73-AC9] should_map_venues_with_who_created_and_last_changed_them", async () => {

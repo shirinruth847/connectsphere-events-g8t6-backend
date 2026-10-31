@@ -32,7 +32,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   userModel.verifyAccessToken.mockResolvedValue("auth-venue-staff");
   userModel.findUserByAuthId.mockResolvedValue({ user_id: 7, role: "VENUE_STAFF", organisation_ids: [] });
-  venueModel.findVenueBookings.mockResolvedValue({ bookings: [bookingItem], hasMore: false, pendingCount: 1 });
+  venueModel.findVenueBookings.mockResolvedValue({ bookings: [bookingItem], hasMore: false, pendingCount: 1, approvedCount: 2 });
 });
 
 describe("Venue booking review access (SPM-181 AC7)", () => {
@@ -66,11 +66,11 @@ describe("Venue booking review access (SPM-181 AC7)", () => {
 });
 
 describe("GET /api/venues/bookings", () => {
-  test("[SPM-181-AC1] should_list_bookings_with_the_pending_count", async () => {
+  test("[SPM-181-AC1] should_list_bookings_with_the_pending_and_approved_counts", async () => {
     const response = await get("/api/venues/bookings");
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ bookings: [bookingItem], hasMore: false, pendingCount: 1 });
+    expect(response.body).toEqual({ bookings: [bookingItem], hasMore: false, pendingCount: 1, approvedCount: 2 });
     expect(venueModel.findVenueBookings).toHaveBeenCalledWith({
       status: null, venueId: null, eventId: null, from: null, to: null, limit: 100, q: null, sort: "default", order: "asc",
     });
@@ -96,12 +96,12 @@ describe("GET /api/venues/bookings", () => {
   });
 
   test("[SPM-181-AC6] should_report_zero_pending_when_none_are_pending", async () => {
-    venueModel.findVenueBookings.mockResolvedValue({ bookings: [], hasMore: false, pendingCount: 0 });
+    venueModel.findVenueBookings.mockResolvedValue({ bookings: [], hasMore: false, pendingCount: 0, approvedCount: 0 });
 
     const response = await get("/api/venues/bookings?status=PENDING");
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ bookings: [], hasMore: false, pendingCount: 0 });
+    expect(response.body).toEqual({ bookings: [], hasMore: false, pendingCount: 0, approvedCount: 0 });
   });
 
   test.each([
