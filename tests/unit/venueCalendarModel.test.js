@@ -157,3 +157,27 @@ describe("saveVenueDetails (Master 7.4)", () => {
     await expect(save(0, { setupMinutes: 2000 })).rejects.toMatchObject({ code: 121 });
   });
 });
+
+test('[SPM-190] reminder progress reaches hold 101 while overdue holds stay eligible', async () => {
+  const expiresAt = new Date(NOW.getTime() + 12 * 3600000);
+  await db.collection('venue_calendar').insertMany(Array.from({ length: 101 }, () => entry({ holdExpiresAt: expiresAt })));
+  const first = await calendarModel.findHoldsExpiringBy(new Date(NOW.getTime() + 86400000), { now: NOW, limit: 100 });
+  expect(first).toHaveLength(100);
+  for (const hold of first) await calendarModel.markHoldReminded({ holdId: hold.id, expectedVersion: hold.version, expiresAt: hold.holdExpiresAt });
+  const second = await calendarModel.findHoldsExpiringBy(new Date(NOW.getTime() + 86400000), { now: NOW, limit: 100 });
+  expect(second).toHaveLength(1);
+  expect(first.map(h => h.id)).not.toContain(second[0].id);
+  await calendarModel.markHoldReminded({ holdId: second[0].id, expectedVersion: second[0].version, expiresAt: second[0].holdExpiresAt });
+  expect(await calendarModel.findHoldsExpiringBy(new Date(NOW.getTime() + 86400000), { now: NOW })).toHaveLength(0);
+  const overdue = new Date(expiresAt.getTime() + 1);
+  expect(await calendarModel.findHoldsExpiringBy(overdue, { now: overdue, limit: 200 })).toHaveLength(101);
+});
+
+test('[SPM-190] a reminder racing an extension cannot mark the new expiry complete', async () => {
+  const oldExpiry = new Date(NOW.getTime() + 3600000);
+  const nextExpiry = new Date(NOW.getTime() + 7200000);
+  const result = await db.collection('venue_calendar').insertOne(entry({ holdExpiresAt: nextExpiry }));
+  await calendarModel.markHoldReminded({ holdId: String(result.insertedId), expectedVersion: 1, expiresAt: oldExpiry });
+  expect((await db.collection('venue_calendar').findOne({ _id: result.insertedId })).remindedForExpiry).toBeUndefined();
+  expect(await calendarModel.findHoldsExpiringBy(new Date(NOW.getTime() + 86400000), { now: NOW })).toHaveLength(1);
+});

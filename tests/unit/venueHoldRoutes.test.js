@@ -321,3 +321,13 @@ describe("release and withdraw (Venue Staff or the coordinator)", () => {
     expect(venueModel.withdrawVenueHoldRequest).toHaveBeenCalledWith({ actorId: COORDINATOR_ID, requestId: 3 });
   });
 });
+
+
+test('placement capacity conflicts return an actionable 409 instead of an internal error', async () => {
+  venueModel.placeVenueHold.mockRejectedValue(venueError('VENUE_CAPACITY_EXCEEDED'));
+  const response = await send('post', '/api/venues/hold-requests/3/place');
+  expect(response.status).toBe(409);
+  expect(response.body.code).toBe('VENUE_CAPACITY_EXCEEDED');
+  expect(response.body.error).toMatch(/capacity/);
+  expect(response.body).not.toHaveProperty('stack');
+});

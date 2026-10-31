@@ -110,7 +110,7 @@ const cleanupLifecycleRows = async (runId, eventIds) => {
         [eventIds]
       );
       // Tables from the Master resource migration, when it has been applied.
-      for (const table of ["resource_incidents", "technical_requests", "venue_hold_request"]) {
+      for (const table of ["resource_incidents", "technical_requests", "venue_hold_notice_claim", "venue_hold_request"]) {
         const { rows: exists } = await client.query("SELECT to_regclass($1) AS name", [`public.${table}`]);
         if (exists[0].name) await client.query(`DELETE FROM public.${table} WHERE event_id = ANY($1::integer[])`, [eventIds]);
       }

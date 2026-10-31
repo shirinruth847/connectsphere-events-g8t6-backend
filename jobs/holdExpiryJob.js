@@ -9,7 +9,7 @@ const venueModel = require("../model/venueModel");
 const BATCH_SIZE = 100;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 
-const runHoldExpiry = async (now = new Date()) => venueModel.processDueHolds({ now, limit: BATCH_SIZE });
+const runHoldExpiry = async () => venueModel.processDueHolds({ limit: BATCH_SIZE });
 
 // HOLD_EXPIRY_INTERVAL_MS sets the period; 0 turns the job off.
 const readIntervalMs = () => {

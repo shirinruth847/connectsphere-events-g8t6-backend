@@ -7,6 +7,7 @@ jest.mock("../../config/venueLockDatabase", () => ({ getVenueLockPool: jest.fn()
 jest.mock("../../model/venueDetailModel", () => ({ getVenueDetailsByIds: jest.fn() }));
 jest.mock("../../model/venueCalendarModel", () => ({
   findCalendarEntries: jest.fn(),
+  findHoldPlacementWrite: jest.fn(),
   findCalendarEntry: jest.fn(),
   findEntriesByIds: jest.fn(),
   insertHold: jest.fn(),
@@ -15,7 +16,8 @@ jest.mock("../../model/venueCalendarModel", () => ({
   revertHold: jest.fn(),
   ownsHoldWrite: jest.fn(),
   findHoldsExpiringBy: jest.fn(),
-  markHoldExpired: jest.fn(),
+  acknowledgeHoldNotice: jest.fn(),
+  markHoldReminded: jest.fn(),
 }));
 
 const supabase = require("../../config/supabase");
@@ -57,7 +59,7 @@ const lockClient = (answers) => {
       const answer = answers[name];
       if (answer === undefined) return { rows: [] };
       const value = typeof answer === "function" ? answer(params) : answer;
-      return { rows: [{ result: value }] };
+      return { rows: [{ result: name.startsWith("begin_venue_hold_") && value ? { serverNow: new Date().toISOString(), ...value } : value }] };
     }),
   };
   getVenueLockPool.mockReturnValue({ connect: jest.fn().mockResolvedValue(client) });
@@ -75,9 +77,11 @@ const place = () => venueModel.placeVenueHold({ actorId: VENUE_STAFF_ID, request
 beforeEach(() => {
   jest.clearAllMocks();
   statements = [];
+  venueCalendarModel.markHoldReminded.mockResolvedValue(undefined);
   supabase.from.mockImplementation(() => chain({ data: requestRow(), error: null }));
   venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([[String(HALL), { setupMinutes: 30, turnaroundMinutes: 15 }]]));
   venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
+  venueCalendarModel.findHoldPlacementWrite.mockReset().mockResolvedValue(null);
   venueCalendarModel.findEntriesByIds.mockResolvedValue(new Map());
   venueCalendarModel.ownsHoldWrite.mockResolvedValue(false);
   venueCalendarModel.insertHold.mockImplementation(async (input) => {
@@ -203,6 +207,97 @@ describe("placeVenueHold (SPM-190 AC1–AC4)", () => {
   });
 });
 
+describe("orphan placement recovery", () => {
+  let row;
+  let orphan;
+  const answers = () => ({ begin_venue_hold_placement: { replay: null, bookingConflicts: [] },
+    can_recover_venue_hold_placement: true, record_venue_hold_placement: { holdRequestId: 3 } });
+  beforeEach(() => {
+    row = requestRow(); orphan = null;
+    supabase.from.mockImplementation(() => chain({ data: row, error: null }));
+    venueCalendarModel.findHoldPlacementWrite.mockImplementation(async () => orphan);
+    venueCalendarModel.findCalendarEntries.mockImplementation(async () => orphan ? [orphan] : []);
+  });
+  const leaveOrphan = async () => {
+    lockClient(answers());
+    venueCalendarModel.insertHold.mockImplementationOnce(async input => {
+      orphan = { ...activeHold(), ...input, id: input.holdId, type: "HOLD", status: "ACTIVE", version: 1,
+        extendedAt: null, createdBy: input.createdBy };
+      throw new Error("synthetic acknowledgement lost after persistence");
+    });
+    venueCalendarModel.ownsHoldWrite.mockRejectedValueOnce(new Error("synthetic recovery read unavailable"));
+    venueCalendarModel.deleteHold.mockRejectedValueOnce(new Error("synthetic compensation unavailable"));
+    await expect(place()).rejects.toMatchObject({ code: "VENUE_CALENDAR_OUTCOME_UNKNOWN" });
+    expect(statements).toContain("ROLLBACK");
+    expect(orphan.status).toBe("ACTIVE");
+  };
+
+  test("same-key retry recovers after persistence, acknowledgement, read and compensation failures", async () => {
+    await leaveOrphan();
+    const original = { ...orphan };
+    const client = lockClient(answers());
+    await place();
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+    expect(venueCalendarModel.deleteHold).toHaveBeenCalledTimes(1);
+    expect(orphan).toEqual(original);
+    const payload = JSON.parse(client.query.mock.calls.find(([sql]) => sql.includes("record_venue_hold_placement"))[1][2]);
+    expect(payload.expiresAt).toBe(new Date(original.holdExpiresAt).toISOString());
+    expect(payload.holdId).toBe(original.id);
+    expect(statements.at(-1)).toBe("COMMIT");
+    // A lost success response replays PostgreSQL and does not touch MongoDB.
+    const reads = venueCalendarModel.findHoldPlacementWrite.mock.calls.length;
+    lockClient({ begin_venue_hold_placement: { replay: { holdRequestId: 3 } } });
+    await place();
+    expect(venueCalendarModel.findHoldPlacementWrite.mock.calls.length).toBe(reads);
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+  });
+
+  test("failed recovery commit leaves the old write recoverable without undoing it", async () => {
+    await leaveOrphan();
+    const client = lockClient(answers()); const query = client.query.getMockImplementation();
+    client.query.mockImplementation(async (sql, params) => {
+      if (sql === "COMMIT") throw Object.assign(new Error("synthetic commit refused"), { code: "40001" });
+      return query(sql, params);
+    });
+    await expect(place()).rejects.toBeDefined();
+    expect(venueCalendarModel.deleteHold).toHaveBeenCalledTimes(1); // original attempt only
+    lockClient(answers()); await place();
+    expect(orphan.status).toBe("ACTIVE");
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ["actor", h => { h.createdBy++; }, "IDEMPOTENCY_KEY_REUSED"],
+    ["event", h => { h.eventId++; }, "IDEMPOTENCY_KEY_REUSED"],
+    ["venue", h => { h.venueId++; }, "IDEMPOTENCY_KEY_REUSED"],
+    ["window", h => { h.start = inDays(40); }, "IDEMPOTENCY_KEY_REUSED"],
+    ["label", h => { h.label = "Different request"; }, "IDEMPOTENCY_KEY_REUSED"],
+    ["write identity", h => { delete h.writeToken; }, "VENUE_CALENDAR_OUTCOME_UNKNOWN"],
+    ["version", h => { h.version++; }, "VENUE_CALENDAR_OUTCOME_UNKNOWN"],
+    ["release", h => { h.status = "RELEASED"; }, "VENUE_CALENDAR_OUTCOME_UNKNOWN"],
+    ["expiry", h => { h.holdExpiresAt = inDays(-1); }, "HOLD_EXPIRED"],
+  ])("refuses recovery with changed %s and never overwrites the hold", async (_name, mutate, code) => {
+    await leaveOrphan(); mutate(orphan); lockClient(answers());
+    await expect(place()).rejects.toMatchObject({ code });
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+    expect(venueCalendarModel.deleteHold).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not adopt a hold linked to a committed placement", async () => {
+    await leaveOrphan();
+    lockClient({ ...answers(), can_recover_venue_hold_placement: false });
+    await expect(place()).rejects.toMatchObject({ code: "VENUE_CALENDAR_OUTCOME_UNKNOWN" });
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+  });
+
+  test("other active holds still block a recovered placement", async () => {
+    await leaveOrphan(); lockClient(answers());
+    venueCalendarModel.findCalendarEntries.mockImplementation(async () => [orphan, { ...orphan, id: "b".repeat(24), eventId: 99 }]);
+    await expect(place()).rejects.toMatchObject({ code: "VENUE_HELD" });
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("extend and release (SPM-190 AC6)", () => {
   const extend = (days = 3) => venueModel.extendVenueHold({ actorId: VENUE_STAFF_ID, holdId: HOLD_ID, days });
 
@@ -280,29 +375,104 @@ describe("extend and release (SPM-190 AC6)", () => {
   });
 });
 
-describe("hold expiry job (SPM-190 AC5)", () => {
-  test("[SPM-190-AC5] should_remind_before_expiry_and_expire_overdue_holds", async () => {
-    const now = new Date();
-    venueCalendarModel.findHoldsExpiringBy.mockResolvedValue([
-      activeHold({ id: "e".repeat(24), holdExpiresAt: new Date(now.getTime() - 1000).toISOString() }),
-      activeHold({ holdExpiresAt: new Date(now.getTime() + 3600 * 1000).toISOString() }),
-    ]);
-    venueCalendarModel.markHoldExpired.mockResolvedValue(true);
-    supabase.rpc.mockResolvedValue({ data: {}, error: null });
-
-    const result = await runHoldExpiry(now);
-
-    expect(result).toEqual({ checked: 2, reminded: 1, expired: 1 });
-    expect(venueCalendarModel.findHoldsExpiringBy).toHaveBeenCalledWith(new Date(now.getTime() + DAY), { limit: 100 });
-    expect(supabase.rpc.mock.calls.map(([, args]) => args.p_kind)).toEqual(["EXPIRED", "EXPIRING"]);
-    expect(venueCalendarModel.markHoldExpired).toHaveBeenCalledWith({ holdId: "e".repeat(24), now });
+describe("hold expiry job review regressions", () => {
+  let now;
+  let stored;
+  let claims;
+  beforeEach(() => {
+    now = new Date();
+    stored = [activeHold({ holdExpiresAt: new Date(now.getTime() + 3600000).toISOString() })];
+    claims = new Set();
+    supabase.rpc.mockResolvedValue({ data: now.toISOString(), error: null });
+    venueCalendarModel.findHoldsExpiringBy.mockImplementation(async (_until, { limit }) => stored
+      .filter(h => h.status === "ACTIVE" && (new Date(h.holdExpiresAt) <= now || h.remindedForExpiry !== h.holdExpiresAt))
+      .slice(0, limit).map(h => ({ ...h })));
+    venueCalendarModel.findCalendarEntry.mockImplementation(async id => ({ ...stored.find(h => h.id === id) }));
+    venueCalendarModel.acknowledgeHoldNotice.mockImplementation(async ({ holdId, expectedVersion, expiresAt, kind }) => {
+      const h = stored.find(x => x.id === holdId);
+      if (h.version !== expectedVersion || h.holdExpiresAt !== expiresAt) return false;
+      if (kind === "EXPIRED") h.status = "EXPIRED";
+      else h.remindedForExpiry = expiresAt;
+      return true;
+    });
+    lockClient({
+      begin_venue_hold_expiry: { serverNow: now.toISOString() },
+      record_venue_hold_expiry: args => {
+        const key = `${args[0]}:${args[2]}:${args[4]}`;
+        if (claims.has(key)) return false;
+        claims.add(key); return true;
+      },
+    });
   });
 
-  test("should_not_mark_a_hold_expired_when_the_notice_failed", async () => {
-    venueCalendarModel.findHoldsExpiringBy.mockResolvedValue([activeHold({ holdExpiresAt: inDays(-0.1).toISOString() })]);
-    supabase.rpc.mockResolvedValue({ data: null, error: { code: "08006", message: "connection failure" } });
-
-    await expect(runHoldExpiry()).rejects.toBeDefined();
-    expect(venueCalendarModel.markHoldExpired).not.toHaveBeenCalled();
+  test("uses database time, advances beyond a full reminder batch, and does not recount completed notices", async () => {
+    stored = Array.from({ length: 101 }, (_, i) => activeHold({ id: i.toString(16).padStart(24, "0"),
+      holdExpiresAt: new Date(now.getTime() + 3600000).toISOString() }));
+    expect(await runHoldExpiry()).toEqual({ checked: 100, reminded: 100, expired: 0 });
+    expect(await runHoldExpiry()).toEqual({ checked: 1, reminded: 1, expired: 0 });
+    expect(await runHoldExpiry()).toEqual({ checked: 0, reminded: 0, expired: 0 });
+    expect(claims.size).toBe(101);
+    expect(supabase.rpc).toHaveBeenCalledWith("venue_hold_clock", {});
   });
+
+  test("rechecks an extension which won the venue lock before sending an expired notice", async () => {
+    stored[0].holdExpiresAt = new Date(now.getTime() - 1000).toISOString();
+    venueCalendarModel.findHoldsExpiringBy.mockImplementationOnce(async () => {
+      const stale = { ...stored[0] };
+      stored[0].holdExpiresAt = new Date(now.getTime() + 7 * DAY).toISOString(); stored[0].version++;
+      return [stale];
+    });
+    expect(await runHoldExpiry()).toEqual({ checked: 1, reminded: 0, expired: 0 });
+    expect(claims.size).toBe(0);
+    expect(venueCalendarModel.acknowledgeHoldNotice).not.toHaveBeenCalled();
+  });
+
+  test("repairs a lost post-commit acknowledgement without sending a second notice", async () => {
+    venueCalendarModel.acknowledgeHoldNotice.mockRejectedValueOnce(new Error("synthetic lost acknowledgement"));
+    await expect(runHoldExpiry()).rejects.toThrow("synthetic lost acknowledgement");
+    expect(claims.size).toBe(1);
+    expect(await runHoldExpiry()).toEqual({ checked: 1, reminded: 0, expired: 0 });
+    expect(claims.size).toBe(1);
+    expect(await runHoldExpiry()).toMatchObject({ checked: 0 });
+  });
+
+  test("a release that won the lock produces no expiry notice", async () => {
+    venueCalendarModel.findHoldsExpiringBy.mockImplementationOnce(async () => {
+      const stale = { ...stored[0] }; stored[0].status = "RELEASED"; return [stale];
+    });
+    expect(await runHoldExpiry()).toMatchObject({ reminded: 0, expired: 0 });
+    expect(claims.size).toBe(0);
+  });
+
+  test("records overdue holds once and acknowledges only after COMMIT", async () => {
+    stored[0].holdExpiresAt = new Date(now.getTime() - 1000).toISOString();
+    venueCalendarModel.acknowledgeHoldNotice.mockImplementationOnce(async () => {
+      expect(statements.at(-1)).toBe("COMMIT"); stored[0].status = "EXPIRED";
+    });
+    expect(await runHoldExpiry()).toEqual({ checked: 1, reminded: 0, expired: 1 });
+    expect(await runHoldExpiry()).toEqual({ checked: 0, reminded: 0, expired: 0 });
+  });
+
+  test("a rolled-back notice transaction never acknowledges or hides the hold", async () => {
+    lockClient({ begin_venue_hold_expiry: { serverNow: now.toISOString() },
+      record_venue_hold_expiry: () => { throw new Error("synthetic notification failure"); } });
+    await expect(runHoldExpiry()).rejects.toThrow("synthetic notification failure");
+    expect(statements).toContain("ROLLBACK");
+    expect(venueCalendarModel.acknowledgeHoldNotice).not.toHaveBeenCalled();
+  });
+});
+
+
+test('capacity refusal from the locked database check rolls back before calendar or placement writes', async () => {
+  const client = lockClient({});
+  client.query.mockImplementation(async sql => {
+    if (sql.includes('begin_venue_hold_placement')) {
+      const error = new Error('VENUE_CAPACITY_EXCEEDED'); error.code = 'P0001'; throw error;
+    }
+    return { rows: [] };
+  });
+  await expect(place()).rejects.toMatchObject({ code: 'VENUE_CAPACITY_EXCEEDED' });
+  expect(venueCalendarModel.insertHold).not.toHaveBeenCalled();
+  expect(client.query).toHaveBeenCalledWith('ROLLBACK');
+  expect(client.query.mock.calls.some(([sql]) => sql.includes('record_venue_hold_placement'))).toBe(false);
 });

@@ -309,3 +309,81 @@ describe("SPM-173 AC6 organiser label filter", () => {
     expect(eventModel.findOrganiserEventRequests).not.toHaveBeenCalled();
   });
 });
+
+
+describe("SPM-39 feasibility acceptance", () => {
+  const path = "/api/events/42/accept-feasibility";
+  const approve = (body = { version: 7 }, headers = { "Idempotency-Key": KEY }) => send("post", path, body, headers);
+
+  test("[SPM-39 TC1] returns the planning label after backend confirmation", async () => {
+    eventModel.runLifecycleAction.mockResolvedValue({ event: { event_id: 42 }, replayed: false });
+    eventModel.findVisibleEvent.mockResolvedValueOnce(eventRow({ status: "UNDER_REVIEW" }))
+      .mockResolvedValueOnce(eventRow({ status: "PLANNING", version: 8 }));
+    const res = await approve();
+    expect(res.status).toBe(200);
+    expect(res.body.message).toBe("Event request approved for planning.");
+    expect(res.body.event).toMatchObject({ eventId: 42, status: "PLANNING", version: 8, statusLabel: "Approved & Planning" });
+    expect(eventModel.runLifecycleAction).toHaveBeenCalledWith({ action: "ACCEPT_FEASIBILITY", eventId: 42, actorId: COORDINATOR_ID, expectedVersion: 7, idempotencyKey: KEY });
+  });
+
+  test.each(["ORGANISER", "COORDINATOR_LEAD", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER", "ATTENDEE"])("[SPM-39] denies %s", async (role) => {
+    signedInAs(role, 11);
+    expect((await approve()).status).toBe(403);
+    expect(eventModel.runLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-39] denies unsigned and unrelated callers", async () => {
+    userModel.verifyAccessToken.mockResolvedValue(null);
+    expect((await approve()).status).toBe(401);
+    signedInAs("COORDINATOR");
+    eventModel.findVisibleEvent.mockResolvedValue(null);
+    expect((await approve()).status).toBe(404);
+    expect(eventModel.runLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [{ version: 7 }, {}, "idempotencyKey"],
+    [{}, { "Idempotency-Key": KEY }, "version"],
+    [{ version: 0 }, { "Idempotency-Key": KEY }, "version"],
+    [{ version: 7, status: "APPROVED" }, { "Idempotency-Key": KEY }, "status"],
+    [{ version: 7, actorId: 99 }, { "Idempotency-Key": KEY }, "actorId"],
+  ])("[SPM-39] rejects missing command guards and controlled fields %j", async (body, headers, field) => {
+    const res = await approve(body, headers);
+    expect(res.status).toBe(400);
+    expect(res.body.fields).toHaveProperty(field);
+    expect(eventModel.runLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-39 TC2] reports missing fields as a conflict", async () => {
+    eventModel.runLifecycleAction.mockRejectedValue(domainError("FEASIBILITY_REQUIREMENTS_MISSING", { missingFields: ["venuePreferences", "contactEmail"] }));
+    const res = await approve();
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "FEASIBILITY_REQUIREMENTS_MISSING", fields: { venuePreferences: "Venue preference is required.", contactEmail: "Organiser contact email is required." } });
+  });
+
+  test.each(["REJECTED", "CANCELLED", "PLANNING"])("[SPM-39 TC3/4] refuses %s without claiming success", async (status) => {
+    eventModel.runLifecycleAction.mockRejectedValue(domainError("TRANSITION_NOT_ALLOWED", { currentStatus: status }));
+    const res = await approve();
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "TRANSITION_NOT_ALLOWED", currentStatus: status });
+    expect(res.body.event).toBeUndefined();
+  });
+
+  test("[SPM-39] returns current values on a stale command", async () => {
+    eventModel.runLifecycleAction.mockRejectedValue(domainError("EVENT_VERSION_CONFLICT"));
+    const res = await approve();
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("EVENT_VERSION_CONFLICT");
+  });
+
+  test("[SPM-39] marks replays and does not expose database errors", async () => {
+    eventModel.runLifecycleAction.mockResolvedValue({ event: { event_id: 42 }, replayed: true });
+    const replay = await approve();
+    expect(replay.status).toBe(200);
+    expect(replay.headers["idempotent-replayed"]).toBe("true");
+    eventModel.runLifecycleAction.mockRejectedValue(new Error("private SQL diagnostic"));
+    const failed = await approve();
+    expect(failed.status).toBe(500);
+    expect(JSON.stringify(failed.body)).not.toContain("private SQL");
+  });
+});

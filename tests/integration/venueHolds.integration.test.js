@@ -278,21 +278,21 @@ describeLive("SPM-190 tentative venue holds (live)", () => {
     const placed = await placeHold(requested.body.holdRequest.holdRequestId);
     expect(placed.status).toBe(200);
     const { holdId } = placed.body.holdRequest.hold;
-    const expiresAt = new Date((await calendarEntry(holdId)).holdExpiresAt).getTime();
 
     // One notice to the coordinator and one to Venue Staff; a repeat run adds none.
     const count = async (title) => (await noticeTitles(eventId)).filter((each) => each === title).length;
-    const soon = new Date(expiresAt - 60 * 60 * 1000);
-    expect(await venueModel.processDueHolds({ now: soon })).toMatchObject({ reminded: 1, expired: 0 });
+    const soonExpiry = new Date(Date.now() + 60 * 60 * 1000);
+    await (await getMongoDb()).collection("venue_calendar").updateOne({ _id: new ObjectId(holdId) }, { $set: { holdExpiresAt: soonExpiry } });
+    expect(await venueModel.processDueHolds()).toMatchObject({ reminded: 1, expired: 0 });
     const reminders = await count("Venue hold expiring");
     expect(reminders).toBe(2);
-    await venueModel.processDueHolds({ now: soon });
+    await venueModel.processDueHolds();
     expect(await count("Venue hold expiring")).toBe(reminders);
 
-    const after = new Date(expiresAt + 60 * 1000);
-    expect(await venueModel.processDueHolds({ now: after })).toMatchObject({ expired: 1 });
+    await (await getMongoDb()).collection("venue_calendar").updateOne({ _id: new ObjectId(holdId) }, { $set: { holdExpiresAt: new Date(Date.now() - 1000) } });
+    expect(await venueModel.processDueHolds()).toMatchObject({ expired: 1 });
     expect((await calendarEntry(holdId)).status).toBe("EXPIRED");
-    expect(await venueModel.processDueHolds({ now: after })).toMatchObject({ checked: 0, expired: 0 });
+    expect(await venueModel.processDueHolds()).toMatchObject({ checked: 0, expired: 0 });
     expect(await count("Venue hold expired")).toBe(2);
   });
 
@@ -311,6 +311,40 @@ describeLive("SPM-190 tentative venue holds (live)", () => {
     expect(outcomes.filter((outcome) => outcome !== "200").every((outcome) => /^409 (VENUE_HELD|VENUE_LOCK_TIMEOUT)$/.test(outcome))).toBe(true);
     const db = await getMongoDb();
     expect(await db.collection("venue_calendar").countDocuments({ venueId: String(venues.annex.venueId), type: "HOLD", status: "ACTIVE" })).toBe(1);
+  });
+
+  test("same-key placement recovers a persisted hold after acknowledgement and cleanup failures", async () => {
+    const recoveryVenue = await insertVenue("Recovery", 100);
+    const db = await getMongoDb();
+    await db.collection("venue_details").insertOne({ _id: String(recoveryVenue.venueId), pg_version: 1,
+      name: `${prefix} Recovery`, location: `${prefix} Recovery Road`, setupMinutes: 30, turnaroundMinutes: 0, version: 1 });
+    const requested = await requestHold(eventId, recoveryVenue, AT("10:00"), AT("11:00"));
+    expect(requested.status).toBe(201);
+    const requestId = requested.body.holdRequest.holdRequestId;
+    const key = nextKey();
+    const calendarModel = require("../../model/venueCalendarModel");
+    const realInsert = calendarModel.insertHold;
+    const spies = [
+      jest.spyOn(calendarModel, "insertHold").mockImplementationOnce(async input => {
+        await realInsert(input); throw new Error("synthetic acknowledgement lost after persistence");
+      }),
+      jest.spyOn(calendarModel, "ownsHoldWrite").mockRejectedValueOnce(new Error("synthetic recovery read unavailable")),
+      jest.spyOn(calendarModel, "deleteHold").mockRejectedValueOnce(new Error("synthetic cleanup unavailable")),
+    ];
+    try {
+      const failed = await placeHold(requestId, key);
+      expect(failed.status).toBeGreaterThanOrEqual(500);
+      expect(failed.body.code).toBe("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+    } finally { spies.forEach(spy => spy.mockRestore()); }
+    const orphan = await db.collection("venue_calendar").findOne({ venueId: String(recoveryVenue.venueId) });
+    expect(orphan.status).toBe("ACTIVE");
+    expect((await holdRows(eventId)).find(row => row.hold_request_id === requestId).status).toBe("PENDING");
+    const recovered = await placeHold(requestId, key);
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.holdRequest.hold.holdId).toBe(orphan._id.toString());
+    expect(new Date(recovered.body.holdRequest.hold.expiresAt).getTime()).toBe(orphan.holdExpiresAt.getTime());
+    expect((await placeHold(requestId, key)).status).toBe(200);
+    expect(await db.collection("venue_calendar").countDocuments({ venueId: String(recoveryVenue.venueId) })).toBe(1);
   });
 
   test("[SPM-190-TC-09] the hold functions are not callable by anon, and only the lock role may place or change holds", async () => {
@@ -337,4 +371,39 @@ describeLive("SPM-190 tentative venue holds (live)", () => {
       expect(byName[name]).toMatchObject({ service: false, writer: false });
     }
   });
+
+  test("capacity changes are rechecked under lock without writes; equality and committed replay remain valid", async () => {
+    const venue = await insertVenue("CapacityGuard", 200);
+    const db = await getMongoDb();
+    await db.collection("venue_details").insertOne({
+      _id: String(venue.venueId), pg_version: 1, name: prefix + " CapacityGuard", location: "Synthetic capacity road",
+      setupMinutes: 30, turnaroundMinutes: 0, version: 1,
+    });
+    const requested = await requestHold(eventId, venue, AT("10:00"), AT("11:00"));
+    expect(requested.status).toBe(201);
+    const id = requested.body.holdRequest.holdRequestId, key = nextKey();
+    const setCapacity = async capacity => {
+      const { error } = await supabase.from("venue").update({ max_capacity: capacity }).eq("venue_id", venue.venueId);
+      if (error) throw new Error(error.message);
+    };
+    const noticesBefore = (await noticeTitles(eventId)).length;
+    await setCapacity(20);
+    const refused = await placeHold(id, key);
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe("VENUE_CAPACITY_EXCEEDED");
+    expect((await holdRows(eventId)).find(row => row.hold_request_id === id).status).toBe("PENDING");
+    expect(await db.collection("venue_calendar").countDocuments({ venueId: String(venue.venueId) })).toBe(0);
+    expect((await noticeTitles(eventId)).length).toBe(noticesBefore);
+
+    await setCapacity(50);
+    const placed = await placeHold(id, key);
+    expect(placed.status).toBe(200);
+    await setCapacity(20);
+    const replay = await placeHold(id, key);
+    expect(replay.status).toBe(200);
+    expect(replay.body.holdRequest.hold.holdId).toBe(placed.body.holdRequest.hold.holdId);
+    expect(await db.collection("venue_calendar").countDocuments({ venueId: String(venue.venueId) })).toBe(1);
+    expect((await noticeTitles(eventId)).length).toBe(noticesBefore + 1);
+  });
+
 });
