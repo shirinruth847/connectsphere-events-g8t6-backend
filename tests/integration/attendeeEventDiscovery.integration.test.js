@@ -2,6 +2,7 @@ const request = require("supertest");
 const app = require("../../server");
 const supabase = require("../../config/supabase");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
+const { bookPrimaryVenue } = require("../fixtures/registrationFixtures");
 const {
   newRunId,
   createAuthFixtures,
@@ -86,6 +87,27 @@ const insertEvent = async (suffix, overrides = {}) => {
   if (error) throw new Error(`Fixture event insert failed: ${error.message}`);
   recordFixtureIds(runId, "eventIds", [data.event_id]);
   return data.event_id;
+};
+
+// SPM-134 (Master 5.6): availability needs a registration period and a primary
+// venue, whose capacity limits registration. Each event gets its own venue, so
+// these events can share time slots.
+const insertRegistrableEvent = async (suffix, overrides = {}, venueCapacity = 50) => {
+  const eventId = await insertEvent(suffix, {
+    registration_open_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    registration_close_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+    ...overrides,
+  });
+  const { data, error } = await supabase.from("event").select("start_datetime,end_datetime").eq("event_id", eventId).single();
+  if (error) throw new Error(`Fixture event read failed: ${error.message}`);
+  await bookPrimaryVenue(runId, {
+    eventId,
+    requestedBy: fixtures.accounts.organiserA.userId,
+    startDatetime: data.start_datetime,
+    endDatetime: data.end_datetime,
+    capacity: venueCapacity,
+  });
+  return eventId;
 };
 
 const insertRegistration = async (eventId, accountKey, status) => {
@@ -273,15 +295,31 @@ describe("[SPM-34-AC1] attendee-only access", () => {
 });
 
 describe("[SPM-34-AC3] attendee registration availability", () => {
-  test("should_report_not_enabled_when_attendee_registration_is_disabled", async () => {
-    const eventId = await insertEvent("registration-disabled", {
+  // SPM-134 final rule (Master 5.6, 30 October 2026) supersedes AC3 here: the
+  // registration start and end times and the primary venue's capacity decide
+  // availability; the enabled flag does not.
+  test("[SPM-134] should_report_open_when_attendee_registration_is_disabled", async () => {
+    const eventId = await insertRegistrableEvent("registration-disabled", {
       is_registration_enabled: false,
       registration_capacity: null,
     });
     const response = await callAs("get", `/api/events/discovery/${eventId}`);
 
     expect(response.status).toBe(200);
-    expect(response.body.event.registrationAvailability).toBe("NOT_ENABLED");
+    expect(response.body.event.registrationAvailability).toBe("OPEN");
+  });
+
+  test("[SPM-134] should_report_unavailable_when_the_registration_period_or_primary_venue_is_missing", async () => {
+    const noPeriod = await insertEvent("registration-no-period");
+    const noVenue = await insertEvent("registration-no-venue", {
+      registration_open_at: new Date(Date.now() - 60_000).toISOString(),
+      registration_close_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    for (const eventId of [noPeriod, noVenue]) {
+      const response = await callAs("get", `/api/events/discovery/${eventId}`);
+      expect(response.status).toBe(200);
+      expect(response.body.event.registrationAvailability).toBe("UNAVAILABLE");
+    }
   });
 
   test("[SPM-126] should_reject_enabled_registration_without_capacity_without_persisting_an_event", async () => {
@@ -316,26 +354,29 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     expect(persisted).toBeNull();
   });
 
-  test("should_report_closed_before_open_and_after_close", async () => {
-    const beforeOpenId = await insertEvent("registration-before-open", {
+  test("[SPM-134] should_report_not_yet_open_before_the_start_and_closed_from_the_end_in_list_and_detail", async () => {
+    const beforeOpenId = await insertRegistrableEvent("registration-before-open", {
       registration_open_at: new Date(Date.now() + 60_000).toISOString(),
       registration_close_at: new Date(Date.now() + 120_000).toISOString(),
     });
-    const afterCloseId = await insertEvent("registration-after-close", {
-      registration_open_at: null,
+    const afterCloseId = await insertRegistrableEvent("registration-after-close", {
+      registration_open_at: new Date(Date.now() - 120_000).toISOString(),
       registration_close_at: new Date(Date.now() - 60_000).toISOString(),
     });
     const beforeOpen = await callAs("get", `/api/events/discovery/${beforeOpenId}`);
     const afterClose = await callAs("get", `/api/events/discovery/${afterCloseId}`);
+    const list = await listAllDiscoveryEvents();
 
     expect(beforeOpen.status).toBe(200);
     expect(afterClose.status).toBe(200);
-    expect(beforeOpen.body.event.registrationAvailability).toBe("CLOSED");
+    expect(beforeOpen.body.event.registrationAvailability).toBe("NOT_YET_OPEN");
     expect(afterClose.body.event.registrationAvailability).toBe("CLOSED");
+    expect(list.find((event) => event.eventId === beforeOpenId).registrationAvailability).toBe("NOT_YET_OPEN");
+    expect(list.find((event) => event.eventId === afterCloseId).registrationAvailability).toBe("CLOSED");
   });
 
   test("should_report_full_when_registered_count_reaches_capacity", async () => {
-    const eventId = await insertEvent("registration-full", { registration_capacity: 1 });
+    const eventId = await insertRegistrableEvent("registration-full", { registration_capacity: 1 });
     await insertRegistration(eventId, "attendee", "REGISTERED");
     const response = await callAs("get", `/api/events/discovery/${eventId}`);
     const listItem = (await listAllDiscoveryEvents()).find((event) => event.eventId === eventId);
@@ -346,7 +387,7 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
   });
 
   test("should_not_count_waitlisted_or_withdrawn_registrations_toward_capacity", async () => {
-    const eventId = await insertEvent("registration-status-count", { registration_capacity: 2 });
+    const eventId = await insertRegistrableEvent("registration-status-count", { registration_capacity: 2 });
     await insertRegistration(eventId, "attendee", "REGISTERED");
     await insertRegistration(eventId, "deactivatable", "WAITLISTED");
     await insertRegistration(eventId, "inactive", "WITHDRAWN");

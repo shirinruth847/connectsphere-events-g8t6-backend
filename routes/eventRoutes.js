@@ -27,6 +27,7 @@ const {
   listUnassignedEvents,
   getCoordinatorAvailability,
   getEventReadiness,
+  acceptFeasibility,
   submitForSafetyReview,
   confirmEvent,
   startPreparation,
@@ -41,6 +42,8 @@ const {
   requestVenueBookings,
   listEventVenueBookings,
   checkVenueBookings,
+  requestVenueHold,
+  listEventHolds,
 } = require("../controller/venueController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
@@ -80,6 +83,7 @@ router.post("/:id/coordinator", leadOnly, assignCoordinatorAsLead);
 router.patch("/:id/coordinator", leadOnly, patchCoordinator);
 router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
 router.get("/:id/readiness", assignedCoordinatorOnly, getEventReadiness);
+router.post("/:id/accept-feasibility", assignedCoordinatorOnly, acceptFeasibility);
 router.post("/:id/submit-for-safety-review", assignedCoordinatorOnly, submitForSafetyReview);
 router.post("/:id/confirm", assignedCoordinatorOnly, confirmEvent);
 router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation);
@@ -98,6 +102,9 @@ router.get("/:id/venue-bookings", ...eventVenueReaders, listEventVenueBookings);
 router.post("/:id/venue-bookings", anySignedInUser, requireVisibleEvent, requestVenueBookings);
 // Advisory per-booking checks while the request is prepared (SPM-186); nothing is saved.
 router.post("/:id/venue-bookings/check", anySignedInUser, requireVisibleEvent, checkVenueBookings);
+// Tentative holds (SPM-190): the coordinator requests, Venue Staff place.
+router.get("/:id/venue-holds", ...eventVenueReaders, listEventHolds);
+router.post("/:id/venue-holds", anySignedInUser, requireVisibleEvent, requestVenueHold);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.post("/:id/history/viewed", anySignedInUser, requireVisibleEvent, markEventHistoryViewed);
 // SPM-41 clarification threads: another coordinator gets 404; same-organisation

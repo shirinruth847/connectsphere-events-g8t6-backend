@@ -9,6 +9,7 @@ const app = require("../../server");
 const supabase = require("../../config/supabase");
 const { encodeDiscoveryCursor } = require("../../model/eventModel");
 const { signInWithPassword } = require("../fixtures/browserAuthClient");
+const { bookPrimaryVenue } = require("../fixtures/registrationFixtures");
 const {
   newRunId,
   createAuthFixtures,
@@ -75,6 +76,26 @@ const insertEvent = async (suffix, overrides = {}) => {
   if (error) throw new Error(`Fixture event insert failed: ${error.message}`);
   recordFixtureIds(runId, "eventIds", [data.event_id]);
   return data.event_id;
+};
+
+// SPM-134 (Master 5.6): availability needs a registration period and a primary
+// venue, whose capacity limits registration. Each event gets its own venue.
+const insertRegistrableEvent = async (suffix, overrides = {}, venueCapacity = 50) => {
+  const eventId = await insertEvent(suffix, {
+    registration_open_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    registration_close_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+    ...overrides,
+  });
+  const { data, error } = await supabase.from("event").select("start_datetime,end_datetime").eq("event_id", eventId).single();
+  if (error) throw new Error(`Fixture event read failed: ${error.message}`);
+  await bookPrimaryVenue(runId, {
+    eventId,
+    requestedBy: fixtures.accounts.organiserA.userId,
+    startDatetime: data.start_datetime,
+    endDatetime: data.end_datetime,
+    capacity: venueCapacity,
+  });
+  return eventId;
 };
 
 const insertRow = async (table, row, idColumn, manifestList) => {
@@ -156,7 +177,7 @@ describe("[SPM-44] Attendee Event Dashboard listing", () => {
   });
 
   test("[TC-EVENT-004] should_return_attendee_facing_card_fields_and_nothing_internal_when_listing", async () => {
-    const eventId = await insertEvent("card-fields");
+    const eventId = await insertRegistrableEvent("card-fields");
 
     const card = (await listDiscoveryIds()).get(eventId);
 
@@ -207,7 +228,7 @@ describe("[SPM-44] Attendee Event Dashboard listing", () => {
   });
 
   test("[SPM-44 AC3] should_keep_a_full_confirmed_event_listed_as_full_waitlist", async () => {
-    const eventId = await insertEvent("registration-full", { registration_capacity: 1 });
+    const eventId = await insertRegistrableEvent("registration-full", { registration_capacity: 1 });
     await insertRegistration(eventId, "deactivatable", "REGISTERED");
 
     const card = (await listDiscoveryIds()).get(eventId);
@@ -217,11 +238,13 @@ describe("[SPM-44] Attendee Event Dashboard listing", () => {
   });
 
   test.each([
-    ["registration disabled", { is_registration_enabled: false, registration_capacity: null }, "NOT_ENABLED"],
+    // The start and end times and the primary venue decide availability; the
+    // enabled flag does not (SPM-134 final rule, Master 5.6).
+    ["registration disabled", { is_registration_enabled: false, registration_capacity: null }, "OPEN"],
     ["registration window closed", { registration_close_at: new Date(Date.now() - 60 * 1000).toISOString() }, "CLOSED"],
-    ["registration not yet open", { registration_open_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }, "CLOSED"],
+    ["registration not yet open", { registration_open_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }, "NOT_YET_OPEN"],
   ])("[SPM-44] should_keep_a_confirmed_event_listed_when_%s", async (_label, overrides, availability) => {
-    const eventId = await insertEvent(`registration-${availability.toLowerCase()}-${Object.keys(overrides)[0]}`, overrides);
+    const eventId = await insertRegistrableEvent(`registration-${availability.toLowerCase()}-${Object.keys(overrides)[0]}`, overrides);
 
     const card = (await listDiscoveryIds()).get(eventId);
 
