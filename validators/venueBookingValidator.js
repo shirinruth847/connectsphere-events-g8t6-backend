@@ -13,8 +13,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const FILTER_PARAMS = new Set(["status", "venueId", "eventId", "from", "to", "limit", "q", "sort", "order"]);
 
-// My Requests sorts (SPM-181). "default" puts pending requests first, then the
-// soonest booking; "lastOpened" is per viewer and sorted by the browser.
+// My Requests sorts (SPM-181). "default" is by request status (SPM-186):
+// pending first when ascending, then the soonest booking; "lastOpened" is per
+// viewer and sorted by the browser.
 const BOOKING_SORTS = Object.freeze(["default", "date", "attendance", "lastEdited", "alphabetical"]);
 const SORT_ORDERS = Object.freeze(["asc", "desc"]);
 const MAX_SEARCH_LENGTH = 100;
@@ -90,6 +91,44 @@ const parseBookingFilters = (query) => {
   }
 
   return Object.keys(fields).length ? { fields } : { filters };
+};
+
+// Venue Staff decisions (SPM-186, SPM-189). The status the user saw is sent
+// back so a decision made from a stale screen is refused (SPM-186 AC5).
+const MAX_REJECTION_REASON_LENGTH = 1000;
+const DECISION_MESSAGES = Object.freeze({
+  reasonRequired: "Enter a reason for rejecting this booking.",
+  reasonTooLong: `The reason must be ${MAX_REJECTION_REASON_LENGTH} characters or fewer.`,
+  expectedStatusInvalid: "Reload the booking, then try again.",
+  unknownField: "This field is not supported.",
+  bodyInvalid: "Send the decision as a JSON object.",
+});
+const DECIDABLE_STATUSES = Object.freeze({ approve: ["PENDING"], reject: ["PENDING", "APPROVED"] });
+
+const parseBookingDecision = (body, decision) => {
+  const input = body === undefined || body === null ? {} : body;
+  if (typeof input !== "object" || Array.isArray(input)) return { fields: { body: DECISION_MESSAGES.bodyInvalid } };
+
+  const allowed = decision === "reject" ? ["reason", "expectedStatus"] : ["expectedStatus"];
+  const fields = {};
+  for (const key of Object.keys(input)) {
+    if (!allowed.includes(key)) fields[key] = DECISION_MESSAGES.unknownField;
+  }
+
+  const values = { expectedStatus: null, reason: null };
+  if (input.expectedStatus !== undefined || decision === "reject") {
+    if (DECIDABLE_STATUSES[decision].includes(input.expectedStatus)) values.expectedStatus = input.expectedStatus;
+    else fields.expectedStatus = DECISION_MESSAGES.expectedStatusInvalid;
+  }
+
+  if (decision === "reject") {
+    const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+    if (!reason) fields.reason = DECISION_MESSAGES.reasonRequired;
+    else if (reason.length > MAX_REJECTION_REASON_LENGTH) fields.reason = DECISION_MESSAGES.reasonTooLong;
+    else values.reason = reason;
+  }
+
+  return Object.keys(fields).length ? { fields } : { values };
 };
 
 // ---------- booking request (SPM-179) ----------
@@ -264,12 +303,52 @@ const validateVenueBookingRequest = (body, { event, now = new Date() } = {}) => 
   return Object.keys(fields).length ? { fields } : { bookings };
 };
 
+// POST /api/events/:id/venue-bookings/check (SPM-186): the same list as a
+// request, validated one booking at a time, so a half-filled form still gets
+// checks for the bookings whose venue and times are ready. A label, attendance
+// or requirement problem does not stop the check; a venue or time problem does.
+const CHECK_NEEDS = new Set(["venueId", "start", "end"]);
+
+const validateVenueBookingCheck = (body, { event, now = new Date() } = {}) => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { fields: { body: "Send a JSON object with a bookings list." } };
+  }
+  const fields = {};
+  for (const key of Object.keys(body)) {
+    if (key !== "bookings") fields[key.slice(0, 60)] = "This field cannot be set.";
+  }
+  const list = body.bookings;
+  if (!Array.isArray(list) || list.length < 1 || list.length > MAX_BOOKINGS_PER_REQUEST) {
+    fields.bookings = `Add between 1 and ${MAX_BOOKINGS_PER_REQUEST} venues.`;
+  }
+  if (Object.keys(fields).length) return { fields };
+
+  const seenVenues = new Set();
+  const items = list.map((item, index) => {
+    const itemFields = {};
+    const booking = validateBookingItem(item, index, {
+      fields: itemFields,
+      seenVenues,
+      eventStart: event?.start_datetime ? new Date(event.start_datetime) : null,
+      eventEnd: event?.end_datetime ? new Date(event.end_datetime) : null,
+      now,
+    });
+    const blocked = Object.keys(itemFields).some((key) => CHECK_NEEDS.has(key.split(".")[2]));
+    return { index, booking: booking && !blocked ? booking : null, fields: itemFields };
+  });
+  return { items };
+};
+
 module.exports = {
   validateVenueBookingRequest,
+  validateVenueBookingCheck,
   MAX_BOOKINGS_PER_REQUEST,
   BOOKING_LIMITS,
   BOOKING_MESSAGES,
   parseBookingFilters,
+  parseBookingDecision,
+  DECISION_MESSAGES,
+  MAX_REJECTION_REASON_LENGTH,
   parseId,
   VENUE_BOOKING_STATUSES,
   BOOKING_SORTS,

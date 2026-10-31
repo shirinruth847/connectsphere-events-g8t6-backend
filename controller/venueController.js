@@ -1,12 +1,14 @@
 const venueModel = require("../model/venueModel");
+const activityModel = require("../model/activityModel");
 const {
-  parseBookingFilters,
+  parseBookingFilters, parseBookingDecision,
   parseId,
   validateVenueBookingRequest,
+  validateVenueBookingCheck,
   BOOKING_MESSAGES,
 } = require("../validators/venueBookingValidator");
 const { formatRequestId } = require("../model/eventModel");
-const { EVENT_RELATIONSHIP, EVENT_TYPE_LABELS } = require("../config/eventConstants");
+const { EVENT_RELATIONSHIP, EVENT_TYPE_LABELS, HISTORY_AUDIENCE, VENUE_STAFF_HISTORY_FIELDS } = require("../config/eventConstants");
 const { validateAvailabilityQuery } = require("../validators/venueAvailabilityValidator");
 const {
   validateVenueCreate,
@@ -50,8 +52,18 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_CAPACITY_TOO_SMALL: [409, "This venue cannot hold the event's expected attendance."],
   VENUE_SUGGESTION_VERSION_CONFLICT: [409, "The suggested venue was changed after you loaded it. Reload the event, then try again."],
   IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
-  // Overlapping occupied ranges, refused by venue_booking_no_overlap (SPM-185 AC7).
-  VENUE_BOOKING_CONFLICT: [409, "Another booking already occupies this venue at that time, including its setup and turnaround."],
+  // Booking decisions (SPM-186, SPM-189): business conflicts the user can act on.
+  EVENT_NOT_IN_PLANNING: [409, "Bookings can be approved only while the event is in planning."],
+  EVENT_NOT_ACTIVE: [409, "This event is closed, so its bookings can no longer be changed."],
+  VENUE_NOT_AVAILABLE: [409, "This venue is not available for bookings. Reject the request or make the venue active first."],
+  VENUE_CAPACITY_EXCEEDED: [409, "The expected attendance is more than this venue's capacity."],
+  VENUE_BUFFERS_NOT_SET: [409, "Set this venue's setup and turnaround times before approving bookings."],
+  VENUE_BOOKING_CONFLICT: [409, "Another active booking already occupies this venue at that time, including its setup and turnaround."],
+  VENUE_BLOCKED: [409, "The venue is blocked for part of this booking's time."],
+  VENUE_HELD: [409, "The venue is held for another event during part of this booking's time."],
+  VENUE_LOCK_TIMEOUT: [409, "Another change to this venue is in progress. Try again."],
+  VENUE_BOOKINGS_UNAVAILABLE: [503, "Venue bookings cannot be decided right now. Try again shortly."],
+  BOOKING_ALREADY_STARTED: [409, "This booking has already started, so it can no longer be rejected here. Coordinate changes on the day directly."],
   // Never answer with partial availability (SPM-74 TC13, Master 7.4 step 5).
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],
 });
@@ -68,7 +80,7 @@ const validationFailed = (res, fields) =>
 
 const upcomingBookingsWarning = (count) =>
   `This venue has ${count ?? "one or more"} upcoming booking${count === 1 ? "" : "s"}. `
-  + "Confirm to continue; existing bookings are kept.";
+  + "Confirm to continue; existing bookings and events are kept, and their coordinators and organisers are notified.";
 
 const handleError = (error, res, next) => {
   if (error.name !== "VenueError") return next(error);
@@ -80,6 +92,13 @@ const handleError = (error, res, next) => {
     return sendError(res, 409, error.code, upcomingBookingsWarning(error.upcomingBookings), {
       upcomingBookings: error.upcomingBookings,
       firstStart: error.firstStart,
+      affectedEvents: error.affectedEvents || [],
+    });
+  }
+  if (error.code === "BOOKING_NOT_FOUND") return res.status(404).json(BOOKING_NOT_FOUND);
+  if (error.code === "BOOKING_ALREADY_DECIDED") {
+    return sendError(res, 409, error.code, "This booking has already been actioned by another staff member. Reload it to see the decision.", {
+      currentStatus: error.currentStatus,
     });
   }
   if (error.code === "VENUE_BUFFERS_LOCKED") {
@@ -147,6 +166,46 @@ const getVenueBooking = async (req, res, next) => {
   }
 };
 
+const invalidCursor = (res) => validationFailed(res, { cursor: "Invalid page cursor." });
+
+// GET /api/venues/bookings/:bookingId/availability (SPM-186): the booking's
+// venue calendar over ?from&to, with the booking's own window as the checked
+// period. The venue, window and excluded event come from the booking, never
+// from the query.
+const getBookingAvailability = async (req, res, next) => {
+  const bookingId = parseId(req.params.bookingId);
+  if (!bookingId) return res.status(404).json(BOOKING_NOT_FOUND);
+  const extra = Object.keys(req.query).filter((key) => key !== "from" && key !== "to");
+  const { query, fields } = validateAvailabilityQuery({ from: req.query.from, to: req.query.to });
+  const allFields = { ...(fields || {}), ...Object.fromEntries(extra.map((key) => [key.slice(0, 60), "This parameter is not supported."])) };
+  if (hasErrors(allFields)) return validationFailed(res, allFields);
+  try {
+    const result = await venueModel.findBookingAvailability(bookingId, query, req.user);
+    if (!result) return res.status(404).json(BOOKING_NOT_FOUND);
+    return res.status(200).json(result);
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+// The venue-relevant part of an event's history (SPM-186, Master 4.2).
+const getEventBookingHistory = async (req, res, next) => {
+  try {
+    const eventId = parseId(req.params.eventId);
+    if (!eventId || !(await venueModel.hasReviewableBookings(eventId))) return res.status(404).json(EVENT_NOT_FOUND);
+    const page = await activityModel.findEventHistory(eventId, {
+      ...req.pagination,
+      audiences: [HISTORY_AUDIENCE.ORGANISER_SAFE, HISTORY_AUDIENCE.STAFF_ONLY],
+      fields: VENUE_STAFF_HISTORY_FIELDS,
+      actionPattern: "VENUE_*",
+    });
+    return res.status(200).json(page);
+  } catch (err) {
+    if (err.code === "INVALID_CURSOR") return invalidCursor(res);
+    return next(err);
+  }
+};
+
 const getEventVenueBookings = async (req, res, next) => {
   try {
     const eventId = parseId(req.params.eventId);
@@ -187,6 +246,17 @@ const getManagedVenue = async (req, res, next) => {
     const { details, detailStatus } = await venueModel.getManagedVenueDetails(venueId);
     return res.status(200).json({ venue, details, detailStatus });
   } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const getVenueHistory = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  try {
+    return res.status(200).json(await venueModel.findVenueHistory(venueId, req.pagination));
+  } catch (err) {
+    if (err.code === "INVALID_CURSOR") return invalidCursor(res);
     return handleError(err, res, next);
   }
 };
@@ -238,17 +308,41 @@ const changeVenueStatus = async (req, res, next) => {
   const { values, fields } = validateVenueStatusChange(req.body);
   if (hasErrors(fields)) return validationFailed(res, fields);
   try {
-    const { venue, changed, upcomingBookings } = await venueModel.setVenueStatus(req.user.user_id, venueId, values);
+    const { venue, changed, upcomingBookings, affectedEvents } = await venueModel.setVenueStatus(req.user.user_id, venueId, values);
     return res.status(200).json({
       message: changed ? "Venue status updated." : "No changes to save.",
       venue,
       changed,
       upcomingBookings,
+      affectedEvents,
     });
   } catch (err) {
     return handleError(err, res, next);
   }
 };
+
+// ---------- booking decisions (SPM-186, SPM-189, Venue Staff) ----------
+
+const decideBooking = (decision) => async (req, res, next) => {
+  const bookingId = parseId(req.params.bookingId);
+  if (!bookingId) return res.status(404).json(BOOKING_NOT_FOUND);
+  const { values, fields } = parseBookingDecision(req.body, decision);
+  if (fields) return validationFailed(res, fields);
+  try {
+    const result = decision === "approve"
+      ? await venueModel.approveVenueBooking(req.user.user_id, bookingId, values)
+      : await venueModel.rejectVenueBooking(req.user.user_id, bookingId, values);
+    return res.status(200).json({
+      message: decision === "approve" ? "Venue booking approved." : "Venue booking rejected.",
+      ...result,
+    });
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const approveVenueBooking = decideBooking("approve");
+const rejectVenueBooking = decideBooking("reject");
 
 // ---------- photo gallery (T28, SPM-181, Venue Staff) ----------
 
@@ -533,6 +627,25 @@ const requestVenueBookings = async (req, res, next) => {
   }
 };
 
+// POST /api/events/:id/venue-bookings/check — SPM-186: the assigned coordinator
+// sees each booking's checks for its own venue and window while preparing a
+// request. Advisory: nothing is saved, and the request checks again under the
+// venue lock.
+const checkVenueBookings = async (req, res, next) => {
+  const { event, access } = req.visibleEvent;
+  if (!access.canRequestVenueBookings) {
+    const code = access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR ? "EVENT_NOT_IN_PLANNING" : "FORBIDDEN";
+    return sendError(res, BOOKING_REQUEST_ERRORS[code][0], code, BOOKING_REQUEST_ERRORS[code][1]);
+  }
+  const { items, fields } = validateVenueBookingCheck(req.body, { event });
+  if (fields) return validationFailed(res, fields);
+  try {
+    return res.status(200).json({ bookings: await venueModel.checkVenueBookings(items) });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 // GET /api/events/:id/venue-bookings — the assigned coordinator and the
 // supervising Lead (read-only) see every booking of the event.
 const listEventVenueBookings = async (req, res, next) => {
@@ -722,9 +835,15 @@ module.exports = {
   createVenue,
   updateVenue,
   changeVenueStatus,
+  approveVenueBooking,
+  rejectVenueBooking,
   updateVenueDetails,
   getVenueAvailability,
   listVenueBookings,
   getVenueBooking,
   getEventVenueBookings,
+  getEventBookingHistory,
+  checkVenueBookings,
+  getVenueHistory,
+  getBookingAvailability,
 };

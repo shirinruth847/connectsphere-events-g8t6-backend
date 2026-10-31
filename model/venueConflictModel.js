@@ -361,6 +361,7 @@ module.exports = {
   parseOperatingHours,
   outsideOperatingHours,
   operatingHoursWarning,
+  formatLocal,
   findOverlaps,
   freePeriods,
   checkRequestedPeriod,
