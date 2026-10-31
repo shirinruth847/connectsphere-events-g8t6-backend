@@ -33,6 +33,8 @@ const MESSAGES = Object.freeze({
   registrationCapacityRequired: "Registration capacity is required when registration is enabled.",
   registrationCapacityInvalid: "Registration capacity must be a positive whole number.",
   venuePreferencesInvalid: "Choose valid venue preferences without duplicates.",
+  venuePreferenceTimeInvalid: "Give each venue a start and end time in whole minutes, with the end after the start.",
+  venuePreferenceOutsideEvent: "Each venue's time must be within the event's start and end.",
   equipmentRequirementsInvalid: "Choose valid equipment and positive quantities without duplicates.",
   clarificationMessageRequired: "Enter the question for the organiser.",
   clarificationBodyRequired: "Write a message before sending.",
@@ -166,13 +168,41 @@ const hasInvalidIds = (ids, allowedIds) =>
   new Set(ids).size !== ids.length ||
   (Array.isArray(allowedIds) && ids.some((id) => !allowedIds.includes(id)));
 
+// SPM-76: a venue choice is a venue ID (the whole event) or
+// { venueId, requestedStart, requestedEnd } for part of it.
+const PREFERENCE_KEYS = new Set(["venueId", "requestedStart", "requestedEnd"]);
+const preferenceVenueId = (item) => (isPlainObject(item) ? item.venueId : item);
+
+const isWholeMinute = (date) => date.getTime() % 60000 === 0;
+
+const hasInvalidPreferenceTime = (item, { start, end }) => {
+  if (!isPlainObject(item)) return null;
+  if (Object.keys(item).some((key) => !PREFERENCE_KEYS.has(key))) return MESSAGES.venuePreferencesInvalid;
+  if (isBlank(item.requestedStart) && isBlank(item.requestedEnd)) return null;
+  const requestedStart = parseDate(item.requestedStart);
+  const requestedEnd = parseDate(item.requestedEnd);
+  if (!requestedStart || !requestedEnd || requestedEnd <= requestedStart || !isWholeMinute(requestedStart) || !isWholeMinute(requestedEnd)) {
+    return MESSAGES.venuePreferenceTimeInvalid;
+  }
+  // The database checks against the saved event; this catches it early when the dates are sent too.
+  if ((start && requestedStart < start) || (end && requestedEnd > end)) return MESSAGES.venuePreferenceOutsideEvent;
+  return null;
+};
+
 const validateRequirements = (input = {}, { venueIds, equipmentIds } = {}) => {
   const errors = {};
 
   if (input.venuePreferences !== undefined) {
     const preferences = input.venuePreferences;
-    if (!Array.isArray(preferences) || hasInvalidIds(preferences.map(toWholeNumber), venueIds)) {
+    if (!Array.isArray(preferences) || hasInvalidIds(preferences.map((item) => toWholeNumber(preferenceVenueId(item))), venueIds)) {
       errors.venuePreferences = MESSAGES.venuePreferencesInvalid;
+    } else {
+      const eventWindow = {
+        start: isBlank(input.startDatetime) ? null : parseDate(input.startDatetime),
+        end: isBlank(input.endDatetime) ? null : parseDate(input.endDatetime),
+      };
+      const message = preferences.map((item) => hasInvalidPreferenceTime(item, eventWindow)).find(Boolean);
+      if (message) errors.venuePreferences = message;
     }
   }
 
@@ -266,6 +296,7 @@ module.exports = {
   hasErrors,
   toWholeNumber,
   parseDate,
+  preferenceVenueId,
   MESSAGES,
   TEXT_LIMITS,
   MAX_INTEGER,

@@ -3,7 +3,7 @@
 // keyed by column name, fields maps API field names to messages. Every value
 // accepted here must also be storable, so bad input becomes a 400, never a 500.
 const { VENUE_STATUS, MAX_VENUE_CAPACITY } = require("../config/venueConstants");
-const { toWholeNumber, MAX_INTEGER } = require("./eventValidator");
+const { toWholeNumber, parseDate, MAX_INTEGER } = require("./eventValidator");
 
 const LIMITS = Object.freeze({
   name: 150,
@@ -408,6 +408,67 @@ const validateVenueOptionsQuery = (query) => {
   return { options, fields };
 };
 
+// ---------- organiser venue options (GET /api/venues/options, SPM-76) ----------
+
+const REQUEST_NEED_PARAMS = new Set(["startDatetime", "endDatetime", "expectedAttendance", "preferredLayoutType", "accessibilityNeeds"]);
+// The same bound as the availability calendar's range.
+const MAX_REQUEST_WINDOW_MS = 366 * 24 * 60 * 60 * 1000;
+const MAX_REQUEST_NEEDS = 20;
+const REQUEST_NEED_LIMIT = 200;
+const REQUEST_DATE_MESSAGE = "Enter a valid date and time.";
+
+// The organiser's unsaved form values arrive with the filters; each is
+// optional while the form is incomplete. `need` is in event-row shape.
+const validateRequestVenueOptionsQuery = (query) => {
+  const needQuery = {};
+  const optionQuery = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (REQUEST_NEED_PARAMS.has(key)) needQuery[key] = value;
+    else optionQuery[key] = value;
+  }
+  const { options, fields } = validateVenueOptionsQuery(optionQuery);
+  const need = { start_datetime: null, end_datetime: null, expected_attendance: null, preferred_layout_type: null, accessibility_needs: [] };
+
+  const readDate = (key) => {
+    const text = readText(needQuery[key]);
+    if (text === null) return null;
+    const date = text === undefined ? null : parseDate(text);
+    if (!date) fields[key] = REQUEST_DATE_MESSAGE;
+    return date;
+  };
+  const start = readDate("startDatetime");
+  const end = readDate("endDatetime");
+  if (start && end) {
+    if (end <= start) fields.endDatetime = "End time must be after start time.";
+    else if (end - start > MAX_REQUEST_WINDOW_MS) fields.endDatetime = "The event can last at most 366 days.";
+    else {
+      need.start_datetime = start.toISOString();
+      need.end_datetime = end.toISOString();
+    }
+  }
+
+  const attendance = readText(needQuery.expectedAttendance);
+  if (attendance !== null) {
+    const number = attendance === undefined ? NaN : toWholeNumber(attendance);
+    if (!Number.isInteger(number) || number < 1 || number > MAX_INTEGER) fields.expectedAttendance = "Expected attendance must be a whole number of at least 1.";
+    else need.expected_attendance = number;
+  }
+
+  const layout = readText(needQuery.preferredLayoutType);
+  if (layout === undefined || (layout && layout.length > LIMITS.search)) fields.preferredLayoutType = MESSAGES.textInvalid;
+  else need.preferred_layout_type = layout;
+
+  if (needQuery.accessibilityNeeds !== undefined) {
+    const needs = (Array.isArray(needQuery.accessibilityNeeds) ? needQuery.accessibilityNeeds : [needQuery.accessibilityNeeds]).map(readText);
+    if (needs.length > MAX_REQUEST_NEEDS || needs.some((item) => item === undefined || (item && item.length > REQUEST_NEED_LIMIT))) {
+      fields.accessibilityNeeds = `Send at most ${MAX_REQUEST_NEEDS} accessibility needs of ${REQUEST_NEED_LIMIT} characters or fewer.`;
+    } else {
+      need.accessibility_needs = needs.filter(Boolean);
+    }
+  }
+  return { need, options, fields };
+};
+
 const hasErrors = (fields) => Object.keys(fields).length > 0;
 
 module.exports = {
@@ -419,6 +480,7 @@ module.exports = {
   validateVenueDetails,
   validateCatalogueQuery,
   validateVenueOptionsQuery,
+  validateRequestVenueOptionsQuery,
   VENUE_OPTION_SORTS,
   hasErrors,
   MESSAGES,

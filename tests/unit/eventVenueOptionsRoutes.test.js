@@ -182,7 +182,8 @@ describe("GET /api/venues/options/:venueId/photos (SPM-72 AC4)", () => {
     expect(response.status).toBe(404);
   });
 
-  test.each(["ORGANISER", "VENUE_STAFF", "TECH_SUPPORT", "ATTENDEE"])("[SPM-72-AC1] should_refuse_photos_to_%s", async (role) => {
+  // Organisers browse photos while choosing venues (SPM-76 AC4).
+  test.each(["VENUE_STAFF", "TECH_SUPPORT", "ATTENDEE"])("[SPM-72-AC1] should_refuse_photos_to_%s", async (role) => {
     signedInAs(30, role);
 
     const response = await send("get", "/api/venues/options/7/photos");

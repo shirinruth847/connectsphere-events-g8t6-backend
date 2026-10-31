@@ -184,6 +184,23 @@ describe("GET /api/events/:id/venue-options (SPM-72/74)", () => {
     expect([...unmet].sort((a, b) => a - b)).toEqual(unmet);
   });
 
+  test("[SPM-198-AC1][SPM-198-AC3] should_assess_each_venue's_capacity_against_the_expected_attendance", async () => {
+    const { body } = await getOptions("coordinator", "");
+    const capacityOf = (venue) => venue.requirements.find((item) => item.key === "capacity");
+
+    expect(capacityOf(byName(body, "Fits"))).toMatchObject({
+      status: "MET",
+      assessment: { level: "SUFFICIENT", title: "Capacity Sufficient", message: expect.stringMatching(/^Venue capacity is adequate \(300 seats for \d+ guests\)\. Comfortable spacing available\.$/) },
+    });
+    expect(capacityOf(byName(body, "Small"))).toMatchObject({
+      status: "UNMET",
+      assessment: { level: "INSUFFICIENT", title: "Capacity Insufficient", message: expect.stringMatching(/^Venue is too small \(20 seats for \d+ expected guests\)\./) },
+    });
+    // The organiser's choices carry the same assessment.
+    const small = body.preferredVenues.find((choice) => choice.venueId === venues.small.venueId);
+    expect(capacityOf(small.option).assessment.level).toBe("INSUFFICIENT");
+  });
+
   test("[TC-VC-004][TC-VS-003][SPM-72-AC3][SPM-75-AC4] should_filter_by_minimum_capacity", async () => {
     const { body } = await getOptions("coordinator", "&minCapacity=350");
 
