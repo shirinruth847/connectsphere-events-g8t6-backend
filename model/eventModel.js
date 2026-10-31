@@ -418,6 +418,7 @@ const DOMAIN_CODES = new Set([
   "FORBIDDEN",
   "TRANSITION_NOT_ALLOWED",
   "READINESS_BLOCKED",
+  "FEASIBILITY_REQUIREMENTS_MISSING",
   "SAFETY_APPROVAL_REQUIRED",
   "EVENT_NOT_ENDED",
   "COORDINATOR_INVARIANT",
@@ -432,6 +433,9 @@ const withLifecycleDetail = (domainError, details) => {
   const detail = String(details || "");
   if (["TRANSITION_NOT_ALLOWED", "EVENT_VERSION_CONFLICT"].includes(domainError.code) && detail) {
     domainError.currentStatus = detail;
+  }
+  if (domainError.code === "FEASIBILITY_REQUIREMENTS_MISSING") {
+    domainError.missingFields = detail.split(",").filter(Boolean);
   }
   if (domainError.code === "READINESS_BLOCKED") {
     domainError.failures = detail.split(",").filter(Boolean);
