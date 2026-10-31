@@ -12,7 +12,7 @@ async function setup(t) {
   const db = new PGlite(); t.after(() => db.close());
   await db.exec(`CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role; CREATE ROLE venue_calendar_writer;
     CREATE TABLE public.event(event_id integer PRIMARY KEY,status text,start_datetime timestamptz,end_datetime timestamptz,coordinator_id integer);
-    CREATE TABLE public.venue(venue_id integer PRIMARY KEY,name text,is_active boolean,status text);
+    CREATE TABLE public.venue(venue_id integer PRIMARY KEY,name text,is_active boolean,status text,max_capacity integer DEFAULT 200);
     CREATE TABLE public."user"(user_id integer PRIMARY KEY,role text,is_active boolean);
     CREATE TABLE public.venue_booking(booking_id integer,event_id integer,venue_id integer,status text,start_datetime timestamptz,end_datetime timestamptz,occupied_range tstzrange);
     CREATE TABLE public.idempotency_records(operation text CONSTRAINT idempotency_records_operation_check CHECK(operation='previous.operation'));
@@ -21,7 +21,7 @@ async function setup(t) {
     CREATE FUNCTION public._claim_idempotency_key(integer,text,text,text) RETURNS jsonb LANGUAGE sql AS $$ SELECT NULL::jsonb $$;
     INSERT INTO public."user" VALUES(4,'VENUE_STAFF',true),(5,'COORDINATOR',true);
     INSERT INTO public.event VALUES(1,'PLANNING','2030-11-04T08:00Z','2030-11-04T18:00Z',5),(2,'PLANNING','2030-11-04T08:00Z','2030-11-04T18:00Z',5);
-    INSERT INTO public.venue VALUES(7,'Synthetic hall',true,'ACTIVE');`);
+    INSERT INTO public.venue(venue_id,name,is_active,status) VALUES(7,'Synthetic hall',true,'ACTIVE');`);
   await db.exec(fn(read('20261029140000_spm195_venue_blocks.sql'), '_venue_block_affected_bookings'));
   await db.exec(read('20261030143144_spm190_venue_holds.sql'));
   await db.exec(`CREATE TABLE public.captured_hold_notice(kind text,hold_id text);
@@ -31,6 +31,7 @@ async function setup(t) {
       VALUES(1,7,'Synthetic hold','2030-11-04T13:00Z','2030-11-04T14:00Z',5);`);
   await db.transaction(tx => tx.exec(read('20261031040000_spm190_hold_review_fixes.sql')));
   await db.transaction(tx => tx.exec(read('20261031050000_spm190_hold_placement_recovery.sql')));
+  await db.transaction(tx => tx.exec(read('20261031060000_spm190_hold_capacity_guard.sql')));
   return db;
 }
 const begin = db => db.query("SELECT public.begin_venue_hold_placement(4,1,'2030-11-04T12:30Z','2030-11-04T14:45Z','key','hash') AS result");
@@ -120,4 +121,21 @@ test('orphan recovery requires active Venue Staff, a pending request and no comm
     has_function_privilege('service_role','public.can_recover_venue_hold_placement(integer,integer,text)','EXECUTE') service,
     has_function_privilege('venue_calendar_writer','public.can_recover_venue_hold_placement(integer,integer,text)','EXECUTE') writer`)).rows[0];
   assert.deepEqual(grants,{browser:false,service:false,writer:true});
+});
+
+
+test('placement rechecks capacity while locked; equality and optional attendance remain valid', async t => {
+  const db = await setup(t);
+  await db.exec('UPDATE public.venue_hold_request SET expected_attendance=50; UPDATE public.venue SET max_capacity=20');
+  await assert.rejects(begin(db), /VENUE_CAPACITY_EXCEEDED/);
+  assert.equal((await db.query('SELECT status FROM public.venue_hold_request')).rows[0].status, 'PENDING');
+  await db.exec('UPDATE public.venue SET max_capacity=50');
+  assert.ok((await begin(db)).rows[0].result.request);
+  await db.exec('UPDATE public.venue SET max_capacity=20; UPDATE public.venue_hold_request SET expected_attendance=NULL');
+  assert.ok((await begin(db)).rows[0].result.request);
+  const grants = (await db.query(`SELECT
+    has_function_privilege('authenticated','public.begin_venue_hold_placement(integer,integer,timestamptz,timestamptz,text,text)','EXECUTE') browser,
+    has_function_privilege('service_role','public.begin_venue_hold_placement(integer,integer,timestamptz,timestamptz,text,text)','EXECUTE') service,
+    has_function_privilege('venue_calendar_writer','public.begin_venue_hold_placement(integer,integer,timestamptz,timestamptz,text,text)','EXECUTE') writer`)).rows[0];
+  assert.deepEqual(grants, {browser:false,service:false,writer:true});
 });

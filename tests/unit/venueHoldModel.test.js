@@ -461,3 +461,18 @@ describe("hold expiry job review regressions", () => {
     expect(venueCalendarModel.acknowledgeHoldNotice).not.toHaveBeenCalled();
   });
 });
+
+
+test('capacity refusal from the locked database check rolls back before calendar or placement writes', async () => {
+  const client = lockClient({});
+  client.query.mockImplementation(async sql => {
+    if (sql.includes('begin_venue_hold_placement')) {
+      const error = new Error('VENUE_CAPACITY_EXCEEDED'); error.code = 'P0001'; throw error;
+    }
+    return { rows: [] };
+  });
+  await expect(place()).rejects.toMatchObject({ code: 'VENUE_CAPACITY_EXCEEDED' });
+  expect(venueCalendarModel.insertHold).not.toHaveBeenCalled();
+  expect(client.query).toHaveBeenCalledWith('ROLLBACK');
+  expect(client.query.mock.calls.some(([sql]) => sql.includes('record_venue_hold_placement'))).toBe(false);
+});

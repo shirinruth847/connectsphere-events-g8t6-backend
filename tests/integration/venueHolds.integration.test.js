@@ -371,4 +371,39 @@ describeLive("SPM-190 tentative venue holds (live)", () => {
       expect(byName[name]).toMatchObject({ service: false, writer: false });
     }
   });
+
+  test("capacity changes are rechecked under lock without writes; equality and committed replay remain valid", async () => {
+    const venue = await insertVenue("CapacityGuard", 200);
+    const db = await getMongoDb();
+    await db.collection("venue_details").insertOne({
+      _id: String(venue.venueId), pg_version: 1, name: prefix + " CapacityGuard", location: "Synthetic capacity road",
+      setupMinutes: 30, turnaroundMinutes: 0, version: 1,
+    });
+    const requested = await requestHold(eventId, venue, AT("10:00"), AT("11:00"));
+    expect(requested.status).toBe(201);
+    const id = requested.body.holdRequest.holdRequestId, key = nextKey();
+    const setCapacity = async capacity => {
+      const { error } = await supabase.from("venue").update({ max_capacity: capacity }).eq("venue_id", venue.venueId);
+      if (error) throw new Error(error.message);
+    };
+    const noticesBefore = (await noticeTitles(eventId)).length;
+    await setCapacity(20);
+    const refused = await placeHold(id, key);
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe("VENUE_CAPACITY_EXCEEDED");
+    expect((await holdRows(eventId)).find(row => row.hold_request_id === id).status).toBe("PENDING");
+    expect(await db.collection("venue_calendar").countDocuments({ venueId: String(venue.venueId) })).toBe(0);
+    expect((await noticeTitles(eventId)).length).toBe(noticesBefore);
+
+    await setCapacity(50);
+    const placed = await placeHold(id, key);
+    expect(placed.status).toBe(200);
+    await setCapacity(20);
+    const replay = await placeHold(id, key);
+    expect(replay.status).toBe(200);
+    expect(replay.body.holdRequest.hold.holdId).toBe(placed.body.holdRequest.hold.holdId);
+    expect(await db.collection("venue_calendar").countDocuments({ venueId: String(venue.venueId) })).toBe(1);
+    expect((await noticeTitles(eventId)).length).toBe(noticesBefore + 1);
+  });
+
 });

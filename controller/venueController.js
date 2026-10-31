@@ -828,6 +828,7 @@ const HOLD_ERRORS = Object.freeze({
   HOLD_NOT_ACTIVE: [409, "This hold is no longer active. Reload it to see its status."],
   HOLD_EXPIRED: [409, "This hold has expired, so it can no longer be changed."],
   HOLD_ALREADY_EXTENDED: [409, "A hold can be extended only once."],
+  VENUE_CAPACITY_EXCEEDED: [409, "The requested attendance exceeds this venue’s current capacity. Ask the coordinator to revise the request or choose another venue."],
   VENUE_NOT_BOOKABLE: [409, "This venue is out of service and takes no new holds."],
   INVALID_HOLD: [400, "The hold could not be read. Reload it and try again."],
   INVALID_HOLD_REQUEST: [400, "Please correct the highlighted fields."],
