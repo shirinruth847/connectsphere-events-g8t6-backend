@@ -53,8 +53,10 @@ async function setup() {
   // The live table and equipment catalogue carry these; the reduced fixture does not.
   await db.exec(`ALTER TABLE public.event_venue_preference ADD UNIQUE (event_id, preference_order);
     ALTER TABLE public.equipment ADD COLUMN is_active boolean NOT NULL DEFAULT true, ADD COLUMN details_pending boolean NOT NULL DEFAULT false`);
-  await db.exec(read("20261031140000_spm76_venue_preference_times.sql"));
-  await db.exec(read("20261031150000_spm76_restore_choice_removal.sql"));
+  // Run twice: development already holds this migration's objects, so a
+  // second run must succeed and change nothing.
+  await db.exec(read("20261101010000_spm76_venue_preference_times.sql"));
+  await db.exec(read("20261101010000_spm76_venue_preference_times.sql"));
   await db.exec(`INSERT INTO public.venue (venue_id,name,address,max_capacity) VALUES
     (1,'SPM-76 Hall','1 Synthetic Road',300),(2,'SPM-76 Breakout','1 Synthetic Road',60),(3,'SPM-76 Studio','1 Synthetic Road',40)`);
   await db.exec(`INSERT INTO public.equipment (equipment_id,name,category) VALUES (1,'Projector','AV'),(2,'Microphone','AV')`);
@@ -79,6 +81,17 @@ test("[SPM-76-TC1] choices keep their own times; a whole-event time is stored as
     const submitted = await submit(db, id);
     assert.equal(submitted.event.status, "SUBMITTED");
     assert.deepEqual(await stored(db, id), [[1, null, null], [2, "2035-01-01T05:00:00.000Z", "2035-01-01T07:00:00.000Z"]]);
+  } finally { await db.close(); }
+});
+
+test("[SPM-76] applying the migration again keeps saved choices and their times", async () => {
+  const db = await setup();
+  try {
+    const id = (await save(db, { key: "spm76-rerun", preferences: [1, choice(2, "2035-01-01T05:00:00Z", "2035-01-01T07:00:00Z")] })).event.event_id;
+    await db.exec(read("20261101010000_spm76_venue_preference_times.sql"));
+    assert.deepEqual(await stored(db, id), [[1, null, null], [2, "2035-01-01T05:00:00.000Z", "2035-01-01T07:00:00.000Z"]]);
+    const constraints = await db.query("SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'event_venue_preference_requested_window_check'");
+    assert.equal(constraints.rows[0].n, 1);
   } finally { await db.close(); }
 });
 

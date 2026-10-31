@@ -56,7 +56,8 @@ const imageBody = express.raw({ type: PHOTO_TYPES, limit: "2mb" });
 router.get("/", ...venueStaffOnly, getVenueCatalogue);
 
 // The organiser's venue step (SPM-76): available venues checked against the
-// unsaved request, and one venue's calendar showing busy periods by kind only.
+// unsaved request, and one chosen venue checked over its requested time. Both
+// say only what kind of entry is in the way, never when or whose.
 // Read-only photos of available venues serve everyone who chooses venues:
 // organisers here, coordinators and Leads in the event's venue section
 // (SPM-72/74). Declared before /:venueId.

@@ -20,7 +20,7 @@ const at = (time, day = "2026-12-01") => new Date(`${day}T${time}:00+08:00`);
 const ORGANISER = { user_id: 5, role: "ORGANISER" };
 
 describe("getRequestVenueAvailability (SPM-76)", () => {
-  const range = { from: at("00:00"), to: at("00:00", "2026-12-02") };
+  const range = { start: at("10:00"), end: at("12:00") };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -54,19 +54,22 @@ describe("getRequestVenueAvailability (SPM-76)", () => {
     ]);
   };
 
-  test("[SPM-76-AC3][TC3] should_show_busy_periods_by_kind_without_whose_they_are", async () => {
+  test("[SPM-76-AC3][TC-VS-003] should_say_only_what_kind_of_entry_is_in_the_way", async () => {
     mockVenue();
 
-    const result = await venueModel.getRequestVenueAvailability(45, { ...range, check: { start: at("11:00"), end: at("13:00") } }, ORGANISER);
+    const result = await venueModel.getRequestVenueAvailability(45, { start: at("11:00"), end: at("13:00") }, ORGANISER);
 
-    expect(result.venue.busyPeriods).toEqual([
-      { type: "BOOKING", label: "Unavailable – booking", occupiedStart: at("09:30").toISOString(), occupiedEnd: at("12:45").toISOString() },
-      { type: "HOLD", label: "Unavailable – active hold", occupiedStart: at("14:30").toISOString(), occupiedEnd: at("16:45").toISOString() },
-      { type: "BLOCK", label: "Unavailable – operational block", occupiedStart: at("18:00").toISOString(), occupiedEnd: at("20:00").toISOString() },
-    ]);
-    expect(result.venue.check).toMatchObject({ availability: "UNAVAILABLE_BOOKING", conflicts: [expect.objectContaining({ type: "BOOKING" })] });
+    expect(result).toEqual({
+      venueId: 45,
+      availability: {
+        status: "UNAVAILABLE_BOOKING",
+        label: "Unavailable – booking",
+        conflicts: [{ type: "BOOKING", label: "Unavailable – booking" }],
+        operatingHoursWarning: null,
+      },
+    });
     const shown = JSON.stringify(result);
-    for (const secret of ["Private board meeting", "Another event", "REQ-", "Ceiling inspection", "SAFETY", "Internal note", "110", "holdExpiresAt", "message"]) {
+    for (const secret of ["Private board meeting", "Another event", "REQ-", "Ceiling inspection", "SAFETY", "Internal note", "110", "holdExpiresAt", "occupied", "busyPeriods", at("09:30").toISOString(), at("12:45").toISOString()]) {
       expect(shown).not.toContain(secret);
     }
   });
@@ -86,5 +89,25 @@ describe("getRequestVenueAvailability (SPM-76)", () => {
     jest.spyOn(console, "warn").mockImplementation(() => {});
 
     await expect(venueModel.getRequestVenueAvailability(45, range, ORGANISER)).rejects.toMatchObject({ code: "AVAILABILITY_UNAVAILABLE" });
+  });
+});
+
+describe("toOrganiserAvailability (SPM-76)", () => {
+  test("[SPM-76-AC3][TC-VS-003] should_drop_the_times_and_details_of_other_entries_from_the_venue_list", () => {
+    const organiser = venueModel.toOrganiserAvailability({
+      status: "UNAVAILABLE_HOLD",
+      label: "Unavailable – active hold",
+      occupiedStart: "2026-12-01T01:30:00.000Z",
+      occupiedEnd: "2026-12-01T04:45:00.000Z",
+      conflicts: [{
+        type: "HOLD", label: "Hold for REQ-000500", occupiedStart: "2026-12-01T06:30:00.000Z", occupiedEnd: "2026-12-01T08:45:00.000Z",
+        message: "Held by another event", holdExpiresAt: "2099-01-01T00:00:00.000Z", reasonLabel: null,
+      }],
+      operatingHoursWarning: null,
+    });
+
+    expect(organiser.conflicts).toEqual([{ type: "HOLD", label: "Unavailable – active hold" }]);
+    const shown = JSON.stringify(organiser.conflicts);
+    for (const secret of ["06:30", "08:45", "REQ-", "Held by", "2099"]) expect(shown).not.toContain(secret);
   });
 });

@@ -1017,22 +1017,17 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
 
 // ---------- organiser venue options (SPM-76) ----------
 
-// An organiser learns what kind of entry makes a venue unavailable and when,
-// never whose it is or why (SPM-76 AC3).
+// An organiser learns only what kind of entry makes a venue unavailable: never
+// when it is, whose it is or why (SPM-76 AC3, TC-VS-003).
 const ORGANISER_UNAVAILABLE_LABELS = Object.freeze({
   BOOKING: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_BOOKING,
   HOLD: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_HOLD,
   BLOCK: venueConflictModel.AVAILABILITY_LABELS.UNAVAILABLE_BLOCK,
 });
-const toBusyPeriod = ({ type, occupiedStart, occupiedEnd }) => ({
-  type,
-  label: ORGANISER_UNAVAILABLE_LABELS[type] ?? "Unavailable",
-  occupiedStart,
-  occupiedEnd,
-});
+const toUnavailableKind = ({ type }) => ({ type, label: ORGANISER_UNAVAILABLE_LABELS[type] ?? "Unavailable" });
 const toOrganiserAvailability = (availability) => ({
   ...availability,
-  conflicts: (availability.conflicts || []).map(toBusyPeriod),
+  conflicts: (availability.conflicts || []).map(toUnavailableKind),
 });
 
 // Available venues checked against the organiser's unsaved form values.
@@ -1049,38 +1044,19 @@ const getRequestVenueOptions = async (need, viewer, { filters, requiredFacilitie
   };
 };
 
-// One venue's calendar for the organiser: busy periods by kind only, with the
-// requested time checked when given. Unavailable venues are not found.
-const getRequestVenueAvailability = async (venueId, { from, to, check }, viewer) => {
+// One chosen venue checked over the organiser's requested time: the status and
+// the kinds of entry in the way, as in the venue list. There is no calendar:
+// the organiser never sees when other entries are (SPM-76 AC3, TC-VS-001/003).
+// Unavailable venues are not found.
+const getRequestVenueAvailability = async (venueId, { start, end }, viewer) => {
   await requireSelectableVenue(venueId);
-  const result = await getVenueAvailability({ from, to, venueIds: [venueId], check }, viewer);
+  const result = await getVenueAvailability({ from: start, to: end, venueIds: [venueId], check: { start, end } }, viewer);
   const venue = result.venues[0];
   if (!venue) throw venueError("VENUE_NOT_FOUND");
+  const { status, label, conflicts, operatingHoursWarning } = toOptionAvailability(venue);
   return {
-    from: result.from,
-    to: result.to,
-    generatedAt: result.generatedAt,
-    venue: {
-      venueId: venue.venueId,
-      name: venue.name,
-      operatingHours: venue.operatingHours,
-      setupMinutes: venue.setupMinutes,
-      turnaroundMinutes: venue.turnaroundMinutes,
-      buffersRecorded: venue.buffersRecorded,
-      busyPeriods: venue.entries.filter((entry) => entry.blocking).map(toBusyPeriod),
-      check: venue.check
-        ? {
-            start: venue.check.start,
-            end: venue.check.end,
-            occupiedStart: venue.check.occupiedStart,
-            occupiedEnd: venue.check.occupiedEnd,
-            availability: venue.check.availability,
-            availabilityLabel: venue.check.availabilityLabel,
-            conflicts: venue.check.conflicts.map(toBusyPeriod),
-            operatingHoursWarning: venue.check.operatingHoursWarning,
-          }
-        : null,
-    },
+    venueId: venue.venueId,
+    availability: { status, label, conflicts: conflicts.map(toUnavailableKind), operatingHoursWarning },
   };
 };
 
@@ -3273,6 +3249,7 @@ module.exports = {
   getSelectableVenuePhotoImage,
   venueRequirements,
   toOptionAvailability,
+  toOrganiserAvailability,
   compareOptions,
   findVenueBookings,
   findEventBookings,

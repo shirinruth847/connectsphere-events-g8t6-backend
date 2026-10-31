@@ -62,7 +62,8 @@ describe("holdId on a booking item (SPM-188 AC9)", () => {
 
   test("should_accept_a_hold_id_and_default_to_none", () => {
     expect(validate(HOLD_ID).bookings[0].holdId).toBe(HOLD_ID);
-    expect(validate(undefined).bookings[0].holdId).toBeNull();
+    // No key at all, so an ordinary booking hashes as before SPM-188.
+    expect(validate(undefined).bookings[0]).not.toHaveProperty("holdId");
   });
 
   test.each([["not-a-hold"], [42], ["6720A1B2C3D4E5F60718293A"]])("should_refuse_a_malformed_hold_id_%p", (holdId) => {
