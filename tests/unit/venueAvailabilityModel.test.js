@@ -149,6 +149,18 @@ describe("getVenueAvailability (SPM-74)", () => {
     venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
   };
 
+  test("[SPM-186] should_return_the_status_and_reason_of_a_venue_under_maintenance", async () => {
+    supabase.from
+      .mockReturnValueOnce(queryReturning({ data: [{ venue_id: 45, name: "Grand Hall", address: "1 Road", operating_hours: "08:00-22:00", status: "UNDER_MAINTENANCE", status_reason: "Roof repairs" }], error: null }))
+      .mockReturnValueOnce(queryReturning({ data: [], error: null }));
+    venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([["45", { setupMinutes: 30, turnaroundMinutes: 45 }]]));
+    venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
+
+    const result = await venueModel.getVenueAvailability({ ...range, venueIds: [45] }, { user_id: 7, role: "VENUE_STAFF" });
+
+    expect(result.venues[0]).toMatchObject({ venueId: 45, status: "UNDER_MAINTENANCE", statusReason: "Roof repairs" });
+  });
+
   test("[SPM-74-TC2][TC3] should_use_the_mongodb_buffers_for_postgres_bookings", async () => {
     mockStores();
 

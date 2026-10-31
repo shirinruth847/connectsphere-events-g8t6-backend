@@ -39,6 +39,7 @@ const {
   suggestEventVenue,
   requestVenueBookings,
   listEventVenueBookings,
+  checkVenueBookings,
 } = require("../controller/venueController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
@@ -90,6 +91,8 @@ router.put("/:id/venue-suggestion", ...coordinatorOnly, requireVisibleEvent, sug
 // related users who are not the assigned coordinator of a PLANNING event.
 router.get("/:id/venue-bookings", ...eventVenueReaders, listEventVenueBookings);
 router.post("/:id/venue-bookings", anySignedInUser, requireVisibleEvent, requestVenueBookings);
+// Advisory per-booking checks while the request is prepared (SPM-186); nothing is saved.
+router.post("/:id/venue-bookings/check", anySignedInUser, requireVisibleEvent, checkVenueBookings);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.post("/:id/history/viewed", anySignedInUser, requireVisibleEvent, markEventHistoryViewed);
 // SPM-41 clarification threads: another coordinator gets 404; same-organisation

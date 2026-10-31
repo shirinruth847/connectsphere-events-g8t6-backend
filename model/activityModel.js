@@ -82,16 +82,31 @@ const toHistoryEntry = (row, { organiserView = false } = {}) => ({
   audience: row.audience,
 });
 
-// Only safety review entries and entries that changed one of "fields" (SPM-243 AC2).
-const relevantHistoryFilter = (fields) =>
-  ["action.like.SAFETY_*", ...fields.map((field) => `changes->${field}.not.is.null`)].join(",");
+// Only the reader's own kind of entry (safety reviews for a Safety Officer,
+// SPM-243 AC2; venue entries for Venue Staff, SPM-186) and entries that changed
+// one of "fields".
+const relevantHistoryFilter = (fields, actionPattern) =>
+  [`action.like.${actionPattern}`, ...fields.map((field) => `changes->${field}.not.is.null`)].join(",");
+
+const readHistoryPage = async (query, limit, options) => {
+  const { data, error } = await query.order("log_id", { ascending: false }).limit(limit + 1);
+  if (error) throw new Error(`[Supabase Error] ${error.message}`);
+
+  const page = data.slice(0, limit);
+  return {
+    history: page.map((row) => toHistoryEntry(row, options)),
+    nextCursor: data.length > limit ? encodeHistoryCursor(page[page.length - 1]) : null,
+  };
+};
 
 // Newest first. "audiences" lists what this reader may see (getEventAccess decides).
 // The filter is part of the query, so entries for another audience (staff-only
 // assignment records, or the owner's draft history) never leave the database for
 // someone who may not read them (SPM-33 AC8). No audience means no entries.
 // "fields", when given, narrows the history to the portion relevant to the reader.
-const findEventHistory = async (eventId, { limit, cursor = null, audiences = [], fields = null, organiserView = false }) => {
+const findEventHistory = async (eventId, {
+  limit, cursor = null, audiences = [], fields = null, actionPattern = "SAFETY_*", organiserView = false,
+}) => {
   const beforeLogId = decodeHistoryCursor(cursor);
   if (audiences.length === 0) return { history: [], nextCursor: null };
 
@@ -101,17 +116,23 @@ const findEventHistory = async (eventId, { limit, cursor = null, audiences = [],
     .eq("entity_name", "event")
     .eq("entity_id", eventId)
     .in("audience", audiences);
-  if (fields) query = query.or(relevantHistoryFilter(fields));
+  if (fields) query = query.or(relevantHistoryFilter(fields, actionPattern));
   if (beforeLogId) query = query.lt("log_id", beforeLogId);
+  return readHistoryPage(query, limit, { organiserView });
+};
 
-  const { data, error } = await query.order("log_id", { ascending: false }).limit(limit + 1);
-  if (error) throw new Error(`[Supabase Error] ${error.message}`);
-
-  const page = data.slice(0, limit);
-  return {
-    history: page.map((row) => toHistoryEntry(row, { organiserView })),
-    nextCursor: data.length > limit ? encodeHistoryCursor(page[page.length - 1]) : null,
-  };
+// A venue's own record, newest first (SPM-186): creation, edits, status,
+// details, photos and blocks. Every venue entry is staff-only.
+const findVenueHistory = async (venueId, { limit, cursor = null }) => {
+  const beforeLogId = decodeHistoryCursor(cursor);
+  let query = supabase
+    .from("activity_log")
+    .select(HISTORY_SELECT)
+    .eq("entity_name", "venue")
+    .eq("entity_id", venueId)
+    .eq("audience", "STAFF_ONLY");
+  if (beforeLogId) query = query.lt("log_id", beforeLogId);
+  return readHistoryPage(query, limit);
 };
 
 // Appends an audit entry for a change committed outside PostgreSQL (a MongoDB
@@ -153,6 +174,7 @@ const markEventHistoryViewed = async (eventId, userId) => {
 module.exports = {
   appendActivity,
   findEventHistory,
+  findVenueHistory,
   findLastHistoryView,
   markEventHistoryViewed,
   toHistoryEntry,
