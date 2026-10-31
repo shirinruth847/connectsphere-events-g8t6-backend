@@ -487,7 +487,7 @@ Errors use one shape: `{ "error": "<safe message>", "code": "<MACHINE_CODE>" }`,
 | `GET /api/auth/me`            | Any signed-in user   | —                                                | `200 { user: { user_id, email, name, role, roles, home_path } }`                                                                                                                                            | `401 UNAUTHENTICATED` (missing, invalid, expired or logged-out token, or no active profile) |
 | `POST /api/auth/logout`       | Bearer token, if any | —                                                | `204`; revokes this device's session (access and refresh token). The browser should then call `supabase.auth.signOut({ scope: "local" })`                                                                   | — (idempotent)                                                                              |
 | `GET /api/events/mine`        | `ORGANISER`          | See Event Requests above                         | Own requests plus submitted requests from the organiser's organisations; colleagues' drafts are never listed                                                                                                | `400 VALIDATION_FAILED`, `401`, `403 FORBIDDEN`                                             |
-| `GET /api/registrations/mine` | `ATTENDEE`           | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue } }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN`                                                               |
+| `GET /api/registrations/mine` | `ATTENDEE`           | `?limit=1..100` (default 50), `?offset=0..10000` | `200 { registrations: [{ registration_id, registration_status, registered_at, event: { event_id, title, description, start_datetime, end_datetime, attendee_status, venue }, waitlistPosition, offer }], page }`, attendee-safe only | `400`, `401`, `403 FORBIDDEN`                                                               |
 
 - `home_path` is `/dashboard` for organisers and staff and `/my-registrations` for attendees.
 - `roles` is a list so the contract survives multi-role users; the schema currently stores one role per user.
@@ -541,6 +541,27 @@ An attendee registers themselves for an event. The form starts from `GET /api/at
 - **Withdrawn attendees** re-enter their existing record with a new registration time and a new confirmation.
 - **Not built:** email confirmation (Master M5: in-app only), organiser-configured registration fields (no schema yet) and organiser contact details in the confirmation.
 - **Schema:** migrations `20261029055940_spm134_event_registration` and `20261029061336_spm134_confirmed_only_registration` (registration limited to `CONFIRMED`) and `20261029061913_spm134_hidden_events_not_found` (every other state is `404 EVENT_NOT_FOUND`) and `20261029164310_spm134_close_time_only_registration` (dropped the enabled flag and, until the next migration, the start time as gates) and `20261030142619_spm134_window_and_venue_capacity` (`event_registration_availability`: start and end times and the primary venue's capacity). **Tests:** `tests/database/spm134EventRegistration.test.cjs` (PGlite) and `tests/integration/eventRegistration.integration.test.js` (live). The live suite builds only what registration reads, with `tests/fixtures/registrationFixtures.js`: one account per role, one organisation and, per event, a synthetic venue with one approved primary booking covering the event (`bookPrimaryVenue`); no shared booking or equipment data. Each test creates its own events with a registration period and a venue capacity. Registering writes append-only activity, so without `TEST_DATABASE_URL` cleanup keeps the attendees deactivated, along with any attendee profile they saved.
+
+---
+
+### Event Waitlist and Withdrawal (SPM-163, SPM-147)
+
+An attendee joins the waitlist of a full event, sees their position, leaves it, answers a place offer, or withdraws a registration. Every action is one database transaction under the event lock; the attendee comes from the session and every route takes an optional `Idempotency-Key` header.
+
+| Method & path | Input | Success |
+| --- | --- | --- |
+| `POST /api/registrations/mine/:eventId/waitlist` | Same answers as registering (both required) | `201 { registration }` with `status: "WAITLISTED"` and `waitlistPosition` |
+| `POST /api/registrations/mine/:eventId/waitlist/leave` | No fields | `200 { registration }`, `status: "WITHDRAWN"`; an open offer counts as declined |
+| `POST /api/registrations/mine/:eventId/offer/accept` | `{ "offerId" }` | `200 { registration }`, `status: "REGISTERED"` |
+| `POST /api/registrations/mine/:eventId/offer/decline` | `{ "offerId" }` | `200 { registration }`, `status: "WITHDRAWN"` |
+| `POST /api/registrations/mine/:eventId/withdraw` | No fields | `200 { registration }`, `status: "WITHDRAWN"`, `lateWithdrawal` |
+
+- **Result:** `registration` is `{ registrationId, status, outcome, waitlistPosition, registeredAt, withdrawnAt, event: { eventId, title, startDatetime, endDatetime } }`; `outcome` is `JOINED`, `LEFT`, `DECLINED`, `EXPIRED`, `ACCEPTED` or `WITHDRAWN`.
+- **Position and offer:** `GET /api/registrations/mine` (each row) and `GET /api/registrations/mine/:eventId` (`myRegistration`) add `waitlistPosition` (1-based, or `null` when not waitlisted) and `offer` (`{ offerId, expiresAt }` while an offer is open, else `null`).
+- **Errors:** `400 VALIDATION_FAILED`, `401`, `403`, `404 EVENT_NOT_FOUND` or `OFFER_NOT_FOUND`, `409` with `ALREADY_REGISTERED`, `ALREADY_WAITLISTED`, `REGISTRATION_NOT_YET_OPEN`, `REGISTRATION_CLOSED`, `REGISTRATION_UNAVAILABLE`, `PLACES_AVAILABLE` (register directly), `NOT_WAITLISTED`, `OFFER_EXPIRED`, `OFFER_NOT_OPEN`, `REGISTRATION_FULL`, `NOT_REGISTERED`, `EVENT_STARTED` ("Cannot withdraw registration for past events"), `EVENT_NOT_ACTIVE`, `IDEMPOTENCY_KEY_REUSED` or `IDEMPOTENCY_IN_PROGRESS`; `500 INTERNAL_ERROR`.
+- **Offers** (Master D05): a freed place is offered to the first in the FIFO queue for 24 hours, capped at registration close and event start. Decline or expiry withdraws that place and the offer cascades to the next person; re-joining takes the back of the queue. Places held by open offers count against SPM-134's venue capacity.
+- **Withdrawal** is allowed before the event starts. Within 24 hours of the start the owner gets an in-app "Late withdrawal" notice without the attendee's name.
+- **Tests:** `tests/database/spm163Waitlist.test.cjs` and `spm147Withdrawal.test.cjs` (PGlite), `tests/unit/waitlistRoutes.test.js`, and the live accept-vs-expiry race in `tests/integration/waitlistOfferRace.integration.test.js`.
 
 ---
 
