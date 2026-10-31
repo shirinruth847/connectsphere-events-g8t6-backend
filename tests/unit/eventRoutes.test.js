@@ -47,6 +47,8 @@ const validRequest = () => ({
   accessibilityNeeds: ["Wheelchair access"],
   isRegistrationEnabled: true,
   registrationCapacity: 150,
+  registrationOpenAt: inDays(1),
+  registrationCloseAt: inDays(6),
 });
 
 const eventRow = (overrides = {}) => ({

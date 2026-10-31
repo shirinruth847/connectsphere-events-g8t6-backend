@@ -31,6 +31,9 @@ const FIELD_MAP = Object.freeze({
   accessibilityNeeds: "accessibility_needs",
   isRegistrationEnabled: "is_registration_enabled",
   registrationCapacity: "registration_capacity",
+  // SPM-35: the window SPM-134 registration reads.
+  registrationOpenAt: "registration_open_at",
+  registrationCloseAt: "registration_close_at",
 });
 
 const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
@@ -212,6 +215,8 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
     equipmentRequirements: toEquipmentRequirements(equipmentRequirements),
     isRegistrationEnabled: row.is_registration_enabled,
     registrationCapacity: row.registration_capacity,
+    registrationOpenAt: row.registration_open_at ?? null,
+    registrationCloseAt: row.registration_close_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     submittedAt: row.submitted_at ?? null,
@@ -434,6 +439,10 @@ const SUBMISSION_FAILURES = Object.freeze({
   "preferredLayoutType:INVALID": MESSAGES.layoutInvalid,
   "registrationCapacity:REQUIRED": MESSAGES.registrationCapacityRequired,
   "registrationCapacity:INVALID": MESSAGES.registrationCapacityInvalid,
+  "registrationOpenAt:REQUIRED": MESSAGES.registrationOpenRequired,
+  "registrationCloseAt:REQUIRED": MESSAGES.registrationCloseRequired,
+  "registrationCloseAt:BEFORE_OPEN": MESSAGES.registrationCloseBeforeOpen,
+  "registrationCloseAt:AFTER_START": MESSAGES.registrationCloseAfterStart,
 });
 
 // update_event_details reports the same "<field>:<reason>" pairs.
@@ -478,6 +487,7 @@ const CONSTRAINT_FIELD_ERRORS = Object.freeze({
   event_registration_capacity_positive_check: { registrationCapacity: MESSAGES.registrationCapacityInvalid },
   event_registration_enabled_capacity_check: { registrationCapacity: MESSAGES.registrationCapacityRequired },
   event_datetime_order_check: { endDatetime: MESSAGES.endBeforeStart },
+  event_registration_window_check: { registrationCloseAt: MESSAGES.registrationCloseBeforeOpen },
   event_venue_preference_pkey: { venuePreferences: MESSAGES.venuePreferencesInvalid },
   event_venue_preference_venue_id_fkey: { venuePreferences: MESSAGES.venuePreferencesInvalid },
   event_equipment_requirement_pkey: { equipmentRequirements: MESSAGES.equipmentRequirementsInvalid },

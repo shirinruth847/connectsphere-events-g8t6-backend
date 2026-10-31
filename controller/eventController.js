@@ -928,8 +928,9 @@ const postClarificationMessage = async (req, res, next) => {
 };
 
 // Field errors for the owner's amendments, judged against the saved request:
-// the merged result must still be a complete submission. Registration settings,
-// the organisation and system fields are refused (403), unknown keys are 400.
+// the merged result must still be a complete submission. The registration flag
+// and capacity, the organisation and system fields are refused (403), unknown
+// keys are 400. The registration window may be amended (SPM-35).
 const checkAmendments = async (existing, changes) => {
   if (changes === undefined) return { errors: { changes: MESSAGES.amendmentEmpty } };
   if (!isPlainObject(changes)) return { errors: { changes: "Send the changed details as a JSON object." } };

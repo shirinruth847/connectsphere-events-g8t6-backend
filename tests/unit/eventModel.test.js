@@ -107,9 +107,23 @@ describe("toEventRequestError (database failures become client errors)", () => {
     });
   });
 
+  test("[SPM-35] should_send_the_registration_window_columns_and_map_their_submission_failures", async () => {
+    rpcFails({ code: "P0001", message: "INVALID_EVENT_SUBMISSION", details: "registrationOpenAt:REQUIRED,registrationCloseAt:AFTER_START" });
+    const input = { registrationOpenAt: "2030-03-01T09:00:00Z", registrationCloseAt: "2030-03-09T09:00:00Z" };
+
+    await expect(eventModel.submitEvent({ organiserId: 9, eventId: 7, input })).rejects.toMatchObject({
+      fields: { registrationOpenAt: MESSAGES.registrationOpenRequired, registrationCloseAt: MESSAGES.registrationCloseAfterStart },
+    });
+    expect(supabase.rpc.mock.calls[0][1].p_event).toEqual({
+      registration_open_at: "2030-03-01T09:00:00Z",
+      registration_close_at: "2030-03-09T09:00:00Z",
+    });
+  });
+
   test.each([
     ["event_registration_enabled_capacity_check", { registrationCapacity: MESSAGES.registrationCapacityRequired }],
     ["event_datetime_order_check", { endDatetime: MESSAGES.endBeforeStart }],
+    ["event_registration_window_check", { registrationCloseAt: MESSAGES.registrationCloseBeforeOpen }],
     ["event_venue_preference_venue_id_fkey", { venuePreferences: MESSAGES.venuePreferencesInvalid }],
   ])("[EVT-ERR-001] should_map_constraint_%s_to_a_field_error", async (constraint, fields) => {
     rpcFails({ code: "23514", message: `new row for relation "event" violates check constraint "${constraint}"` });

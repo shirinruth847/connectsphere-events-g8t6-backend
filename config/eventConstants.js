@@ -169,7 +169,13 @@ const CLARIFICATION_TEXT_LIMIT = 2000;
 // What the owner may amend while a clarification thread is open: every
 // submission field except registration settings and the organisation (team
 // decision). These changes skip the change workflow (Master 5.2).
-const AMENDMENT_FIELDS = Object.freeze([...EVENT_FIELD_GROUPS.ORDINARY, ...EVENT_FIELD_GROUPS.SIGNIFICANT]);
+// SPM-35: the registration window can be amended; the flag and capacity cannot.
+const AMENDMENT_FIELDS = Object.freeze([
+  ...EVENT_FIELD_GROUPS.ORDINARY,
+  ...EVENT_FIELD_GROUPS.SIGNIFICANT,
+  "registrationOpenAt",
+  "registrationCloseAt",
+]);
 
 // safety_reviews.status values (Master 6.2).
 const SAFETY_ROUND_STATUS = Object.freeze({

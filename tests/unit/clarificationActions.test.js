@@ -439,6 +439,16 @@ describe("POST /api/events/:id/amendments (SPM-41 v2 AC3)", () => {
     expect(eventModel.saveClarificationAmendments).not.toHaveBeenCalled();
   });
 
+  test("[SPM-35] should_accept_an_amended_registration_window", async () => {
+    eventModel.findVisibleEvent.mockResolvedValue(awaiting({ is_registration_enabled: true, registration_capacity: 50 }));
+    const changes = { registrationOpenAt: inDays(2), registrationCloseAt: inDays(10) };
+
+    const res = await post("/api/events/42/amendments", { changes, version: 4 });
+
+    expect(res.status).toBe(200);
+    expect(eventModel.saveClarificationAmendments).toHaveBeenCalledWith(expect.objectContaining({ input: changes }));
+  });
+
   test("[SPM-41-AC3] should_answer_400_for_an_unknown_change_or_body_field_including_the_v1_response", async () => {
     const res = await post("/api/events/42/amendments", { changes: { colour: "red" }, version: 4 });
     const response = await post("/api/events/42/amendments", { response: "Done.", changes: { title: "Gala" }, version: 4 });
