@@ -123,10 +123,14 @@ const checkRequestBody = (body, { allowAutoSave = false, allowVersion = false } 
 };
 
 // Existing saved values + newly sent values, used to validate the complete picture.
-const mergeWithExisting = (existingRow, input) => ({
-  ...eventModel.pickEventInput(eventModel.toApi(existingRow)),
-  ...input,
-});
+// Saved requirements go back in input shape: the validator rejects display fields.
+const mergeWithExisting = (existingRow, input) => {
+  const saved = eventModel.pickEventInput(eventModel.toApi(existingRow));
+  if (Array.isArray(saved.equipmentRequirements)) {
+    saved.equipmentRequirements = saved.equipmentRequirements.map(({ equipmentId, quantity }) => ({ equipmentId, quantity }));
+  }
+  return { ...saved, ...input };
+};
 
 // Equipment the saved event already requests stays valid even if it has since
 // been deactivated (SPM-52 AC9).
