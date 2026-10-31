@@ -100,6 +100,7 @@ describe("findVenueBookings", () => {
       expectedAttendance: 120,
       submittedAt: "2026-10-07T13:32:08+00:00",
       updatedAt: "2026-10-08T02:00:00+00:00",
+      fromHold: false,
       event: { eventId: 442, requestId: "REQ-000442", title: "Planning", status: "PLANNING", eventType: null, eventTypeLabel: null },
     });
     expect(list.calls).toEqual(expect.arrayContaining([

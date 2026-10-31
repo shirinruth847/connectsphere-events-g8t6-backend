@@ -109,7 +109,7 @@ describeLive("SPM-188 confirming a hold as a booking (live)", () => {
       coordinator_id: fixtures.accounts.coordinatorThree.userId, start_datetime: AT("10:00"), end_datetime: AT("12:00"),
     })).event_id;
 
-    for (const label of ["Hall", "Annex", "Studio", "Lab", "Race"]) venues[label.toLowerCase()] = await insertVenue(label, 200);
+    for (const label of ["Hall", "Annex", "Studio", "Lab", "Race", "Repair"]) venues[label.toLowerCase()] = await insertVenue(label, 200);
 
     const db = await getMongoDb();
     await applyMigrations(db);
@@ -195,6 +195,38 @@ describeLive("SPM-188 confirming a hold as a booking (live)", () => {
     expect(response.body.code).toBe("HOLD_EXPIRED");
     expect(await bookingsAt(eventId, venues.lab)).toEqual([]);
     expect((await calendarEntry(holdId)).status).not.toBe("CONVERTED");
+  });
+
+  test("[T35] a hold whose COMMIT was lost is shown as not saved, and confirming again completes it", async () => {
+    const holdId = await placedHold(eventId, venues.repair, AT("10:00"), AT("11:00"));
+    // The state a lost COMMIT leaves: MongoDB converted, PostgreSQL never saved booking 999999.
+    await (await getMongoDb()).collection("venue_calendar").updateOne(
+      { _id: new ObjectId(holdId) }, { $set: { status: "CONVERTED", convertedBookingId: 999999 }, $inc: { version: 1 } },
+    );
+    const holdView = async () => (await as("coordinator", request(app).get(`/api/events/${eventId}/venue-holds`)))
+      .body.holds.find((item) => item.hold?.holdId === holdId).hold;
+    expect(await holdView()).toMatchObject({ status: "CONVERTED", statusLabel: "Booking not saved – confirm again", bookingMissing: true, convertedBooking: null });
+
+    const confirmed = await confirm(eventId, bookingItem(venues.repair, AT("10:00"), AT("11:00"), holdId));
+    expect(confirmed.status).toBe(201);
+    const [{ bookingId }] = confirmed.body.bookings;
+    expect(await calendarEntry(holdId)).toMatchObject({ status: "CONVERTED", convertedBookingId: bookingId });
+    expect(await holdView()).toMatchObject({
+      status: "CONVERTED", statusLabel: "Converted to a booking request", bookingMissing: false,
+      convertedBooking: { bookingId, status: "PENDING", statusLabel: "Pending" },
+    });
+
+    // Venue Staff see it on My Requests, marked as coming from a hold.
+    const listed = await as("venueStaff", request(app).get(`/api/venues/bookings?eventId=${eventId}&status=PENDING`));
+    expect(listed.status).toBe(200);
+    expect(listed.body.bookings.find((booking) => booking.bookingId === bookingId)).toMatchObject({ fromHold: true });
+
+    // Once approved, the coordinator is told and the hold shows the decision.
+    const approved = await as("venueStaff", request(app).post(`/api/venues/bookings/${bookingId}/approve`).send({ expectedStatus: "PENDING" }));
+    expect(approved.status).toBe(200);
+    const { data: notices } = await supabase.from("notification").select("title").eq("event_id", eventId);
+    expect(notices.map((row) => row.title)).toContain("Venue booking approved");
+    expect((await holdView()).convertedBooking).toMatchObject({ status: "APPROVED", statusLabel: "Approved" });
   });
 
   test("[SPM-188-TC-15][AC10] a confirmation at the moment of expiry either converts or expires the hold, never both", async () => {

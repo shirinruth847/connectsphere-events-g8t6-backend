@@ -1033,7 +1033,7 @@ const getSelectableVenuePhotoImage = async (venueId, photoId) => {
 const BOOKING_VENUE_SELECT =
   "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours))";
 const BOOKING_FIELDS =
-  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,reviewer:user!venue_booking_reviewed_by_fkey(name)";
+  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,calendar_hold_id,reviewer:user!venue_booking_reviewed_by_fkey(name)";
 const BOOKING_LIST_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT},event:event!inner(event_id,title,event_type,status)`;
 const BOOKING_DETAIL_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT}`;
 // Venue Staff see the event's venue-relevant details and the coordinator's
@@ -1080,6 +1080,8 @@ const toBookingSummary = (row) => ({
   expectedAttendance: row.expected_attendance,
   submittedAt: row.created_at,
   updatedAt: row.updated_at,
+  // Requested by confirming a tentative hold (SPM-188 AC9).
+  fromHold: Boolean(row.calendar_hold_id),
 });
 
 const toBookingListItem = (row) => ({
@@ -1872,19 +1874,38 @@ const withVenueLockTransaction = async (work) => {
   }
 };
 
+// The booking a hold was converted into, or null when none names it. Read with
+// the service connection while the event and venue locks are held: every
+// conversion runs under those locks, so any that committed is visible here
+// and none can be in flight.
+const findHoldBooking = async (holdId) => {
+  const { data, error } = await supabase.from("venue_booking").select("booking_id").eq("calendar_hold_id", holdId).maybeSingle();
+  if (error) throw venueError("VENUE_BOOKINGS_UNAVAILABLE");
+  return data?.booking_id ?? null;
+};
+
 // SPM-188 AC9: read, under the locks, each hold a booking confirms. It must be
 // this event's hold at this venue, still active and unexpired, and the booking
-// keeps its window (so the booking takes the hold's occupied range).
+// keeps its window (so the booking takes the hold's occupied range). A hold
+// that says CONVERTED although no booking names it lost its COMMIT after
+// MongoDB was written (Master T35); it is restored to ACTIVE and checked again,
+// so the coordinator's retry completes.
 const readConvertingHolds = async (bookings, eventId, now) => {
   const converting = [];
   for (const [index, item] of bookings.entries()) {
     if (!item.holdId) continue;
-    const hold = await calendarCall(() => venueCalendarModel.findCalendarEntry(item.holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
+    let hold = await calendarCall(() => venueCalendarModel.findCalendarEntry(item.holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
     const at = { index, venueId: item.venueId };
     if (!hold || hold.type !== venueConflictModel.ENTRY_TYPES.HOLD || String(hold.eventId) !== String(eventId) || hold.venueId !== item.venueId) {
       throw venueError("HOLD_NOT_FOUND", at);
     }
-    if (hold.status === "CONVERTED") throw venueError("HOLD_ALREADY_CONVERTED", at);
+    if (hold.status === "CONVERTED") {
+      if (await findHoldBooking(hold.id)) throw venueError("HOLD_ALREADY_CONVERTED", at);
+      hold = await calendarCall(() => venueCalendarModel.restoreOrphanConversion({
+        holdId: hold.id, venueId: hold.venueId, expectedVersion: hold.version, convertedBookingId: hold.convertedBookingId,
+      }));
+      if (!hold) throw venueError("HOLD_NOT_ACTIVE", at);
+    }
     if (hold.status !== "ACTIVE") throw venueError("HOLD_NOT_ACTIVE", at);
     if (!venueConflictModel.isHoldActive(hold, now)) throw venueError("HOLD_EXPIRED", at);
     if (Date.parse(hold.start) !== Date.parse(item.start) || Date.parse(hold.end) !== Date.parse(item.end)) {
@@ -2617,6 +2638,7 @@ const HOLD_ERRORS = new Set([
 ]);
 
 // Backend labels (Master 3.5: the frontend never maps states itself).
+const HOLD_BOOKING_MISSING_LABEL = "Booking not saved – confirm again";
 const HOLD_STATUS_LABELS = Object.freeze({
   ACTIVE: "On hold (tentative)",
   EXPIRED: "Hold expired",
@@ -2656,18 +2678,31 @@ const callHoldRpc = async (name, args) => {
 const holdStateAt = (hold, now) =>
   (hold.status === "ACTIVE" && !venueConflictModel.isHoldActive(hold, now) ? "EXPIRED" : hold.status);
 
+// A CONVERTED hold whose booking was never saved (a lost COMMIT, Master T35):
+// still unexpired, the coordinator confirms it again; once past its expiry it
+// is shown as expired.
 const toHold = (hold, now) => {
-  const status = holdStateAt(hold, now);
+  const bookingMissing = hold.status === "CONVERTED" && hold.convertedBooking === null;
+  const unexpired = venueConflictModel.isHoldActive({ ...hold, status: "ACTIVE" }, now);
+  const status = bookingMissing && !unexpired ? "EXPIRED" : holdStateAt(hold, now);
+  const confirmAgain = bookingMissing && unexpired;
   return {
     holdId: hold.id,
     status,
-    statusLabel: HOLD_STATUS_LABELS[status] || status,
+    statusLabel: confirmAgain ? HOLD_BOOKING_MISSING_LABEL : HOLD_STATUS_LABELS[status] || status,
     expiresAt: toIsoOrNull(hold.holdExpiresAt),
     extended: Boolean(hold.extendedAt),
     occupiedStart: toIsoOrNull(hold.occupiedStart),
     occupiedEnd: toIsoOrNull(hold.occupiedEnd),
-    // The booking a confirmed hold became (SPM-188 AC9).
+    // The booking a confirmed hold became (SPM-188 AC9), with the backend's
+    // booking status; null when unknown or never saved.
     convertedBookingId: hold.convertedBookingId ?? null,
+    convertedBooking: hold.convertedBooking ? {
+      bookingId: hold.convertedBooking.bookingId,
+      status: hold.convertedBooking.status,
+      statusLabel: VENUE_BOOKING_STATUS_LABELS[hold.convertedBooking.status] || hold.convertedBooking.status,
+    } : null,
+    bookingMissing: confirmAgain,
   };
 };
 
@@ -2701,15 +2736,29 @@ const toHoldRequest = (row, hold, now) => {
 };
 
 // The placed requests' holds by ID, or undefined when MongoDB cannot be read.
+// A converted hold also carries the booking that names it (convertedBooking:
+// the booking, null when none does, undefined when that could not be read).
 const readRequestHolds = async (rows) => {
   const ids = rows.filter((row) => row.calendar_hold_id).map((row) => row.calendar_hold_id);
   if (!ids.length) return new Map();
+  let holds;
   try {
-    return await venueCalendarModel.findEntriesByIds(ids);
+    holds = await venueCalendarModel.findEntriesByIds(ids);
   } catch (error) {
     console.warn("[venue-hold] MongoDB unavailable", { code: error?.code, name: error?.name });
     return undefined;
   }
+  const converted = [...holds.values()].filter((hold) => hold.status === "CONVERTED").map((hold) => hold.id);
+  if (converted.length) {
+    const { data, error } = await supabase.from("venue_booking").select("booking_id,status,calendar_hold_id").in("calendar_hold_id", converted);
+    if (error) {
+      console.warn("[venue-hold] converted bookings unavailable", { code: error.code });
+    } else {
+      const byHold = new Map((data || []).map((row) => [row.calendar_hold_id, { bookingId: row.booking_id, status: row.status }]));
+      for (const id of converted) holds.get(id).convertedBooking = byHold.get(id) ?? null;
+    }
+  }
+  return holds;
 };
 
 const holdFor = (holds, row) => (holds === undefined ? undefined : holds.get(row.calendar_hold_id) ?? null);

@@ -593,6 +593,8 @@ const BOOKING_REQUEST_ERRORS = Object.freeze({
   HOLD_ALREADY_CONVERTED: [409, "This hold has already been confirmed as a booking.", null],
   HOLD_WINDOW_CHANGED: [409, "A confirmed hold keeps its venue and times. Request a separate booking for a different time.", "start"],
   VENUE_CALENDAR_UNAVAILABLE: [503, "The hold could not be updated. Try again shortly.", null],
+  // A rollback whose MongoDB undo failed: nothing may be promised (Master 7.4).
+  VENUE_CALENDAR_OUTCOME_UNKNOWN: [503, "The hold's outcome could not be confirmed. Reload the event before trying again.", null],
 });
 
 const handleBookingRequestError = (error, res, next) => {

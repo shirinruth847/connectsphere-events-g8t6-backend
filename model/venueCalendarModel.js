@@ -313,6 +313,19 @@ const revertConvertedHold = async ({ holdId, venueId, version, writeToken }) => 
   );
 };
 
+// Repairs a conversion whose PostgreSQL COMMIT was lost (Master T35): the hold
+// says CONVERTED but no booking names it. Called under the event and venue
+// locks once PostgreSQL shows no linked booking; only the version read is
+// changed, so a concurrent change wins. Returns the ACTIVE hold, or null.
+const restoreOrphanConversion = async ({ holdId, venueId, expectedVersion, convertedBookingId }) => {
+  const document = await (await calendar()).findOneAndUpdate(
+    { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "CONVERTED", version: expectedVersion, convertedBookingId },
+    { $set: { status: "ACTIVE", convertedBookingId: null, updatedAt: new Date() }, $inc: { version: 1 } },
+    { returnDocument: "after" }
+  );
+  return document ? toEntry(document) : null;
+};
+
 // Post-commit acknowledgement only. A concurrent extension changes version
 // and expiry, so an old reminder/expiry acknowledgement cannot touch it.
 const acknowledgeHoldNotice = async ({ holdId, expectedVersion, expiresAt, kind }) => {
@@ -347,6 +360,7 @@ module.exports = {
   acknowledgeHoldNotice,
   convertHold,
   revertConvertedHold,
+  restoreOrphanConversion,
   clearBlockRecovery,
   ownsBlockWrite,
   deleteBlock,
