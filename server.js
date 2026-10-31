@@ -2,6 +2,7 @@ const app = require("./app");
 const { startEventCompletionJob } = require("./jobs/eventCompletionJob");
 const { startEventReminderJob } = require("./jobs/eventReminderJob");
 const { startMongoSyncJob } = require("./jobs/mongoSyncJob");
+const { startWaitlistOfferExpiryJob } = require("./jobs/waitlistOfferExpiryJob");
 const { startHoldExpiryJob } = require("./jobs/holdExpiryJob");
 
 const PORT = process.env.PORT || 8000;
@@ -16,6 +17,7 @@ if (require.main === module) {
   const stopEventCompletionJob = startEventCompletionJob();
   const stopEventReminderJob = startEventReminderJob();
   const stopMongoSyncJob = startMongoSyncJob();
+  const stopWaitlistOfferExpiryJob = startWaitlistOfferExpiryJob();
   const stopHoldExpiryJob = startHoldExpiryJob();
 
   // Stop scheduling new job runs, then let open requests finish before exiting.
@@ -23,6 +25,7 @@ if (require.main === module) {
     if (stopEventCompletionJob) stopEventCompletionJob();
     if (stopEventReminderJob) stopEventReminderJob();
     if (stopMongoSyncJob) stopMongoSyncJob();
+    if (stopWaitlistOfferExpiryJob) stopWaitlistOfferExpiryJob();
     if (stopHoldExpiryJob) stopHoldExpiryJob();
     server.close(() => process.exit(0));
   };

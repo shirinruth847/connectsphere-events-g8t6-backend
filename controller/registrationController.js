@@ -1,5 +1,6 @@
 const { findAttendeeRegistrations, registerForEvent } = require("../model/registrationModel");
 const { findRegisteredAttendeeEvent } = require("../model/eventModel");
+const { findWaitlistPositions } = require("../model/waitlistModel");
 const { EVENT_NOT_FOUND } = require("../middleware/authorize");
 const { parseEventId, readIdempotencyKey, IDEMPOTENCY_KEY_MESSAGE } = require("../middleware/validate");
 const { validateRegistration } = require("../validators/registrationValidator");
@@ -19,11 +20,32 @@ const REGISTRATION_CONFLICTS = Object.freeze({
   IDEMPOTENCY_IN_PROGRESS: "This request is still being processed. Try again shortly.",
 });
 
+// A waitlisted place shows its queue position and any open offer (SPM-163
+// AC3); every other place shows nulls. One lookup, made only when the attendee
+// has a waitlisted place.
+const NO_WAITLIST_PLACE = Object.freeze({ waitlistPosition: null, offer: null });
+
+const findWaitlistPlaces = async (attendeeId, statuses) => {
+  if (!statuses.includes("WAITLISTED")) return new Map();
+  const positions = await findWaitlistPositions(attendeeId);
+  return new Map(positions.map(({ eventId, waitlistPosition, offer }) => [eventId, { waitlistPosition, offer }]));
+};
+
 const listMyRegistrations = async (req, res) => {
   try {
     const { limit, offset } = req.pagination;
     const { registrations, nextOffset } = await findAttendeeRegistrations(req.user.user_id, req.pagination);
-    res.status(200).json({ registrations, page: { limit, offset, next_offset: nextOffset } });
+    const places = await findWaitlistPlaces(
+      req.user.user_id,
+      registrations.map((registration) => registration.registration_status)
+    );
+    res.status(200).json({
+      registrations: registrations.map((registration) => ({
+        ...registration,
+        ...(places.get(registration.event.event_id) || NO_WAITLIST_PLACE),
+      })),
+      page: { limit, offset, next_offset: nextOffset },
+    });
   } catch (error) {
     console.error("Error:", error);
     res.status(500).json({ error: "Internal Server Error", code: "INTERNAL_ERROR" });
@@ -39,7 +61,11 @@ const getMyRegisteredEvent = async (req, res) => {
     if (!found) {
       return res.status(404).json(EVENT_NOT_FOUND);
     }
-    return res.status(200).json(found);
+    const places = await findWaitlistPlaces(req.user.user_id, [found.myRegistration.status]);
+    return res.status(200).json({
+      ...found,
+      myRegistration: { ...found.myRegistration, ...(places.get(eventId) || NO_WAITLIST_PLACE) },
+    });
   } catch (error) {
     console.error("Error:", error);
     return res.status(500).json({ error: "Internal Server Error", code: "INTERNAL_ERROR" });
