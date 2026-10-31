@@ -344,7 +344,35 @@ const classifyBlockChange = (current, next) => {
   return nextStart >= start && nextEnd <= end ? BLOCK_CHANGE.SHORTEN : BLOCK_CHANGE.EXTEND;
 };
 
+// ---------- hold expiry (Master 5.4.3) ----------
+
+const HOUR_MS = 60 * MINUTE_MS;
+const HOLD_LIFETIME_MS = 7 * 24 * HOUR_MS;
+const HOLD_CUTOFF_MS = 24 * HOUR_MS;
+
+// The latest a hold may last: 24 hours before its occupied range starts.
+const holdCutoff = (occupiedStart) => new Date(toTime(occupiedStart) - HOLD_CUTOFF_MS);
+
+// A new hold's expiry: 7 days from now, or 24 hours before setup, whichever is
+// earlier. Null when setup starts within 24 hours: no hold is possible then.
+const holdExpiryFor = (occupiedStart, now = new Date()) => {
+  const cutoff = holdCutoff(occupiedStart);
+  if (cutoff.getTime() <= toTime(now)) return null;
+  return new Date(Math.min(toTime(now) + HOLD_LIFETIME_MS, cutoff.getTime()));
+};
+
+// One extension, by 1–7 days, still within the cutoff. Null when it would end
+// after the cutoff.
+const extendedHoldExpiry = (hold, days) => {
+  const proposed = new Date(toTime(hold.holdExpiresAt) + days * 24 * HOUR_MS);
+  return proposed.getTime() <= holdCutoff(hold.occupiedStart).getTime() ? proposed : null;
+};
+
 module.exports = {
+  holdCutoff,
+  holdExpiryFor,
+  extendedHoldExpiry,
+  HOLD_CUTOFF_MS,
   ENTRY_TYPES,
   AVAILABILITY,
   AVAILABILITY_LABELS,

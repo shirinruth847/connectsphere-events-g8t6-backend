@@ -1479,7 +1479,8 @@ const bookingWarnings = (item, range, venue, document) => {
   const hours = venueConflictModel.operatingHoursWarning(range, venue.operatingHours);
   if (hours) messages.push(hours.message);
   const layouts = document?.supportedLayouts || [];
-  if (layouts.length && !layouts.some((layout) => normalise(layout) === normalise(item.layout))) {
+  // A hold request has no layout (SPM-190), so there is nothing to compare.
+  if (item.layout && layouts.length && !layouts.some((layout) => normalise(layout) === normalise(item.layout))) {
     messages.push(`${venue.name} does not list the ${item.layout} layout.`);
   }
   item.requiredFacilities
@@ -2493,7 +2494,451 @@ const restoreVenueIncident = async ({ actorId, incidentId, idempotencyKey }) => 
   };
 };
 
+// ---------- tentative holds (SPM-190, Master 5.4.3, 7.4, T34) ----------
+
+const HOLD_ERRORS = new Set([
+  "INVALID_HOLD_REQUEST",
+  "INVALID_HOLD",
+  "IDEMPOTENCY_KEY_REQUIRED",
+  "IDEMPOTENCY_KEY_REUSED",
+  "EVENT_NOT_FOUND",
+  "FORBIDDEN",
+  "EVENT_NOT_IN_PLANNING",
+  "HOLD_OUTSIDE_EVENT",
+  "HOLD_TOO_LATE",
+  "VENUE_NOT_FOUND",
+  "VENUE_NOT_BOOKABLE",
+  "VENUE_CAPACITY_EXCEEDED",
+  "HOLD_REQUEST_EXISTS",
+  "HOLD_REQUEST_NOT_FOUND",
+  "HOLD_REQUEST_DECIDED",
+  "DECLINE_REASON_INVALID",
+  "HOLD_NOT_FOUND",
+]);
+
+// Backend labels (Master 3.5: the frontend never maps states itself).
+const HOLD_STATUS_LABELS = Object.freeze({
+  ACTIVE: "On hold (tentative)",
+  EXPIRED: "Hold expired",
+  RELEASED: "Hold released",
+  CONVERTED: "Converted to a booking request",
+});
+const HOLD_REQUEST_STATUS_LABELS = Object.freeze({
+  PENDING: "Hold requested",
+  PLACED: "On hold (tentative)",
+  DECLINED: "Hold declined",
+  WITHDRAWN: "Request withdrawn",
+});
+
+const HOLD_REQUEST_SELECT =
+  "hold_request_id,event_id,venue_id,label,start_datetime,end_datetime,expected_attendance,note,status,requested_at,decided_at,decline_reason,calendar_hold_id,"
+  + "venue:venue(name),event:event(title,status),requester:user!venue_hold_request_requested_by_fkey(name),decider:user!venue_hold_request_decided_by_fkey(name)";
+
+// A database refusal (rpc or venue lock connection) as a VenueError.
+const toHoldError = (error) => {
+  const lockFailure = toLockFailure(error);
+  if (lockFailure) return lockFailure;
+  const message = error?.message || "";
+  if ((error?.code === "P0001" || error?.code === "P0002") && HOLD_ERRORS.has(message)) {
+    const detail = parseErrorDetail(error.detail ?? error.details);
+    return venueError(message, { currentStatus: detail.status ?? null });
+  }
+  return error;
+};
+
+const callHoldRpc = async (name, args) => {
+  const { data, error } = await supabase.rpc(name, args);
+  if (error) throw toHoldError(error);
+  return data;
+};
+
+// A hold whose expiry has passed is expired whatever its stored status (Master 5.4.3).
+const holdStateAt = (hold, now) =>
+  (hold.status === "ACTIVE" && !venueConflictModel.isHoldActive(hold, now) ? "EXPIRED" : hold.status);
+
+const toHold = (hold, now) => {
+  const status = holdStateAt(hold, now);
+  return {
+    holdId: hold.id,
+    status,
+    statusLabel: HOLD_STATUS_LABELS[status] || status,
+    expiresAt: toIsoOrNull(hold.holdExpiresAt),
+    extended: Boolean(hold.extendedAt),
+    occupiedStart: toIsoOrNull(hold.occupiedStart),
+    occupiedEnd: toIsoOrNull(hold.occupiedEnd),
+  };
+};
+
+// One request with its hold, if placed. `hold` undefined means MongoDB could
+// not be read, so the hold's state is unknown rather than missing.
+const toHoldRequest = (row, hold, now) => {
+  const placed = row.status === "PLACED";
+  const holdView = placed && hold ? toHold(hold, now) : null;
+  return {
+    holdRequestId: row.hold_request_id,
+    eventId: row.event_id,
+    requestId: formatRequestId(row.event_id),
+    eventTitle: row.event?.title ?? null,
+    venueId: row.venue_id,
+    venueName: row.venue?.name ?? null,
+    label: row.label,
+    start: row.start_datetime,
+    end: row.end_datetime,
+    expectedAttendance: row.expected_attendance,
+    note: row.note,
+    status: row.status,
+    statusLabel: holdView ? holdView.statusLabel : HOLD_REQUEST_STATUS_LABELS[row.status] || row.status,
+    requestedAt: row.requested_at,
+    requestedByName: row.requester?.name ?? null,
+    decidedAt: row.decided_at,
+    decidedByName: row.decider?.name ?? null,
+    declineReason: row.decline_reason,
+    hold: holdView,
+    holdUnavailable: placed && hold === undefined,
+  };
+};
+
+// The placed requests' holds by ID, or undefined when MongoDB cannot be read.
+const readRequestHolds = async (rows) => {
+  const ids = rows.filter((row) => row.calendar_hold_id).map((row) => row.calendar_hold_id);
+  if (!ids.length) return new Map();
+  try {
+    return await venueCalendarModel.findEntriesByIds(ids);
+  } catch (error) {
+    console.warn("[venue-hold] MongoDB unavailable", { code: error?.code, name: error?.name });
+    return undefined;
+  }
+};
+
+const holdFor = (holds, row) => (holds === undefined ? undefined : holds.get(row.calendar_hold_id) ?? null);
+
+// POST /api/events/:id/venue-holds/requests (SPM-190 AC1).
+const requestVenueHold = async ({ actorId, eventId, values, idempotencyKey }) => {
+  const result = await callHoldRpc("request_venue_hold", {
+    p_actor_id: actorId,
+    p_event_id: eventId,
+    p_venue_id: values.venueId,
+    p_label: values.label,
+    p_start: values.start,
+    p_end: values.end,
+    p_expected_attendance: values.expectedAttendance,
+    p_note: values.note,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest(values, {}, [eventId]),
+  });
+  return findHoldRequest(result.holdRequestId);
+};
+
+const findHoldRequest = async (requestId) => {
+  const { data, error } = await supabase.from("venue_hold_request").select(HOLD_REQUEST_SELECT).eq("hold_request_id", requestId).maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return toHoldRequest(data, holdFor(await readRequestHolds([data]), data), new Date());
+};
+
+// GET /api/events/:id/venue-holds: the event's hold requests and holds, newest first.
+const listEventHolds = async (eventId) => {
+  const { data, error } = await supabase
+    .from("venue_hold_request")
+    .select(HOLD_REQUEST_SELECT)
+    .eq("event_id", eventId)
+    .order("requested_at", { ascending: false })
+    .order("hold_request_id", { ascending: false });
+  if (error) throw error;
+  const rows = data || [];
+  const holds = await readRequestHolds(rows);
+  const now = new Date();
+  return rows.map((row) => toHoldRequest(row, holdFor(holds, row), now));
+};
+
+// What placing a pending request would do now (AC1–AC3): its checks on its own
+// venue and window (as a booking's, SPM-186) and the expiry it would get.
+const holdPreview = (row, context, now) => {
+  const fit = assessBookingFit({
+    venueId: row.venue_id,
+    start: row.start_datetime,
+    end: row.end_datetime,
+    expectedAttendance: row.expected_attendance,
+    layout: "",
+    requiredFacilities: [],
+    accessibilityNeeds: [],
+  }, context, { now });
+  const expiresAt = fit.occupiedStart ? venueConflictModel.holdExpiryFor(fit.occupiedStart, now) : null;
+  const tooLate = Boolean(fit.occupiedStart) && !expiresAt;
+  const blocking = tooLate
+    ? [...fit.blocking, { code: "HOLD_TOO_LATE", message: "Setup starts within 24 hours, so no hold is possible. Ask the coordinator to submit a booking request instead." }]
+    : fit.blocking;
+  return { ...fit, blocking, expiresAt: toIsoOrNull(expiresAt), tooLate };
+};
+
+const MAX_HOLD_REQUESTS_LISTED = 200;
+
+// GET /api/venues/hold-requests (Venue Staff): pending requests first, each
+// with its preview; then placed, declined and withdrawn ones, newest first.
+const listHoldRequests = async ({ status = null } = {}) => {
+  let query = supabase.from("venue_hold_request").select(HOLD_REQUEST_SELECT);
+  if (status) query = query.eq("status", status);
+  const { data, error } = await query
+    .order("requested_at", { ascending: false })
+    .order("hold_request_id", { ascending: false })
+    .limit(MAX_HOLD_REQUESTS_LISTED);
+  if (error) throw error;
+  const rows = data || [];
+  const now = new Date();
+  const pending = rows.filter((row) => row.status === "PENDING");
+  const [holds, context] = await Promise.all([
+    readRequestHolds(rows),
+    loadFitContext(pending.map((row) => ({ venueId: row.venue_id, start: row.start_datetime, end: row.end_datetime }))),
+  ]);
+  const requests = rows.map((row) => ({
+    ...toHoldRequest(row, holdFor(holds, row), now),
+    preview: row.status === "PENDING" ? holdPreview(row, context, now) : null,
+  }));
+  requests.sort((left, right) => Number(right.status === "PENDING") - Number(left.status === "PENDING"));
+  return { requests, pendingCount: pending.length };
+};
+
+const withdrawVenueHoldRequest = async ({ actorId, requestId }) => {
+  await callHoldRpc("withdraw_venue_hold_request", { p_actor_id: actorId, p_request_id: requestId });
+  return findHoldRequest(requestId);
+};
+
+const declineVenueHoldRequest = async ({ actorId, requestId, reason }) => {
+  await callHoldRpc("decline_venue_hold_request", { p_actor_id: actorId, p_request_id: requestId, p_reason: reason });
+  return findHoldRequest(requestId);
+};
+
+// The hold's MongoDB ID comes from the actor and Idempotency-Key, so a retry
+// after a commit that failed past the MongoDB write finds the same document.
+const holdIdFor = (actorId, idempotencyKey) =>
+  crypto.createHash("sha256").update(`venue-hold:${actorId}:${idempotencyKey}`).digest("hex").slice(0, 24);
+
+// Acknowledgement can be lost after persistence: this attempt's token decides
+// whether the write landed (as for blocks, SPM-195).
+const writeCalendarHold = async (identity, write) => {
+  try {
+    return await write();
+  } catch (error) {
+    try {
+      if (await venueCalendarModel.ownsHoldWrite(identity)) {
+        const saved = await venueCalendarModel.findCalendarEntry(identity.holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS });
+        if (saved) return saved;
+      }
+    } catch {
+      // The registered, token-guarded undo still runs.
+    }
+    throw venueError("VENUE_CALENDAR_UNAVAILABLE");
+  }
+};
+
+// Recover only this actor/key's unchanged, still-active placement write. The
+// key-derived ID alone is not sufficient: verify its payload and prove that
+// no committed request owns it. Never overwrite, extend or undo an old write.
+const recoverHoldPlacement = async (client, { actorId, requestId, holdId, row, range, now }) => {
+  const saved = await calendarCall(() => venueCalendarModel.findHoldPlacementWrite(holdId));
+  if (!saved) return null;
+  const sameTime = (left, right) => new Date(left).getTime() === new Date(right).getTime();
+  if (saved.type !== "HOLD" || saved.eventId !== row.event_id || saved.venueId !== row.venue_id
+      || saved.createdBy !== actorId || saved.label !== row.label
+      || !sameTime(saved.start, row.start_datetime) || !sameTime(saved.end, row.end_datetime)
+      || !sameTime(saved.occupiedStart, range.start) || !sameTime(saved.occupiedEnd, range.end)) {
+    throw venueError("IDEMPOTENCY_KEY_REUSED");
+  }
+  if (saved.status !== "ACTIVE" || saved.version !== 1 || saved.extendedAt
+      || typeof saved.writeToken !== "string" || !saved.writeToken) {
+    throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  }
+  const recoverable = await selectResult(client,
+    "SELECT public.can_recover_venue_hold_placement($1,$2,$3) AS result", [actorId, requestId, holdId]);
+  if (!recoverable) throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  if (!venueConflictModel.isHoldActive(saved, now)) throw venueError("HOLD_EXPIRED");
+  if (new Date(saved.holdExpiresAt) > venueConflictModel.holdCutoff(range.start)) throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  return saved;
+};
+
+// POST /api/venues/hold-requests/:requestId/place (AC1–AC4, AC8, AC9). The
+// venue's set-once minutes give the occupied range and the expiry; under the
+// event and venue locks, active bookings (PostgreSQL) and unexpired holds and
+// active blocks (MongoDB) are refused, the request is recorded as placed, and
+// the HOLD document is written; the transaction commits only if it landed.
+const placeVenueHold = async ({ actorId, requestId, idempotencyKey }) => {
+  const { data: row, error } = await supabase
+    .from("venue_hold_request")
+    .select("hold_request_id,event_id,venue_id,label,start_datetime,end_datetime,status")
+    .eq("hold_request_id", requestId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!row) throw venueError("HOLD_REQUEST_NOT_FOUND");
+
+  const minutes = await calendarCall(() => readVenueMinutes(row.venue_id));
+  if (minutes.setup === null || minutes.turnaround === null) throw venueError("VENUE_BUFFERS_NOT_SET");
+  const range = venueConflictModel.occupiedRange(row.start_datetime, row.end_datetime, minutes.setup, minutes.turnaround);
+  const requestHash = hashRequest({ requestId }, {}, [requestId]);
+  const holdId = holdIdFor(actorId, idempotencyKey);
+
+  try {
+    const recorded = await withVenueLockTransaction(async (client, transaction) => {
+      const started = await selectResult(client,
+        "SELECT public.begin_venue_hold_placement($1, $2, $3, $4, $5, $6) AS result",
+        [actorId, requestId, range.start.toISOString(), range.end.toISOString(), idempotencyKey, requestHash]
+      );
+      if (started.replay) return started.replay;
+      if ((started.bookingConflicts || []).length) throw venueError("VENUE_BOOKING_CONFLICT");
+
+      const now = new Date(started.serverNow);
+      const recovered = await recoverHoldPlacement(client, { actorId, requestId, holdId, row, range, now });
+      const expiresAt = recovered ? new Date(recovered.holdExpiresAt) : venueConflictModel.holdExpiryFor(range.start, now);
+      if (!expiresAt) throw venueError("HOLD_TOO_LATE");
+      const entries = await calendarCall(() => venueCalendarModel.findCalendarEntries(
+        [row.venue_id], range.start, range.end, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }
+      ));
+      // Exclude only the write whose identity and uncommitted ownership were
+      // verified above. Other holds, including the event's own, still block.
+      const conflicts = findCalendarConflicts(entries.filter(entry => !recovered || entry.id !== holdId), { venueId: row.venue_id, range, now });
+      if (conflicts.some((entry) => entry.type === venueConflictModel.ENTRY_TYPES.BLOCK)) throw venueError("VENUE_BLOCKED");
+      if (conflicts.length) throw venueError("VENUE_HELD");
+
+      const result = await selectResult(client,
+        "SELECT public.record_venue_hold_placement($1, $2, $3::jsonb, $4, $5) AS result",
+        [actorId, requestId, JSON.stringify({
+          holdId, occupiedStart: range.start.toISOString(), occupiedEnd: range.end.toISOString(), expiresAt: expiresAt.toISOString(),
+        }), idempotencyKey, requestHash]
+      );
+
+      // The original MongoDB write already exists. If this transaction fails,
+      // leave it recoverable for the next retry; its original expiry is kept.
+      if (recovered) return result;
+
+      const writeToken = crypto.randomUUID();
+      // Registered before the write: a network error can follow persistence.
+      transaction.onRollback(() => venueCalendarModel.deleteHold({ holdId, venueId: row.venue_id, writeToken }));
+      const written = await writeCalendarHold({ holdId, venueId: row.venue_id, writeToken }, () => venueCalendarModel.insertHold({
+        holdId,
+        venueId: row.venue_id,
+        eventId: row.event_id,
+        label: row.label,
+        start: row.start_datetime,
+        end: row.end_datetime,
+        occupiedStart: range.start,
+        occupiedEnd: range.end,
+        holdExpiresAt: expiresAt,
+        createdBy: actorId,
+        writeToken,
+      }));
+      if (written.existing && (written.eventId !== row.event_id || written.venueId !== row.venue_id)) throw venueError("IDEMPOTENCY_KEY_REUSED");
+      return result;
+    });
+    return findHoldRequest(recorded.holdRequestId ?? requestId);
+  } catch (caught) {
+    throw toHoldError(caught);
+  }
+};
+
+// POST /api/venues/holds/:holdId/extend and /release (AC6). Under the event and
+// venue locks the hold is re-read: it must still be active and unexpired; an
+// extension is allowed once, by 1–7 days, ending at least 24 hours before setup.
+const changeVenueHold = async ({ actorId, holdId, action, days = null }) => {
+  const hold = await calendarCall(() => venueCalendarModel.findCalendarEntry(holdId));
+  if (!hold || hold.type !== venueConflictModel.ENTRY_TYPES.HOLD || !hold.eventId) throw venueError("HOLD_NOT_FOUND");
+
+  try {
+    await withVenueLockTransaction(async (client, transaction) => {
+      const started = await selectResult(client,
+        "SELECT public.begin_venue_hold_change($1, $2, $3, $4) AS result",
+        [actorId, hold.eventId, hold.venueId, action]
+      );
+      const current = await calendarCall(() => venueCalendarModel.findCalendarEntry(holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
+      const now = new Date(started.serverNow);
+      if (!current || current.status !== "ACTIVE") throw venueError("HOLD_NOT_ACTIVE", { currentStatus: current?.status ?? null });
+      if (!venueConflictModel.isHoldActive(current, now)) throw venueError("HOLD_EXPIRED");
+
+      let expiresAfter = null;
+      if (action === "EXTEND") {
+        if (current.extendedAt) throw venueError("HOLD_ALREADY_EXTENDED");
+        expiresAfter = venueConflictModel.extendedHoldExpiry(current, days);
+        if (!expiresAfter) throw venueError("HOLD_EXTENSION_TOO_LONG");
+      }
+      await selectResult(client,
+        "SELECT public.record_venue_hold_change($1, $2, $3, $4, $5, $6, $7) AS result",
+        [actorId, current.eventId, current.venueId, holdId, action, toIsoOrNull(current.holdExpiresAt), toIsoOrNull(expiresAfter)]
+      );
+
+      const writeToken = crypto.randomUUID();
+      transaction.onRollback(() => venueCalendarModel.revertHold({
+        holdId, venueId: current.venueId, version: current.version + 1,
+        holdExpiresAt: current.holdExpiresAt, extendedAt: current.extendedAt, writeToken,
+      }));
+      const updated = await writeCalendarHold({ holdId, venueId: current.venueId, writeToken }, () => venueCalendarModel.changeHold({
+        holdId, venueId: current.venueId, expectedVersion: current.version,
+        holdExpiresAt: expiresAfter, release: action === "RELEASE", writeToken,
+      }));
+      if (!updated) throw venueError("HOLD_NOT_ACTIVE");
+    });
+  } catch (caught) {
+    throw toHoldError(caught);
+  }
+  const { data, error } = await supabase.from("venue_hold_request").select(HOLD_REQUEST_SELECT).eq("calendar_hold_id", holdId).maybeSingle();
+  if (error) throw error;
+  return data ? toHoldRequest(data, holdFor(await readRequestHolds([data]), data), new Date()) : null;
+};
+
+const extendVenueHold = ({ actorId, holdId, days }) => changeVenueHold({ actorId, holdId, action: "EXTEND", days });
+const releaseVenueHold = ({ actorId, holdId }) => changeVenueHold({ actorId, holdId, action: "RELEASE" });
+
+// Each bounded scan advances past reminders already recorded for this expiry.
+// PostgreSQL supplies time and a durable claim. Extension, release and expiry
+// share event -> venue locks; the hold is re-read from the primary under them.
+// MongoDB acknowledgement follows COMMIT and is guarded by version + expiry.
+// If it fails (or the process stops), a retry sees the durable claim, sends no
+// duplicate notice, and repairs the marker. No marker can hide rolled-back work.
+const processDueHolds = async ({ limit = 100 } = {}) => {
+  const now = new Date(await callHoldRpc("venue_hold_clock", {}));
+  const due = await venueCalendarModel.findHoldsExpiringBy(new Date(now.getTime() + venueConflictModel.HOLD_CUTOFF_MS), { limit, now });
+  let reminded = 0;
+  let expired = 0;
+  for (const candidate of due) {
+    if (!candidate.eventId) continue;
+    const work = await withVenueLockTransaction(async (client) => {
+      const locked = await selectResult(client,
+        "SELECT public.begin_venue_hold_expiry($1, $2) AS result", [candidate.eventId, candidate.venueId]);
+      if (!locked) return null;
+      const current = await calendarCall(() => venueCalendarModel.findCalendarEntry(candidate.id, {
+        readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS,
+      }));
+      if (!current || current.type !== "HOLD" || current.status !== "ACTIVE"
+          || current.eventId !== candidate.eventId || current.venueId !== candidate.venueId) return null;
+      const dbNow = new Date(locked.serverNow);
+      const expiry = new Date(current.holdExpiresAt);
+      if (expiry.getTime() > dbNow.getTime() + venueConflictModel.HOLD_CUTOFF_MS) return null;
+      const kind = expiry <= dbNow ? "EXPIRED" : "EXPIRING";
+      const claimed = await selectResult(client,
+        "SELECT public.record_venue_hold_expiry($1,$2,$3,$4,$5) AS result",
+        [kind, current.eventId, current.id, current.venueId, expiry.toISOString()]);
+      return { current, kind, claimed };
+    });
+    if (!work) continue;
+    await venueCalendarModel.acknowledgeHoldNotice({
+      holdId: work.current.id, expectedVersion: work.current.version,
+      expiresAt: work.current.holdExpiresAt, kind: work.kind,
+    });
+    if (work.claimed) {
+      if (work.kind === "EXPIRED") expired += 1;
+      else reminded += 1;
+    }
+  }
+  return { checked: due.length, reminded, expired };
+};
+
 module.exports = {
+  requestVenueHold,
+  listEventHolds,
+  listHoldRequests,
+  withdrawVenueHoldRequest,
+  declineVenueHoldRequest,
+  placeVenueHold,
+  extendVenueHold,
+  releaseVenueHold,
+  processDueHolds,
   createVenueBlock,
   changeVenueBlock,
   restoreVenueIncident,
