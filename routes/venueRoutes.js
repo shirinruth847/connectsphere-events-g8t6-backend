@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { requireAuth } = require("../middleware/auth");
 const { requireRole } = require("../middleware/authorize");
-const { validatePagination } = require("../middleware/validate");
+const { validatePagination, validateCursorPagination } = require("../middleware/validate");
 const { USER_ROLES } = require("../config/roles");
 const {
   getVenueCatalogue,
@@ -19,6 +19,17 @@ const {
   listVenueBookings,
   getVenueBooking,
   getEventVenueBookings,
+  getEventBookingHistory,
+  getVenueHistory,
+  getBookingAvailability,
+  listHoldRequests,
+  placeVenueHold,
+  declineHoldRequest,
+  withdrawHoldRequest,
+  extendVenueHold,
+  releaseVenueHold,
+  approveVenueBooking,
+  rejectVenueBooking,
   listVenuePhotos,
   getVenuePhotoImage,
   addVenuePhoto,
@@ -55,7 +66,24 @@ router.get("/availability", requireAuth, requireRole("COORDINATOR", "VENUE_STAFF
 // Venue booking review (SPM-181); declared before /:venueId.
 router.get("/bookings", ...venueStaffOnly, listVenueBookings);
 router.get("/bookings/events/:eventId", ...venueStaffOnly, getEventVenueBookings);
+// The venue-relevant part of the event's history (SPM-186).
+router.get("/bookings/events/:eventId/history", ...venueStaffOnly, validateCursorPagination, getEventBookingHistory);
 router.get("/bookings/:bookingId", ...venueStaffOnly, getVenueBooking);
+// Tentative holds (SPM-190); declared before /:venueId.
+router.get("/hold-requests", ...venueStaffOnly, listHoldRequests);
+router.post("/hold-requests/:requestId/place", ...venueStaffOnly, placeVenueHold);
+router.post("/hold-requests/:requestId/decline", ...venueStaffOnly, declineHoldRequest);
+// The coordinator withdraws their own request; the database checks the relationship.
+router.post("/hold-requests/:requestId/withdraw", requireAuth, requireRole(USER_ROLES.COORDINATOR), withdrawHoldRequest);
+router.post("/holds/:holdId/extend", ...venueStaffOnly, extendVenueHold);
+// Venue Staff, or the event's assigned coordinator (checked by the database).
+router.post("/holds/:holdId/release", requireAuth, requireRole(USER_ROLES.VENUE_STAFF, USER_ROLES.COORDINATOR), releaseVenueHold);
+
+// The booking's venue calendar with its own window as the checked period (SPM-186).
+router.get("/bookings/:bookingId/availability", ...venueStaffOnly, getBookingAvailability);
+// One booking per decision; there is no bulk decision (SPM-186 AC6).
+router.post("/bookings/:bookingId/approve", ...venueStaffOnly, approveVenueBooking);
+router.post("/bookings/:bookingId/reject", ...venueStaffOnly, rejectVenueBooking);
 
 // Restoring a booking after a block (SPM-195); declared before /:venueId.
 router.post("/incidents/:incidentId/restore", ...venueStaffOnly, restoreVenueIncident);
@@ -70,6 +98,8 @@ router.put("/:venueId", ...venueStaffOnly, updateVenue);
 router.put("/:venueId/status", ...venueStaffOnly, changeVenueStatus);
 // MongoDB details, including setup/turnaround minutes (Master 6.4, T27).
 router.put("/:venueId/details", ...venueStaffOnly, updateVenueDetails);
+// The venue's own change history (SPM-186).
+router.get("/:venueId/history", ...venueStaffOnly, validateCursorPagination, getVenueHistory);
 
 // Operational blocks in the MongoDB venue calendar (SPM-195, Master 5.4.4).
 router.get("/:venueId/blocks", ...venueStaffOnly, listVenueBlocks);

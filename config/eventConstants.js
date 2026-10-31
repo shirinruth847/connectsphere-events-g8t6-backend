@@ -58,9 +58,10 @@ const STATUS_NOTES = Object.freeze({
   RECONFIRMATION_PENDING: "Reconfirmation pending",
 });
 
-// Coordinator lifecycle actions owned by SPM-173 (Master section 5.2, T07 and
-// T10-T12), each with the database function that runs it under the event lock.
+// Coordinator lifecycle actions (Master section 5.2), each using one database
+// function under the event lock. SPM-39 adds feasibility acceptance to SPM-173.
 const LIFECYCLE_ACTIONS = Object.freeze({
+  ACCEPT_FEASIBILITY: Object.freeze({ rpc: "accept_event_feasibility", message: "Event request approved for planning." }),
   SUBMIT_FOR_SAFETY_REVIEW: Object.freeze({ rpc: "submit_event_for_safety_review", message: "Event submitted for safety review." }),
   CONFIRM: Object.freeze({ rpc: "confirm_event", message: "Event confirmed." }),
   START_PREPARATION: Object.freeze({ rpc: "start_event_preparation", message: "Event preparation started." }),
@@ -194,6 +195,18 @@ const SAFETY_REVIEW_HISTORY_FIELDS = Object.freeze([
   "equipmentRequirements",
 ]);
 
+// The event history Venue Staff read (SPM-186, Master 4.2 "relevant portion"):
+// venue entries (VENUE_*) and changes to what a venue booking depends on.
+const VENUE_STAFF_HISTORY_FIELDS = Object.freeze([
+  "startDatetime",
+  "endDatetime",
+  "expectedAttendance",
+  "preferredLayoutType",
+  "accessibilityNeeds",
+  "venuePreferences",
+  "venueBookings",
+]);
+
 // Values of the event_type check constraint (SPM-181) and their display labels.
 const EVENT_TYPE_LABELS = Object.freeze({
   CONFERENCE: "Conference",
@@ -231,6 +244,7 @@ module.exports = {
   MIN_LEAD_TIME_HOURS,
   EVENT_RELATIONSHIP,
   HISTORY_AUDIENCE,
+  VENUE_STAFF_HISTORY_FIELDS,
   EVENT_FIELD_GROUPS,
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,

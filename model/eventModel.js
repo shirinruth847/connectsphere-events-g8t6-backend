@@ -310,35 +310,12 @@ const toUnassignedQueueItem = (row) => ({
   equipmentRequirements: toEquipmentRequirements(row.event_equipment_requirement),
 });
 
-const computeRegistrationAvailability = ({
-  status,
-  is_registration_enabled,
-  registration_capacity,
-  registration_open_at,
-  registration_close_at,
-  registeredCount = 0,
-  now = new Date(),
-}) => {
-  if (!is_registration_enabled) return "NOT_ENABLED";
-  if (!["CONFIRMED", "PREPARATION"].includes(status)) return "CLOSED";
-
-  const currentTime = now instanceof Date ? now.getTime() : new Date(now).getTime();
-  const openAt = registration_open_at ? new Date(registration_open_at).getTime() : null;
-  const closeAt = registration_close_at ? new Date(registration_close_at).getTime() : null;
-
-  // The window is half-open, [open, close): it closes at registration_close_at itself.
-  if (openAt !== null && currentTime < openAt) return "CLOSED";
-  if (closeAt !== null && currentTime >= closeAt) return "CLOSED";
-
-  if (registration_capacity == null) return "OPEN";
-  if (registeredCount >= registration_capacity) return "FULL_WAITLIST";
-  return "OPEN";
-};
-
-// registration(count) is narrowed to REGISTERED seats by REGISTERED_SEATS_FILTER, so the
-// list and the detail read capacity from the same embedded count.
+// event_registration_availability is a computed field: the database function
+// register_for_event also applies (SPM-134, Master 5.6), so discovery shows the
+// state registration enforces, from the registration start and end times and
+// the primary venue's capacity, by database time.
 const LIST_ATTENDEE_DISCOVERY_SELECT =
-  "event_id,title,description,start_datetime,end_datetime,is_registration_enabled,registration_capacity,registration_open_at,registration_close_at,status,organisation(organisation_id,name),registration(count),venue_booking(status,room(venue(venue_id,name,address)))";
+  "event_id,title,description,start_datetime,end_datetime,registration_open_at,registration_close_at,status,event_registration_availability,organisation(organisation_id,name),venue_booking(status,room(venue(venue_id,name,address)))";
 const REGISTERED_SEATS_FILTER = ["registration.registration_status", "REGISTERED"];
 
 // Attendees discover only confirmed events (SPM-44, Master 5.3). PREPARATION is
@@ -360,14 +337,6 @@ const attendeeLocation = (bookings = []) => {
 
 const toAttendeeDiscoveryItem = (row) => {
   const location = attendeeLocation(row.venue_booking);
-  const availability = computeRegistrationAvailability({
-    status: row.status,
-    is_registration_enabled: row.is_registration_enabled,
-    registration_capacity: row.registration_capacity,
-    registration_open_at: row.registration_open_at,
-    registration_close_at: row.registration_close_at,
-    registeredCount: row.registration?.[0]?.count ?? 0,
-  });
 
   return {
     eventId: row.event_id,
@@ -377,7 +346,7 @@ const toAttendeeDiscoveryItem = (row) => {
     endDatetime: row.end_datetime,
     organisationName: row.organisation ? row.organisation.name : null,
     location,
-    registrationAvailability: availability,
+    registrationAvailability: row.event_registration_availability,
   };
 };
 
@@ -402,6 +371,7 @@ const eventRequestError = (code, fields) => {
 };
 
 const DOMAIN_CODES = new Set([
+  "INVALID_REJECTION_REASON",
   "FORBIDDEN",
   "EVENT_NOT_FOUND",
   "EVENT_NOT_DRAFT",
@@ -417,6 +387,7 @@ const DOMAIN_CODES = new Set([
   "FORBIDDEN",
   "TRANSITION_NOT_ALLOWED",
   "READINESS_BLOCKED",
+  "FEASIBILITY_REQUIREMENTS_MISSING",
   "SAFETY_APPROVAL_REQUIRED",
   "EVENT_NOT_ENDED",
   "COORDINATOR_INVARIANT",
@@ -431,6 +402,9 @@ const withLifecycleDetail = (domainError, details) => {
   const detail = String(details || "");
   if (["TRANSITION_NOT_ALLOWED", "EVENT_VERSION_CONFLICT"].includes(domainError.code) && detail) {
     domainError.currentStatus = detail;
+  }
+  if (domainError.code === "FEASIBILITY_REQUIREMENTS_MISSING") {
+    domainError.missingFields = detail.split(",").filter(Boolean);
   }
   if (domainError.code === "READINESS_BLOCKED") {
     domainError.failures = detail.split(",").filter(Boolean);
@@ -842,6 +816,18 @@ const runLifecycleAction = async ({ action, eventId, actorId, expectedVersion, i
   return { event: data.event, replayed: data.replayed === true };
 };
 
+// SPM-40: all rejection effects and replay data commit in one RPC.
+const rejectSubmittedEvent = async ({ eventId, actorId, expectedVersion, reason, idempotencyKey }) => {
+  const { data, error } = await supabase.rpc("reject_submitted_event", {
+    p_event_id: eventId, p_actor_id: actorId, p_expected_version: expectedVersion,
+    p_reason: reason, p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest({ reason }, {}, [eventId, expectedVersion]),
+  });
+  if (error) throw toEventRequestError(error);
+  if (!data?.event) throw new Error("reject_submitted_event returned no event.");
+  return { event: data.event, replayed: data.replayed === true };
+};
+
 // SPM-173 AC8: readiness for the assigned coordinator, with each failing condition.
 const getEventReadiness = async ({ eventId, actorId }) => {
   const { data, error } = await supabase.rpc("get_event_readiness", { p_event_id: eventId, p_actor_id: actorId });
@@ -1100,7 +1086,6 @@ const attendeeDiscoveryQuery = () =>
   supabase
     .from("event")
     .select(LIST_ATTENDEE_DISCOVERY_SELECT)
-    .eq(...REGISTERED_SEATS_FILTER)
     .eq("is_published", true)
     .eq("status", ATTENDEE_DISCOVERY_STATUS)
     .gt("end_datetime", new Date().toISOString());
@@ -1240,7 +1225,6 @@ const findRegisteredAttendeeEvent = async (eventId, attendeeId) => {
   const { data, error } = await supabase
     .from("event")
     .select(`${LIST_ATTENDEE_DISCOVERY_SELECT},is_published`)
-    .eq(...REGISTERED_SEATS_FILTER)
     .eq("event_id", eventId)
     .maybeSingle();
   if (error) throw dbError(error);
@@ -1351,6 +1335,7 @@ module.exports = {
   assignCoordinator,
   reassignCoordinator,
   runLifecycleAction,
+  rejectSubmittedEvent,
   getEventReadiness,
   requestClarification,
   postClarificationMessage,
@@ -1365,7 +1350,6 @@ module.exports = {
   findPublishedAttendeeEvents,
   findPublishedAttendeeEvent,
   findRegisteredAttendeeEvent,
-  computeRegistrationAvailability,
   encodeCursor,
   decodeCursor,
   encodeDiscoveryCursor,

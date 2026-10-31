@@ -5,7 +5,7 @@ jest.mock("../../model/venueDetailModel", () => ({ getVenueDetailsByIds: jest.fn
 const supabase = require("../../config/supabase");
 const calendar = require("../../model/venueCalendarModel");
 const details = require("../../model/venueDetailModel");
-const { findOrganiserArrangements } = require("../../model/organiserArrangementModel");
+const { findOrganiserArrangements, findTechnicalArrangements } = require("../../model/organiserArrangementModel");
 
 const now = new Date("2030-01-01T00:00:00Z");
 const event = { event_id: 42, status: "PLANNING", arrangement_version: 3 };
@@ -25,13 +25,13 @@ beforeEach(() => {
   tables = { event: { ...event }, venue_booking: [], venue: [1, 2].map((id) => ({
     venue_id: id, name: id === 1 ? "Main Hall" : "Breakout Hall", status: "ACTIVE", is_active: true,
   })),
-    resource_incidents: [], technical_requests: [], equipment_request: [], event_equipment_requirement: [], safety_reviews: [] };
+    resource_incidents: [], technical_requests: [], technical_request: [], equipment_request: [], event_equipment_requirement: [], safety_reviews: [] };
   failures = {};
   calls = [];
   supabase.from.mockImplementation((table) => {
     const call = { table, filters: [] }; calls.push(call);
     const query = { then: (resolve, reject) => Promise.resolve({ data: tables[table], error: failures[table] }).then(resolve, reject) };
-    for (const method of ["select", "eq", "in", "order", "maybeSingle"]) query[method] = (...args) => { call.filters.push([method, ...args]); return query; };
+    for (const method of ["select", "eq", "in", "is", "order", "maybeSingle"]) query[method] = (...args) => { call.filters.push([method, ...args]); return query; };
     return query;
   });
   calendar.findEventHolds.mockResolvedValue([]);
@@ -194,8 +194,39 @@ test("AC6: existing equipment requests remain readable when canonical technical 
     status: "APPROVED", equipment: { name: "Projector" }, technical_notes: "PRIVATE notes" }];
   const { technical } = await findOrganiserArrangements(event, () => now);
   expect(technical.supportStatus).toBe("UNAVAILABLE");
-  expect(technical.requests[0]).toMatchObject({ status: "APPROVED", supportRequired: null });
+  expect(technical.requests[0]).toMatchObject({ requestId: null, status: "APPROVED", supportRequired: null });
   expect(JSON.stringify(technical)).not.toContain("PRIVATE");
+});
+
+test("[SPM-286-AC4][SPM-287] one row per technical request header with its lines, not one per line", async () => {
+  failures.technical_requests = { code: "PGRST205" };
+  tables.technical_request = [
+    { technical_request_id: 12, status: "PENDING", created_at: "2030-01-02T00:00:00Z", decided_at: null, equipment_request: [
+      { equipment_id: 2, quantity_requested: 1, equipment: { name: "Speaker" } },
+      { equipment_id: 1, quantity_requested: 3, equipment: { name: "Microphone" } },
+    ] },
+    { technical_request_id: 11, status: "REJECTED", created_at: "2030-01-01T00:00:00Z", decided_at: "2030-01-01T05:00:00Z", equipment_request: [
+      { equipment_id: 1, quantity_requested: 2, equipment: { name: "Microphone" } },
+    ] },
+  ];
+  const { technical } = await findOrganiserArrangements(event, () => now);
+  expect(technical.requests).toEqual([
+    { requestId: 12, status: "PENDING", supportRequired: null, createdAt: "2030-01-02T00:00:00Z", decidedAt: null,
+      equipment: [{ equipmentId: 1, name: "Microphone", quantity: 3 }, { equipmentId: 2, name: "Speaker", quantity: 1 }] },
+    { requestId: 11, status: "REJECTED", supportRequired: null, createdAt: "2030-01-01T00:00:00Z", decidedAt: "2030-01-01T05:00:00Z",
+      equipment: [{ equipmentId: 1, name: "Microphone", quantity: 2 }] },
+  ]);
+  const looseQuery = calls.find((call) => call.table === "equipment_request");
+  expect(looseQuery.filters).toContainEqual(["is", "technical_request_id", null]);
+});
+
+test("[SPM-286-AC5] the coordinator projection carries the technical section only", async () => {
+  failures.technical_requests = { code: "PGRST205" };
+  tables.technical_request = [{ technical_request_id: 6, status: "APPROVED", created_at: "2030-01-01T00:00:00Z", decided_at: null, equipment_request: [] }];
+  const result = await findTechnicalArrangements(event);
+  expect(Object.keys(result)).toEqual(["technical"]);
+  expect(result.technical.requests.map((request) => request.requestId)).toEqual([6]);
+  expect(calls.some((call) => ["venue_booking", "safety_reviews"].includes(call.table))).toBe(false);
 });
 
 test.each(["PENDING", "APPROVED", "REJECTED", "NOT_REQUIRED", "CANCELLED", "SUPERSEDED"])("AC6: preserves technical outcome %s", async (status) => {

@@ -8,6 +8,7 @@ const venuePhotoModel = require("./venuePhotoModel");
 const activityModel = require("./activityModel");
 const { VENUE_STATUS } = require("../config/venueConstants");
 const { MESSAGES } = require("../validators/venueValidator");
+const { DECISION_MESSAGES } = require("../validators/venueBookingValidator");
 const { formatRequestId, parseAccessibility, hashRequest } = require("./eventModel");
 const { EVENT_STATUS, EVENT_TYPE_LABELS, VENUE_BOOKING_STATUS_LABELS } = require("../config/eventConstants");
 
@@ -140,30 +141,66 @@ const getVenueCatalogue = async (filters = {}) => {
 
 const venueError = (code, extra = {}) => Object.assign(new Error(code), { name: "VenueError", code, ...extra });
 
+// Events with bookings still ahead at a venue being taken out of service
+// (Master 5.4.4): what Venue Staff confirm, never participant data.
+const toAffectedEvents = (items) =>
+  (Array.isArray(items) ? items : []).map((item) => ({
+    eventId: item.eventId,
+    requestId: item.requestId,
+    title: item.title,
+    status: item.status,
+    firstStart: item.firstStart,
+    bookings: item.bookings,
+  }));
+
 // Database failures that are the client's fault become VenueErrors; anything
 // else is rethrown and answered with a safe 500.
-const RPC_ERRORS = new Set(["FORBIDDEN", "VENUE_NOT_FOUND", "VENUE_VERSION_CONFLICT", "VENUE_NAME_TAKEN"]);
+const RPC_ERRORS = new Set([
+  "FORBIDDEN",
+  "VENUE_NOT_FOUND",
+  "VENUE_VERSION_CONFLICT",
+  "VENUE_NAME_TAKEN",
+  "BOOKING_NOT_FOUND",
+  "EVENT_NOT_IN_PLANNING",
+  "EVENT_NOT_ACTIVE",
+  "VENUE_NOT_AVAILABLE",
+  "VENUE_CAPACITY_EXCEEDED",
+  "VENUE_BUFFERS_NOT_SET",
+  "VENUE_BOOKING_CONFLICT",
+  "BOOKING_ALREADY_STARTED",
+]);
 const CONSTRAINT_FIELDS = Object.freeze({
   venue_max_capacity_positive_check: { maxCapacity: MESSAGES.capacityInvalid },
   venue_maintenance_reason_check: { reason: MESSAGES.reasonRequired },
 });
+
+const readErrorDetails = (error) => {
+  try {
+    return JSON.parse(error.details || "{}");
+  } catch {
+    // Keep the error even if the detail cannot be read.
+    return {};
+  }
+};
 
 const toVenueError = (error) => {
   const message = error.message || "";
   const code = error.code || "";
   if (RPC_ERRORS.has(message)) return venueError(message);
   if (message === "VENUE_HAS_UPCOMING_BOOKINGS") {
-    let details = {};
-    try {
-      details = JSON.parse(error.details || "{}");
-    } catch {
-      // Keep the warning even if the detail cannot be read.
-    }
+    const details = readErrorDetails(error);
     return venueError("VENUE_HAS_UPCOMING_BOOKINGS", {
       upcomingBookings: details.upcomingBookings ?? null,
       firstStart: details.firstStart ?? null,
+      affectedEvents: toAffectedEvents(details.affectedEvents),
     });
   }
+  if (message === "BOOKING_ALREADY_DECIDED") {
+    return venueError("BOOKING_ALREADY_DECIDED", { currentStatus: readErrorDetails(error).status ?? null });
+  }
+  if (message === "REJECTION_REASON_INVALID") return venueError("VALIDATION_FAILED", { fields: { reason: DECISION_MESSAGES.reasonRequired } });
+  // The exclusion constraint lost a race for the same venue time (SPM-185 AC7).
+  if (code === "23P01") return venueError("VENUE_BOOKING_CONFLICT");
   const constraint = /constraint "([^"]+)"/.exec(message);
   if (constraint && CONSTRAINT_FIELDS[constraint[1]]) return venueError("VALIDATION_FAILED", { fields: CONSTRAINT_FIELDS[constraint[1]] });
   if (code.startsWith("22")) return venueError("VALIDATION_FAILED", { fields: {} });
@@ -247,7 +284,8 @@ const compareMinutes = (field, ascending, details) => (a, b) => {
 // filtered by name, location (address) and status, case-insensitively.
 const listManagedVenues = async ({ search, location, status, sort = "name", order = "asc" }, { limit, offset }) => {
   let query = supabase.from("venue").select(MANAGED_VENUE_SELECT).eq("is_active", true);
-  if (search) query = query.ilike("name", `%${escapeLike(search)}%`);
+  // One box searches name and location (SPM-186); "location" still narrows by address.
+  if (search) query = query.or(orIlike(["name", "address"], search));
   if (location) query = query.ilike("address", `%${escapeLike(location)}%`);
   if (status) query = query.eq("status", status);
   const ascending = order !== "desc";
@@ -318,14 +356,24 @@ const getManagedVenue = async (venueId) => {
   return toManagedVenue(row, await findUserNames([row]));
 };
 
+// A serialization failure (40001) re-runs the whole operation, every check
+// included (Master 7); anything else is answered at once.
+const SERIALIZATION_RETRIES = 3;
+
 const callVenueRpc = async (name, args) => {
-  const { data, error } = await supabase.rpc(name, args);
+  let result;
+  for (let attempt = 1; ; attempt += 1) {
+    result = await supabase.rpc(name, args);
+    if (!result.error || result.error.code !== "40001" || attempt >= SERIALIZATION_RETRIES) break;
+  }
+  const { data, error } = result;
   if (error) throw toVenueError(error);
   if (!data || !data.venue) throw new Error(`${name} returned no venue.`);
   return {
     venue: toManagedVenue(data.venue, await findUserNames([data.venue])),
     changed: data.changed === true,
     upcomingBookings: data.upcoming_bookings ?? 0,
+    affectedEvents: toAffectedEvents(data.affected_events),
   };
 };
 
@@ -483,6 +531,12 @@ const auditPhoto = async (actorId, venueId, action, details, changes) => {
   }
 };
 
+// A deleted venue's history is "not found", like the venue itself (SPM-186).
+const findVenueHistory = async (venueId, pagination) => {
+  await requireVenueRow(venueId);
+  return activityModel.findVenueHistory(venueId, pagination);
+};
+
 const listVenuePhotos = async (venueId) => {
   await requireVenueRow(venueId);
   return { photos: await callPhotos(() => venuePhotoModel.listPhotos(venueId)) };
@@ -535,7 +589,7 @@ const deleteVenuePhoto = async (actorId, venueId, photoId) => {
 
 // ---------- availability calendar (SPM-74, Master 5.4.5) ----------
 
-const AVAILABILITY_VENUE_SELECT = "venue_id,name,address,operating_hours,status";
+const AVAILABILITY_VENUE_SELECT = "venue_id,name,address,operating_hours,status,status_reason";
 // Bookings are loaded a day either side of the range: setup and turnaround are
 // at most 1440 minutes each, so nothing that can occupy the range is missed.
 const BUFFER_MARGIN_MS = 24 * 60 * 60 * 1000;
@@ -631,6 +685,8 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null, exc
         name: row.name,
         address: row.address,
         status: row.status,
+        // Why a venue is out of service, shown on the calendar (SPM-186).
+        statusReason: row.status_reason ?? null,
         ...venue,
         // A venue without MongoDB minutes cannot receive holds or bookings (Master 5.4.1).
         buffersRecorded: venue.setupMinutes != null && venue.turnaroundMinutes != null,
@@ -718,6 +774,7 @@ const describeConflicts = (conflicts, entries) => conflicts.map((conflict) => {
     label: entry.label ?? conflict.type,
     occupiedStart: conflict.occupiedStart,
     occupiedEnd: conflict.occupiedEnd,
+    message: conflict.message ?? null,
     holdExpiresAt: entry.holdExpiresAt ?? null,
     reasonLabel: entry.reasonLabel ?? null,
   };
@@ -943,9 +1000,9 @@ const getSelectableVenuePhotoImage = async (venueId, photoId) => {
 // ---------- venue booking review (SPM-181) ----------
 
 const BOOKING_VENUE_SELECT =
-  "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours,setup_turnaround_min))";
+  "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours))";
 const BOOKING_FIELDS =
-  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,created_at,updated_at,event_id";
+  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,reviewer:user!venue_booking_reviewed_by_fkey(name)";
 const BOOKING_LIST_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT},event:event!inner(event_id,title,event_type,status)`;
 const BOOKING_DETAIL_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT}`;
 // Venue Staff see the event's venue-relevant details and the coordinator's
@@ -959,17 +1016,25 @@ const toEventType = (eventType) => ({
   eventTypeLabel: eventType ? EVENT_TYPE_LABELS[eventType] || eventType : null,
 });
 
-const toBookingVenue = (room) => ({
-  venueId: room.venue.venue_id,
-  name: room.venue.name,
-  address: room.venue.address,
-  maxCapacity: room.venue.max_capacity,
-  operatingHours: room.venue.operating_hours,
-  setupTurnaroundMinutes: room.venue.setup_turnaround_min,
-  roomId: room.room_id,
-  roomLayoutType: room.layout_type,
-  roomCapacity: room.capacity,
-});
+// Setup and turnaround come from MongoDB venue_details (Master 6.4), not the
+// deprecated setup_turnaround_min column; `detailsAvailable` is false when
+// MongoDB could not be read, so the minutes are unknown rather than unset.
+const toBookingVenue = (room, details = null) => {
+  const detail = details ? details.get(String(room.venue.venue_id)) ?? null : null;
+  return {
+    venueId: room.venue.venue_id,
+    name: room.venue.name,
+    address: room.venue.address,
+    maxCapacity: room.venue.max_capacity,
+    operatingHours: room.venue.operating_hours,
+    setupMinutes: Number.isInteger(detail?.setupMinutes) ? detail.setupMinutes : null,
+    turnaroundMinutes: Number.isInteger(detail?.turnaroundMinutes) ? detail.turnaroundMinutes : null,
+    detailsAvailable: Boolean(details),
+    roomId: room.room_id,
+    roomLayoutType: room.layout_type,
+    roomCapacity: room.capacity,
+  };
+};
 
 const toBookingSummary = (row) => ({
   // The booking reference is venue_booking.booking_id itself.
@@ -997,14 +1062,31 @@ const toBookingListItem = (row) => ({
   },
 });
 
-const toBookingDetail = (row) => ({
+const DECISION_CLOSED_EVENT_STATUSES = new Set([EVENT_STATUS.COMPLETED, EVENT_STATUS.CANCELLED, EVENT_STATUS.REJECTED]);
+
+// Which decisions Venue Staff may take now (SPM-186 AC4, SPM-189 AC6, T32):
+// the database re-checks every rule when the decision is submitted.
+const toDecisionActions = (row, eventStatus, now) => {
+  const eventOpen = !DECISION_CLOSED_EVENT_STATUSES.has(eventStatus);
+  return {
+    canApprove: row.status === "PENDING" && eventStatus === EVENT_STATUS.PLANNING,
+    canReject:
+      eventOpen
+      && (row.status === "PENDING" || (row.status === "APPROVED" && new Date(row.start_datetime).getTime() > now)),
+  };
+};
+
+const toBookingDetail = (row, eventStatus, now = Date.now(), details = null) => ({
   ...toBookingSummary(row),
-  venue: toBookingVenue(row.room),
+  venue: toBookingVenue(row.room, details),
   layoutType: row.layout_type,
   requiredFacilities: row.required_facilities || [],
   accessibilityRequirements: row.accessibility_requirements || [],
   specialRequirements: row.special_requirements,
   rejectionReason: row.rejection_reason,
+  reviewedAt: row.reviewed_at ?? null,
+  reviewedByName: row.reviewer?.name ?? null,
+  actions: toDecisionActions(row, eventStatus, now),
 });
 
 const toBookingEvent = (row) => {
@@ -1070,7 +1152,9 @@ const BOOKING_SORT_COLUMNS = Object.freeze({
 const applyBookingSort = (query, sort, order) => {
   const ascending = order !== "desc";
   const sorted = sort === "default" || !BOOKING_SORT_COLUMNS[sort]
-    ? query.order("status", { ascending: true }).order("start_datetime", { ascending })
+    // Request status (SPM-186): booking_status enum order, Pending → Approved →
+    // Rejected → Cancelled, or the reverse; the soonest booking first within each.
+    ? query.order("status", { ascending }).order("start_datetime", { ascending: true })
     : query.order(BOOKING_SORT_COLUMNS[sort], { ascending, nullsFirst: false }).order("start_datetime", { ascending: true });
   return sorted.order("booking_id", { ascending: true });
 };
@@ -1085,24 +1169,61 @@ const findVenueBookings = async ({ status, venueId, eventId, from, to, limit, q 
   if (q) query = query.or(await bookingSearchFilter(q));
   query = applyBookingSort(query, sort, order).limit(limit + 1);
 
-  const [list, pending] = await Promise.all([
-    query,
-    supabase.from("venue_booking").select("booking_id", { count: "exact", head: true }).eq("status", "PENDING"),
-  ]);
+  // The dashboard counts cover every booking, whatever the search or filters.
+  const countWithStatus = (bookingStatus) =>
+    supabase.from("venue_booking").select("booking_id", { count: "exact", head: true }).eq("status", bookingStatus);
+  const [list, pending, approved] = await Promise.all([query, countWithStatus("PENDING"), countWithStatus("APPROVED")]);
   if (list.error) throw list.error;
   if (pending.error) throw pending.error;
+  if (approved.error) throw approved.error;
 
   const rows = list.data || [];
   return {
     bookings: rows.slice(0, limit).map(toBookingListItem),
     hasMore: rows.length > limit,
     pendingCount: pending.count ?? 0,
+    approvedCount: approved.count ?? 0,
   };
 };
 
 // The event and every booking under it, or null when the event has no
 // bookings or is still a private draft: Venue Staff reach events only
 // through their bookings.
+// One booking's venue calendar for Venue Staff (SPM-186): the booking's own
+// window is the checked period, and its event's own bookings and holds are left
+// out, so the request is not shown overlapping itself. Null when the booking
+// does not exist or its event is a private draft.
+const findBookingAvailability = async (bookingId, { from, to }, viewer) => {
+  const { data, error } = await supabase
+    .from("venue_booking")
+    .select("booking_id,event_id,venue_id,start_datetime,end_datetime,room:room(venue_id),event:event!inner(status)")
+    .eq("booking_id", bookingId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data || data.event.status === EVENT_STATUS.DRAFT) return null;
+  const venueId = data.venue_id ?? data.room?.venue_id;
+  const availability = await getVenueAvailability({
+    from,
+    to,
+    venueIds: [venueId],
+    check: { start: new Date(data.start_datetime), end: new Date(data.end_datetime) },
+    excludeEventId: data.event_id,
+  }, viewer);
+  return { bookingId: data.booking_id, venueId, ...availability };
+};
+
+// Venue Staff reach an event only through its venue bookings, and never a
+// private draft (SPM-181); the same rule gates its history (SPM-186).
+const hasReviewableBookings = async (eventId) => {
+  const [eventResult, bookingResult] = await Promise.all([
+    supabase.from("event").select("event_id,status").eq("event_id", eventId).maybeSingle(),
+    supabase.from("venue_booking").select("booking_id", { count: "exact", head: true }).eq("event_id", eventId),
+  ]);
+  if (eventResult.error) throw eventResult.error;
+  if (bookingResult.error) throw bookingResult.error;
+  return Boolean(eventResult.data && eventResult.data.status !== EVENT_STATUS.DRAFT && bookingResult.count > 0);
+};
+
 const findEventBookings = async (eventId) => {
   const [eventResult, bookingResult] = await Promise.all([
     supabase.from("event").select(BOOKING_EVENT_SELECT).eq("event_id", eventId).maybeSingle(),
@@ -1120,10 +1241,20 @@ const findEventBookings = async (eventId) => {
   const bookings = bookingResult.data || [];
   if (!event || event.status === EVENT_STATUS.DRAFT || !bookings.length) return null;
 
+  const now = Date.now();
+  const [details, checks] = await Promise.all([
+    readDetailsOrNull(bookings.map((row) => ({ venue_id: row.room.venue.venue_id }))),
+    findBookingChecks(bookings, new Date(now)),
+  ]);
   return {
     event: toBookingEvent(event),
-    // SPM-195: an affected booking shows its block and the restore action (AC9).
-    bookings: await attachBookingIncidents(eventId, bookings.map(toBookingDetail), INCIDENT_AUDIENCE.VENUE_STAFF),
+    // SPM-195: an affected booking shows its block and the restore action (AC9);
+    // SPM-186: each active booking carries its checks for its own window.
+    bookings: await attachBookingIncidents(
+      eventId,
+      bookings.map((row) => ({ ...toBookingDetail(row, event.status, now, details), checks: checks.get(row.booking_id) ?? null })),
+      INCIDENT_AUDIENCE.VENUE_STAFF,
+    ),
   };
 };
 
@@ -1157,6 +1288,99 @@ const findVenueBooking = async (bookingId) => {
       })),
   };
 };
+
+// ---------- venue booking decisions (SPM-186, SPM-189, T32) ----------
+
+// The venue's setup/turnaround minutes and any active block over the booking's
+// occupied range (Master 5.4.1, 5.4.4). Minutes are set once, so reading them
+// before the database locks the booking cannot race with a change. Without
+// MongoDB no approval is made (Master 7.3).
+const readApprovalCalendar = async (booking, { maxTimeMS } = {}) => {
+  const venueId = booking.room.venue_id;
+  try {
+    const details = await venueDetailModel.getVenueDetailsByIds([venueId], { maxTimeMS });
+    const detail = details.get(String(venueId));
+    const setupMinutes = Number.isInteger(detail?.setupMinutes) ? detail.setupMinutes : null;
+    const turnaroundMinutes = Number.isInteger(detail?.turnaroundMinutes) ? detail.turnaroundMinutes : null;
+    if (setupMinutes === null || turnaroundMinutes === null) return { setupMinutes, turnaroundMinutes, blocked: false };
+
+    const range = venueConflictModel.occupiedRange(booking.start_datetime, booking.end_datetime, setupMinutes, turnaroundMinutes);
+    const entries = await venueCalendarModel.findCalendarEntries([venueId], range.start, range.end, { maxTimeMS });
+    // Unexpired holds of other events occupy the venue too (Master 5.4.3).
+    const conflicts = findCalendarConflicts(entries, { venueId, range, now: new Date() });
+    return {
+      setupMinutes,
+      turnaroundMinutes,
+      blocked: conflicts.some((entry) => entry.type === venueConflictModel.ENTRY_TYPES.BLOCK),
+      held: conflicts.some((entry) => entry.type === venueConflictModel.ENTRY_TYPES.HOLD),
+    };
+  } catch (error) {
+    throw mongoUnavailable(error);
+  }
+};
+
+// A pg error from the venue lock connection, in the shape toVenueError reads.
+const toDecisionError = (error) => {
+  if (error?.name === "VenueError") return error;
+  if (RETRYABLE_LOCK_CODES.has(error?.code)) return venueError("VENUE_LOCK_TIMEOUT");
+  if (SESSION_ENDED_CODES.has(error?.code) || String(error?.code ?? "").startsWith("08")) return venueError("VENUE_BOOKINGS_UNAVAILABLE");
+  if (error?.code === "P0001" || error?.code === "P0002") return toVenueError({ message: error.message, details: error.detail, code: error.code });
+  return error;
+};
+
+// Approval holds the event and venue locks on the venue lock connection while
+// it reads the venue's minutes, holds and blocks from MongoDB, then decides in
+// the same transaction (Master 7.4, T33), so no hold or block can slip in
+// between the check and the commit. A rejection frees time and needs no lock.
+const approveUnderVenueLock = (actorId, bookingId, expectedStatus) => withVenueLockTransaction(async (client) => {
+  const locked = (await client.query(
+    "SELECT public.begin_venue_booking_decision($1, $2) AS result",
+    [actorId, bookingId],
+  )).rows[0].result;
+
+  let calendar = { setupMinutes: null, turnaroundMinutes: null };
+  if (locked.status === "PENDING") {
+    calendar = await readApprovalCalendar(
+      { room: { venue_id: locked.venueId }, start_datetime: locked.start, end_datetime: locked.end },
+      { maxTimeMS: MONGO_READ_UNDER_LOCK_MS },
+    );
+    if (calendar.blocked) throw venueError("VENUE_BLOCKED");
+    if (calendar.held) throw venueError("VENUE_HELD");
+  }
+  await client.query(
+    "SELECT public.decide_venue_booking($1, $2, 'APPROVE', $3, NULL, $4, $5)",
+    [actorId, bookingId, expectedStatus, calendar.setupMinutes, calendar.turnaroundMinutes],
+  );
+});
+
+const decideVenueBooking = async (actorId, bookingId, decision, { expectedStatus = null, reason = null } = {}) => {
+  if (decision === "APPROVE") {
+    try {
+      await approveUnderVenueLock(actorId, bookingId, expectedStatus);
+    } catch (error) {
+      throw toDecisionError(error);
+    }
+  } else {
+    const { error } = await supabase.rpc("decide_venue_booking", {
+      p_actor_id: actorId,
+      p_booking_id: bookingId,
+      p_decision: decision,
+      p_expected_status: expectedStatus,
+      p_reason: reason,
+      p_setup_minutes: null,
+      p_turnaround_minutes: null,
+    });
+    if (error) throw toVenueError(error);
+  }
+
+  const result = await findVenueBooking(bookingId);
+  if (!result) throw new Error("decide_venue_booking left no readable booking.");
+  return result;
+};
+
+const approveVenueBooking = (actorId, bookingId, values) => decideVenueBooking(actorId, bookingId, "APPROVE", values);
+
+const rejectVenueBooking = (actorId, bookingId, values) => decideVenueBooking(actorId, bookingId, "REJECT", values);
 
 // ---------- venue booking requests (SPM-179) ----------
 
@@ -1218,12 +1442,26 @@ const toLockFailure = (error) => {
 const isDatabaseRefusal = (error, knownMessages) =>
   (error?.code === "P0001" || error?.code === "P0002") && knownMessages.has(error.message);
 
-const toBookingRequestError = (error) => {
+const toBookingRequestError = (error, { bookings = [], minutes = {} } = {}) => {
+  // Keep the exclusion constraint's conflict response on the booking path.
+  if (error?.code === "23P01") return venueError("BOOKING_CONFLICT");
   const lockFailure = toLockFailure(error);
   if (lockFailure) return lockFailure;
   if (isDatabaseRefusal(error, BOOKING_REQUEST_ERRORS)) {
     const { index, venueId, conflicts, capacity, expectedAttendance } = parseErrorDetail(error.detail);
-    return venueError(error.message, { index, venueId, conflicts, capacity, expectedAttendance });
+    const booking = Number.isInteger(index) ? bookings[index] : null;
+    const buffers = booking ? minutes[booking.venueId] : null;
+    const described = Array.isArray(conflicts) && booking && buffers
+      ? conflicts.map((conflict) => {
+        // Older database functions return only occupied bounds. Retain their
+        // generic response until the additive conflict-detail migration lands.
+        if (!conflict.start || !conflict.end) return conflict;
+        const range = venueConflictModel.occupiedRange(booking.start, booking.end, buffers.setupMinutes, buffers.turnaroundMinutes);
+        return { ...conflict, message: venueConflictModel.conflictMessage(conflict, {
+          start: booking.start, end: booking.end, occupiedStart: range.start, occupiedEnd: range.end,
+        }) };
+      }) : conflicts;
+    return venueError(error.message, { index, venueId, conflicts: described, capacity, expectedAttendance });
   }
   return error;
 };
@@ -1241,7 +1479,8 @@ const bookingWarnings = (item, range, venue, document) => {
   const hours = venueConflictModel.operatingHoursWarning(range, venue.operatingHours);
   if (hours) messages.push(hours.message);
   const layouts = document?.supportedLayouts || [];
-  if (layouts.length && !layouts.some((layout) => normalise(layout) === normalise(item.layout))) {
+  // A hold request has no layout (SPM-190), so there is nothing to compare.
+  if (item.layout && layouts.length && !layouts.some((layout) => normalise(layout) === normalise(item.layout))) {
     messages.push(`${venue.name} does not list the ${item.layout} layout.`);
   }
   item.requiredFacilities
@@ -1256,7 +1495,7 @@ const bookingWarnings = (item, range, venue, document) => {
 // The MongoDB holds and blocks one booking's occupied range overlaps (Master
 // 5.4). Normal booking requests must respect every active hold, including the
 // event's own. Converting a hold is a separate workflow (SPM-188/SPM-283).
-const findCalendarConflicts = (entries, { venueId, range, now }) =>
+const findCalendarConflicts = (entries, { venueId, range, now, request }) =>
   entries
     .filter((entry) => entry.venueId === venueId)
     .filter((entry) => (entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
@@ -1265,6 +1504,9 @@ const findCalendarConflicts = (entries, { venueId, range, now }) =>
     .filter((entry) => venueConflictModel.overlaps(range, { start: entry.occupiedStart, end: entry.occupiedEnd }))
     .map((entry) => ({
       type: entry.type,
+      ...(entry.start && entry.end && request ? { message: venueConflictModel.conflictMessage(entry, {
+        start: request.start, end: request.end, occupiedStart: range.start, occupiedEnd: range.end,
+      }) } : {}),
       occupiedStart: toIsoOrNull(entry.occupiedStart),
       occupiedEnd: toIsoOrNull(entry.occupiedEnd),
       ...(entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
@@ -1312,13 +1554,179 @@ const checkVenueCalendar = async (bookings, venues) => {
     minutes[item.venueId] = { setupMinutes, turnaroundMinutes };
 
     const range = venueConflictModel.occupiedRange(item.start, item.end, setupMinutes, turnaroundMinutes);
-    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, range, now });
+    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, range, now, request: item });
     if (conflicts.length) throw venueError("BOOKING_CONFLICT", { index, venueId: item.venueId, conflicts });
 
     const messages = bookingWarnings(item, range, venue, document);
     if (messages.length) warnings.push({ index, venueId: item.venueId, messages });
   });
   return { minutes, warnings };
+};
+
+// ---------- per-booking fit (SPM-186, Master 5.4, 5.4.2) ----------
+
+const FIT_VENUE_SELECT = "venue_id,name,max_capacity,operating_hours,status,status_reason,is_active";
+const FIT_BOOKING_SELECT = "booking_id,event_id,venue_id,status,start_datetime,end_datetime,occupied_range";
+const dayFormat = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Singapore", day: "numeric", month: "short" });
+const formatInstant = (value) => {
+  const time = new Date(value);
+  return `${dayFormat.format(time)} ${venueConflictModel.formatLocal(time.getTime())}`;
+};
+const formatRange = (start, end) => {
+  const from = new Date(start);
+  const to = new Date(end);
+  const day = dayFormat.format(from);
+  const endDay = dayFormat.format(to);
+  const times = `${venueConflictModel.formatLocal(from.getTime())}–${venueConflictModel.formatLocal(to.getTime())}`;
+  return day === endDay ? `${day}, ${times}` : `${day} ${venueConflictModel.formatLocal(from.getTime())} – ${endDay} ${venueConflictModel.formatLocal(to.getTime())}`;
+};
+
+// Everything the fit of these bookings depends on, read once: the venues
+// (PostgreSQL), active bookings near the windows (PostgreSQL), and setup and
+// turnaround minutes, holds and blocks (MongoDB). An unreadable MongoDB leaves
+// detailsRead false, so availability is "not checked", never "available".
+const loadFitContext = async (items) => {
+  const venueIds = [...new Set(items.map((item) => item.venueId))];
+  if (!venueIds.length) return { venues: new Map(), bookings: [], details: new Map(), entries: [], detailsRead: true };
+  const times = items.flatMap((item) => [Date.parse(item.start), Date.parse(item.end)]);
+  const from = new Date(Math.min(...times) - BUFFER_MARGIN_MS);
+  const to = new Date(Math.max(...times) + BUFFER_MARGIN_MS);
+
+  const [venueResult, bookingResult] = await Promise.all([
+    supabase.from("venue").select(FIT_VENUE_SELECT).in("venue_id", venueIds),
+    supabase
+      .from("venue_booking")
+      .select(FIT_BOOKING_SELECT)
+      .in("venue_id", venueIds)
+      .in("status", ACTIVE_BOOKING_STATUSES)
+      .lt("start_datetime", to.toISOString())
+      .gt("end_datetime", from.toISOString()),
+  ]);
+  if (venueResult.error) throw venueResult.error;
+  if (bookingResult.error) throw bookingResult.error;
+
+  let details = new Map();
+  let entries = [];
+  let detailsRead = true;
+  try {
+    [details, entries] = await Promise.all([
+      venueDetailModel.getVenueDetailsByIds(venueIds),
+      venueCalendarModel.findCalendarEntries(venueIds, from, to),
+    ]);
+  } catch (error) {
+    console.warn("[venue-booking-fit] MongoDB unavailable", { code: error.code, name: error.name });
+    detailsRead = false;
+  }
+
+  const venues = new Map((venueResult.data || []).map((row) => [row.venue_id, {
+    venueId: row.venue_id,
+    name: row.name,
+    maxCapacity: row.max_capacity,
+    operatingHours: row.operating_hours,
+    status: row.status,
+    statusReason: row.status_reason,
+    isActive: row.is_active,
+  }]));
+  const bookings = (bookingResult.data || []).map((row) => {
+    const { occupiedStart, occupiedEnd } = parseOccupiedRange(row.occupied_range);
+    const detail = details.get(String(row.venue_id));
+    // A booking saved before occupied ranges were stored uses today's minutes.
+    const range = occupiedStart && occupiedEnd
+      ? { start: new Date(occupiedStart), end: new Date(occupiedEnd) }
+      : venueConflictModel.occupiedRange(row.start_datetime, row.end_datetime, detail?.setupMinutes, detail?.turnaroundMinutes);
+    return { bookingId: row.booking_id, eventId: row.event_id, venueId: row.venue_id, status: row.status, range };
+  });
+  return { venues, bookings, details, entries, detailsRead };
+};
+
+const blockingCheck = (code, message) => ({ code, message });
+
+// One booking against its own venue and its own window: blocking problems
+// (Approve and requests are refused) and warnings (Venue Staff decide). Other
+// bookings of the same event at other venues never affect the result.
+const assessBookingFit = (item, context, { excludeBookingId = null, now = new Date() } = {}) => {
+  const venue = context.venues.get(item.venueId);
+  const blocking = [];
+  const result = (availability, range = null, warnings = []) => ({
+    venueId: item.venueId,
+    availability,
+    occupiedStart: range ? new Date(range.start).toISOString() : null,
+    occupiedEnd: range ? new Date(range.end).toISOString() : null,
+    blocking,
+    warnings,
+  });
+  if (!venue || !venue.isActive) {
+    blocking.push(blockingCheck("VENUE_NOT_FOUND", "This venue no longer exists."));
+    return result("UNAVAILABLE");
+  }
+  if (venue.status !== VENUE_STATUS.ACTIVE) {
+    const state = venue.status === VENUE_STATUS.UNDER_MAINTENANCE ? "under maintenance" : "inactive";
+    blocking.push(blockingCheck(
+      "VENUE_NOT_BOOKABLE",
+      `${venue.name} is ${state}${venue.statusReason ? ` (${venue.statusReason})` : ""} and takes no new bookings.`,
+    ));
+  }
+  if (Number.isInteger(item.expectedAttendance) && item.expectedAttendance > venue.maxCapacity) {
+    blocking.push(blockingCheck(
+      "VENUE_CAPACITY_EXCEEDED",
+      `${item.expectedAttendance.toLocaleString("en-GB")} people is more than ${venue.name}'s capacity of ${venue.maxCapacity.toLocaleString("en-GB")}.`,
+    ));
+  }
+  if (!context.detailsRead) {
+    blocking.push(blockingCheck("AVAILABILITY_NOT_CHECKED", "Availability cannot be checked right now. Try again shortly."));
+    return result("NOT_CHECKED");
+  }
+  const document = context.details.get(String(item.venueId));
+  if (!Number.isInteger(document?.setupMinutes) || !Number.isInteger(document?.turnaroundMinutes)) {
+    blocking.push(blockingCheck("VENUE_BUFFERS_NOT_SET", `Setup and turnaround times are not recorded for ${venue.name}.`));
+    return result("NOT_CHECKED");
+  }
+
+  const range = venueConflictModel.occupiedRange(item.start, item.end, document.setupMinutes, document.turnaroundMinutes);
+  context.bookings
+    .filter((booking) => booking.venueId === item.venueId && booking.bookingId !== excludeBookingId)
+    .filter((booking) => venueConflictModel.overlaps(range, booking.range))
+    .forEach((booking) => blocking.push(blockingCheck(
+      "VENUE_BOOKING_CONFLICT",
+      `Overlaps ${booking.status === "APPROVED" ? "an approved" : "a pending"} booking for ${formatRequestId(booking.eventId)} (${formatRange(booking.range.start, booking.range.end)}).`,
+    )));
+  findCalendarConflicts(context.entries, { venueId: item.venueId, range, now }).forEach((conflict) => blocking.push(
+    conflict.type === venueConflictModel.ENTRY_TYPES.BLOCK
+      ? blockingCheck("VENUE_BLOCKED", `Blocked${conflict.reasonLabel ? ` (${conflict.reasonLabel})` : ""} ${formatRange(conflict.occupiedStart, conflict.occupiedEnd)}.`)
+      : blockingCheck("VENUE_HELD", `Held for another event ${formatRange(conflict.occupiedStart, conflict.occupiedEnd)}, until ${formatInstant(conflict.holdExpiresAt)}.`),
+  ));
+  const available = !blocking.some((check) => ["VENUE_BOOKING_CONFLICT", "VENUE_BLOCKED", "VENUE_HELD"].includes(check.code));
+  return result(available ? "AVAILABLE" : "UNAVAILABLE", range, bookingWarnings(item, range, venue, document));
+};
+
+// POST /api/events/:id/venue-bookings/check (SPM-186): advisory checks for a
+// request being prepared; nothing is written and nothing is locked. The
+// request itself checks again under the venue lock (Master 7.4).
+const checkVenueBookings = async (items, { now = new Date() } = {}) => {
+  const ready = items.filter((item) => item.booking);
+  const context = await loadFitContext(ready.map((item) => item.booking));
+  return items.map((item) => (item.booking
+    ? { index: item.index, checked: true, fields: {}, ...assessBookingFit(item.booking, context, { now }) }
+    : { index: item.index, checked: false, fields: item.fields, venueId: null, availability: "NOT_CHECKED", occupiedStart: null, occupiedEnd: null, blocking: [], warnings: [] }));
+};
+
+// The fit of an event's active bookings for Venue Staff (SPM-186 AC7); each is
+// checked without itself. Decided or released bookings have no checks.
+const bookingFitItem = (row) => ({
+  venueId: row.room.venue.venue_id,
+  start: row.start_datetime,
+  end: row.end_datetime,
+  expectedAttendance: row.expected_attendance,
+  layout: row.layout_type || "",
+  requiredFacilities: row.required_facilities || [],
+  accessibilityNeeds: row.accessibility_requirements || [],
+});
+
+const findBookingChecks = async (rows, now = new Date()) => {
+  const active = rows.filter((row) => ACTIVE_BOOKING_STATUSES.includes(row.status));
+  if (!active.length) return new Map();
+  const context = await loadFitContext(active.map(bookingFitItem));
+  return new Map(active.map((row) => [row.booking_id, assessBookingFit(bookingFitItem(row), context, { excludeBookingId: row.booking_id, now })]));
 };
 
 const toBookingRequestResult = (result) => ({
@@ -1430,6 +1838,7 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
   const requestHash = hashRequest({ bookings }, {}, [eventId]);
   const venueIds = [...new Set(bookings.map((item) => item.venueId))].sort((left, right) => left - right);
 
+  let checkedMinutes = {};
   try {
     const result = await withVenueLockTransaction(async (client) => {
       const started = await selectResult(client,
@@ -1439,6 +1848,7 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
       if (started.replay) return started.replay;
 
       const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || []);
+      checkedMinutes = minutes;
       return selectResult(client,
         "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
         [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
@@ -1446,7 +1856,7 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
     });
     return toBookingRequestResult(result);
   } catch (error) {
-    throw toBookingRequestError(error);
+    throw toBookingRequestError(error, { bookings, minutes: checkedMinutes });
   }
 };
 
@@ -2084,7 +2494,451 @@ const restoreVenueIncident = async ({ actorId, incidentId, idempotencyKey }) => 
   };
 };
 
+// ---------- tentative holds (SPM-190, Master 5.4.3, 7.4, T34) ----------
+
+const HOLD_ERRORS = new Set([
+  "INVALID_HOLD_REQUEST",
+  "INVALID_HOLD",
+  "IDEMPOTENCY_KEY_REQUIRED",
+  "IDEMPOTENCY_KEY_REUSED",
+  "EVENT_NOT_FOUND",
+  "FORBIDDEN",
+  "EVENT_NOT_IN_PLANNING",
+  "HOLD_OUTSIDE_EVENT",
+  "HOLD_TOO_LATE",
+  "VENUE_NOT_FOUND",
+  "VENUE_NOT_BOOKABLE",
+  "VENUE_CAPACITY_EXCEEDED",
+  "HOLD_REQUEST_EXISTS",
+  "HOLD_REQUEST_NOT_FOUND",
+  "HOLD_REQUEST_DECIDED",
+  "DECLINE_REASON_INVALID",
+  "HOLD_NOT_FOUND",
+]);
+
+// Backend labels (Master 3.5: the frontend never maps states itself).
+const HOLD_STATUS_LABELS = Object.freeze({
+  ACTIVE: "On hold (tentative)",
+  EXPIRED: "Hold expired",
+  RELEASED: "Hold released",
+  CONVERTED: "Converted to a booking request",
+});
+const HOLD_REQUEST_STATUS_LABELS = Object.freeze({
+  PENDING: "Hold requested",
+  PLACED: "On hold (tentative)",
+  DECLINED: "Hold declined",
+  WITHDRAWN: "Request withdrawn",
+});
+
+const HOLD_REQUEST_SELECT =
+  "hold_request_id,event_id,venue_id,label,start_datetime,end_datetime,expected_attendance,note,status,requested_at,decided_at,decline_reason,calendar_hold_id,"
+  + "venue:venue(name),event:event(title,status),requester:user!venue_hold_request_requested_by_fkey(name),decider:user!venue_hold_request_decided_by_fkey(name)";
+
+// A database refusal (rpc or venue lock connection) as a VenueError.
+const toHoldError = (error) => {
+  const lockFailure = toLockFailure(error);
+  if (lockFailure) return lockFailure;
+  const message = error?.message || "";
+  if ((error?.code === "P0001" || error?.code === "P0002") && HOLD_ERRORS.has(message)) {
+    const detail = parseErrorDetail(error.detail ?? error.details);
+    return venueError(message, { currentStatus: detail.status ?? null });
+  }
+  return error;
+};
+
+const callHoldRpc = async (name, args) => {
+  const { data, error } = await supabase.rpc(name, args);
+  if (error) throw toHoldError(error);
+  return data;
+};
+
+// A hold whose expiry has passed is expired whatever its stored status (Master 5.4.3).
+const holdStateAt = (hold, now) =>
+  (hold.status === "ACTIVE" && !venueConflictModel.isHoldActive(hold, now) ? "EXPIRED" : hold.status);
+
+const toHold = (hold, now) => {
+  const status = holdStateAt(hold, now);
+  return {
+    holdId: hold.id,
+    status,
+    statusLabel: HOLD_STATUS_LABELS[status] || status,
+    expiresAt: toIsoOrNull(hold.holdExpiresAt),
+    extended: Boolean(hold.extendedAt),
+    occupiedStart: toIsoOrNull(hold.occupiedStart),
+    occupiedEnd: toIsoOrNull(hold.occupiedEnd),
+  };
+};
+
+// One request with its hold, if placed. `hold` undefined means MongoDB could
+// not be read, so the hold's state is unknown rather than missing.
+const toHoldRequest = (row, hold, now) => {
+  const placed = row.status === "PLACED";
+  const holdView = placed && hold ? toHold(hold, now) : null;
+  return {
+    holdRequestId: row.hold_request_id,
+    eventId: row.event_id,
+    requestId: formatRequestId(row.event_id),
+    eventTitle: row.event?.title ?? null,
+    venueId: row.venue_id,
+    venueName: row.venue?.name ?? null,
+    label: row.label,
+    start: row.start_datetime,
+    end: row.end_datetime,
+    expectedAttendance: row.expected_attendance,
+    note: row.note,
+    status: row.status,
+    statusLabel: holdView ? holdView.statusLabel : HOLD_REQUEST_STATUS_LABELS[row.status] || row.status,
+    requestedAt: row.requested_at,
+    requestedByName: row.requester?.name ?? null,
+    decidedAt: row.decided_at,
+    decidedByName: row.decider?.name ?? null,
+    declineReason: row.decline_reason,
+    hold: holdView,
+    holdUnavailable: placed && hold === undefined,
+  };
+};
+
+// The placed requests' holds by ID, or undefined when MongoDB cannot be read.
+const readRequestHolds = async (rows) => {
+  const ids = rows.filter((row) => row.calendar_hold_id).map((row) => row.calendar_hold_id);
+  if (!ids.length) return new Map();
+  try {
+    return await venueCalendarModel.findEntriesByIds(ids);
+  } catch (error) {
+    console.warn("[venue-hold] MongoDB unavailable", { code: error?.code, name: error?.name });
+    return undefined;
+  }
+};
+
+const holdFor = (holds, row) => (holds === undefined ? undefined : holds.get(row.calendar_hold_id) ?? null);
+
+// POST /api/events/:id/venue-holds/requests (SPM-190 AC1).
+const requestVenueHold = async ({ actorId, eventId, values, idempotencyKey }) => {
+  const result = await callHoldRpc("request_venue_hold", {
+    p_actor_id: actorId,
+    p_event_id: eventId,
+    p_venue_id: values.venueId,
+    p_label: values.label,
+    p_start: values.start,
+    p_end: values.end,
+    p_expected_attendance: values.expectedAttendance,
+    p_note: values.note,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest(values, {}, [eventId]),
+  });
+  return findHoldRequest(result.holdRequestId);
+};
+
+const findHoldRequest = async (requestId) => {
+  const { data, error } = await supabase.from("venue_hold_request").select(HOLD_REQUEST_SELECT).eq("hold_request_id", requestId).maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return toHoldRequest(data, holdFor(await readRequestHolds([data]), data), new Date());
+};
+
+// GET /api/events/:id/venue-holds: the event's hold requests and holds, newest first.
+const listEventHolds = async (eventId) => {
+  const { data, error } = await supabase
+    .from("venue_hold_request")
+    .select(HOLD_REQUEST_SELECT)
+    .eq("event_id", eventId)
+    .order("requested_at", { ascending: false })
+    .order("hold_request_id", { ascending: false });
+  if (error) throw error;
+  const rows = data || [];
+  const holds = await readRequestHolds(rows);
+  const now = new Date();
+  return rows.map((row) => toHoldRequest(row, holdFor(holds, row), now));
+};
+
+// What placing a pending request would do now (AC1–AC3): its checks on its own
+// venue and window (as a booking's, SPM-186) and the expiry it would get.
+const holdPreview = (row, context, now) => {
+  const fit = assessBookingFit({
+    venueId: row.venue_id,
+    start: row.start_datetime,
+    end: row.end_datetime,
+    expectedAttendance: row.expected_attendance,
+    layout: "",
+    requiredFacilities: [],
+    accessibilityNeeds: [],
+  }, context, { now });
+  const expiresAt = fit.occupiedStart ? venueConflictModel.holdExpiryFor(fit.occupiedStart, now) : null;
+  const tooLate = Boolean(fit.occupiedStart) && !expiresAt;
+  const blocking = tooLate
+    ? [...fit.blocking, { code: "HOLD_TOO_LATE", message: "Setup starts within 24 hours, so no hold is possible. Ask the coordinator to submit a booking request instead." }]
+    : fit.blocking;
+  return { ...fit, blocking, expiresAt: toIsoOrNull(expiresAt), tooLate };
+};
+
+const MAX_HOLD_REQUESTS_LISTED = 200;
+
+// GET /api/venues/hold-requests (Venue Staff): pending requests first, each
+// with its preview; then placed, declined and withdrawn ones, newest first.
+const listHoldRequests = async ({ status = null } = {}) => {
+  let query = supabase.from("venue_hold_request").select(HOLD_REQUEST_SELECT);
+  if (status) query = query.eq("status", status);
+  const { data, error } = await query
+    .order("requested_at", { ascending: false })
+    .order("hold_request_id", { ascending: false })
+    .limit(MAX_HOLD_REQUESTS_LISTED);
+  if (error) throw error;
+  const rows = data || [];
+  const now = new Date();
+  const pending = rows.filter((row) => row.status === "PENDING");
+  const [holds, context] = await Promise.all([
+    readRequestHolds(rows),
+    loadFitContext(pending.map((row) => ({ venueId: row.venue_id, start: row.start_datetime, end: row.end_datetime }))),
+  ]);
+  const requests = rows.map((row) => ({
+    ...toHoldRequest(row, holdFor(holds, row), now),
+    preview: row.status === "PENDING" ? holdPreview(row, context, now) : null,
+  }));
+  requests.sort((left, right) => Number(right.status === "PENDING") - Number(left.status === "PENDING"));
+  return { requests, pendingCount: pending.length };
+};
+
+const withdrawVenueHoldRequest = async ({ actorId, requestId }) => {
+  await callHoldRpc("withdraw_venue_hold_request", { p_actor_id: actorId, p_request_id: requestId });
+  return findHoldRequest(requestId);
+};
+
+const declineVenueHoldRequest = async ({ actorId, requestId, reason }) => {
+  await callHoldRpc("decline_venue_hold_request", { p_actor_id: actorId, p_request_id: requestId, p_reason: reason });
+  return findHoldRequest(requestId);
+};
+
+// The hold's MongoDB ID comes from the actor and Idempotency-Key, so a retry
+// after a commit that failed past the MongoDB write finds the same document.
+const holdIdFor = (actorId, idempotencyKey) =>
+  crypto.createHash("sha256").update(`venue-hold:${actorId}:${idempotencyKey}`).digest("hex").slice(0, 24);
+
+// Acknowledgement can be lost after persistence: this attempt's token decides
+// whether the write landed (as for blocks, SPM-195).
+const writeCalendarHold = async (identity, write) => {
+  try {
+    return await write();
+  } catch (error) {
+    try {
+      if (await venueCalendarModel.ownsHoldWrite(identity)) {
+        const saved = await venueCalendarModel.findCalendarEntry(identity.holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS });
+        if (saved) return saved;
+      }
+    } catch {
+      // The registered, token-guarded undo still runs.
+    }
+    throw venueError("VENUE_CALENDAR_UNAVAILABLE");
+  }
+};
+
+// Recover only this actor/key's unchanged, still-active placement write. The
+// key-derived ID alone is not sufficient: verify its payload and prove that
+// no committed request owns it. Never overwrite, extend or undo an old write.
+const recoverHoldPlacement = async (client, { actorId, requestId, holdId, row, range, now }) => {
+  const saved = await calendarCall(() => venueCalendarModel.findHoldPlacementWrite(holdId));
+  if (!saved) return null;
+  const sameTime = (left, right) => new Date(left).getTime() === new Date(right).getTime();
+  if (saved.type !== "HOLD" || saved.eventId !== row.event_id || saved.venueId !== row.venue_id
+      || saved.createdBy !== actorId || saved.label !== row.label
+      || !sameTime(saved.start, row.start_datetime) || !sameTime(saved.end, row.end_datetime)
+      || !sameTime(saved.occupiedStart, range.start) || !sameTime(saved.occupiedEnd, range.end)) {
+    throw venueError("IDEMPOTENCY_KEY_REUSED");
+  }
+  if (saved.status !== "ACTIVE" || saved.version !== 1 || saved.extendedAt
+      || typeof saved.writeToken !== "string" || !saved.writeToken) {
+    throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  }
+  const recoverable = await selectResult(client,
+    "SELECT public.can_recover_venue_hold_placement($1,$2,$3) AS result", [actorId, requestId, holdId]);
+  if (!recoverable) throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  if (!venueConflictModel.isHoldActive(saved, now)) throw venueError("HOLD_EXPIRED");
+  if (new Date(saved.holdExpiresAt) > venueConflictModel.holdCutoff(range.start)) throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  return saved;
+};
+
+// POST /api/venues/hold-requests/:requestId/place (AC1–AC4, AC8, AC9). The
+// venue's set-once minutes give the occupied range and the expiry; under the
+// event and venue locks, active bookings (PostgreSQL) and unexpired holds and
+// active blocks (MongoDB) are refused, the request is recorded as placed, and
+// the HOLD document is written; the transaction commits only if it landed.
+const placeVenueHold = async ({ actorId, requestId, idempotencyKey }) => {
+  const { data: row, error } = await supabase
+    .from("venue_hold_request")
+    .select("hold_request_id,event_id,venue_id,label,start_datetime,end_datetime,status")
+    .eq("hold_request_id", requestId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!row) throw venueError("HOLD_REQUEST_NOT_FOUND");
+
+  const minutes = await calendarCall(() => readVenueMinutes(row.venue_id));
+  if (minutes.setup === null || minutes.turnaround === null) throw venueError("VENUE_BUFFERS_NOT_SET");
+  const range = venueConflictModel.occupiedRange(row.start_datetime, row.end_datetime, minutes.setup, minutes.turnaround);
+  const requestHash = hashRequest({ requestId }, {}, [requestId]);
+  const holdId = holdIdFor(actorId, idempotencyKey);
+
+  try {
+    const recorded = await withVenueLockTransaction(async (client, transaction) => {
+      const started = await selectResult(client,
+        "SELECT public.begin_venue_hold_placement($1, $2, $3, $4, $5, $6) AS result",
+        [actorId, requestId, range.start.toISOString(), range.end.toISOString(), idempotencyKey, requestHash]
+      );
+      if (started.replay) return started.replay;
+      if ((started.bookingConflicts || []).length) throw venueError("VENUE_BOOKING_CONFLICT");
+
+      const now = new Date(started.serverNow);
+      const recovered = await recoverHoldPlacement(client, { actorId, requestId, holdId, row, range, now });
+      const expiresAt = recovered ? new Date(recovered.holdExpiresAt) : venueConflictModel.holdExpiryFor(range.start, now);
+      if (!expiresAt) throw venueError("HOLD_TOO_LATE");
+      const entries = await calendarCall(() => venueCalendarModel.findCalendarEntries(
+        [row.venue_id], range.start, range.end, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }
+      ));
+      // Exclude only the write whose identity and uncommitted ownership were
+      // verified above. Other holds, including the event's own, still block.
+      const conflicts = findCalendarConflicts(entries.filter(entry => !recovered || entry.id !== holdId), { venueId: row.venue_id, range, now });
+      if (conflicts.some((entry) => entry.type === venueConflictModel.ENTRY_TYPES.BLOCK)) throw venueError("VENUE_BLOCKED");
+      if (conflicts.length) throw venueError("VENUE_HELD");
+
+      const result = await selectResult(client,
+        "SELECT public.record_venue_hold_placement($1, $2, $3::jsonb, $4, $5) AS result",
+        [actorId, requestId, JSON.stringify({
+          holdId, occupiedStart: range.start.toISOString(), occupiedEnd: range.end.toISOString(), expiresAt: expiresAt.toISOString(),
+        }), idempotencyKey, requestHash]
+      );
+
+      // The original MongoDB write already exists. If this transaction fails,
+      // leave it recoverable for the next retry; its original expiry is kept.
+      if (recovered) return result;
+
+      const writeToken = crypto.randomUUID();
+      // Registered before the write: a network error can follow persistence.
+      transaction.onRollback(() => venueCalendarModel.deleteHold({ holdId, venueId: row.venue_id, writeToken }));
+      const written = await writeCalendarHold({ holdId, venueId: row.venue_id, writeToken }, () => venueCalendarModel.insertHold({
+        holdId,
+        venueId: row.venue_id,
+        eventId: row.event_id,
+        label: row.label,
+        start: row.start_datetime,
+        end: row.end_datetime,
+        occupiedStart: range.start,
+        occupiedEnd: range.end,
+        holdExpiresAt: expiresAt,
+        createdBy: actorId,
+        writeToken,
+      }));
+      if (written.existing && (written.eventId !== row.event_id || written.venueId !== row.venue_id)) throw venueError("IDEMPOTENCY_KEY_REUSED");
+      return result;
+    });
+    return findHoldRequest(recorded.holdRequestId ?? requestId);
+  } catch (caught) {
+    throw toHoldError(caught);
+  }
+};
+
+// POST /api/venues/holds/:holdId/extend and /release (AC6). Under the event and
+// venue locks the hold is re-read: it must still be active and unexpired; an
+// extension is allowed once, by 1–7 days, ending at least 24 hours before setup.
+const changeVenueHold = async ({ actorId, holdId, action, days = null }) => {
+  const hold = await calendarCall(() => venueCalendarModel.findCalendarEntry(holdId));
+  if (!hold || hold.type !== venueConflictModel.ENTRY_TYPES.HOLD || !hold.eventId) throw venueError("HOLD_NOT_FOUND");
+
+  try {
+    await withVenueLockTransaction(async (client, transaction) => {
+      const started = await selectResult(client,
+        "SELECT public.begin_venue_hold_change($1, $2, $3, $4) AS result",
+        [actorId, hold.eventId, hold.venueId, action]
+      );
+      const current = await calendarCall(() => venueCalendarModel.findCalendarEntry(holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
+      const now = new Date(started.serverNow);
+      if (!current || current.status !== "ACTIVE") throw venueError("HOLD_NOT_ACTIVE", { currentStatus: current?.status ?? null });
+      if (!venueConflictModel.isHoldActive(current, now)) throw venueError("HOLD_EXPIRED");
+
+      let expiresAfter = null;
+      if (action === "EXTEND") {
+        if (current.extendedAt) throw venueError("HOLD_ALREADY_EXTENDED");
+        expiresAfter = venueConflictModel.extendedHoldExpiry(current, days);
+        if (!expiresAfter) throw venueError("HOLD_EXTENSION_TOO_LONG");
+      }
+      await selectResult(client,
+        "SELECT public.record_venue_hold_change($1, $2, $3, $4, $5, $6, $7) AS result",
+        [actorId, current.eventId, current.venueId, holdId, action, toIsoOrNull(current.holdExpiresAt), toIsoOrNull(expiresAfter)]
+      );
+
+      const writeToken = crypto.randomUUID();
+      transaction.onRollback(() => venueCalendarModel.revertHold({
+        holdId, venueId: current.venueId, version: current.version + 1,
+        holdExpiresAt: current.holdExpiresAt, extendedAt: current.extendedAt, writeToken,
+      }));
+      const updated = await writeCalendarHold({ holdId, venueId: current.venueId, writeToken }, () => venueCalendarModel.changeHold({
+        holdId, venueId: current.venueId, expectedVersion: current.version,
+        holdExpiresAt: expiresAfter, release: action === "RELEASE", writeToken,
+      }));
+      if (!updated) throw venueError("HOLD_NOT_ACTIVE");
+    });
+  } catch (caught) {
+    throw toHoldError(caught);
+  }
+  const { data, error } = await supabase.from("venue_hold_request").select(HOLD_REQUEST_SELECT).eq("calendar_hold_id", holdId).maybeSingle();
+  if (error) throw error;
+  return data ? toHoldRequest(data, holdFor(await readRequestHolds([data]), data), new Date()) : null;
+};
+
+const extendVenueHold = ({ actorId, holdId, days }) => changeVenueHold({ actorId, holdId, action: "EXTEND", days });
+const releaseVenueHold = ({ actorId, holdId }) => changeVenueHold({ actorId, holdId, action: "RELEASE" });
+
+// Each bounded scan advances past reminders already recorded for this expiry.
+// PostgreSQL supplies time and a durable claim. Extension, release and expiry
+// share event -> venue locks; the hold is re-read from the primary under them.
+// MongoDB acknowledgement follows COMMIT and is guarded by version + expiry.
+// If it fails (or the process stops), a retry sees the durable claim, sends no
+// duplicate notice, and repairs the marker. No marker can hide rolled-back work.
+const processDueHolds = async ({ limit = 100 } = {}) => {
+  const now = new Date(await callHoldRpc("venue_hold_clock", {}));
+  const due = await venueCalendarModel.findHoldsExpiringBy(new Date(now.getTime() + venueConflictModel.HOLD_CUTOFF_MS), { limit, now });
+  let reminded = 0;
+  let expired = 0;
+  for (const candidate of due) {
+    if (!candidate.eventId) continue;
+    const work = await withVenueLockTransaction(async (client) => {
+      const locked = await selectResult(client,
+        "SELECT public.begin_venue_hold_expiry($1, $2) AS result", [candidate.eventId, candidate.venueId]);
+      if (!locked) return null;
+      const current = await calendarCall(() => venueCalendarModel.findCalendarEntry(candidate.id, {
+        readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS,
+      }));
+      if (!current || current.type !== "HOLD" || current.status !== "ACTIVE"
+          || current.eventId !== candidate.eventId || current.venueId !== candidate.venueId) return null;
+      const dbNow = new Date(locked.serverNow);
+      const expiry = new Date(current.holdExpiresAt);
+      if (expiry.getTime() > dbNow.getTime() + venueConflictModel.HOLD_CUTOFF_MS) return null;
+      const kind = expiry <= dbNow ? "EXPIRED" : "EXPIRING";
+      const claimed = await selectResult(client,
+        "SELECT public.record_venue_hold_expiry($1,$2,$3,$4,$5) AS result",
+        [kind, current.eventId, current.id, current.venueId, expiry.toISOString()]);
+      return { current, kind, claimed };
+    });
+    if (!work) continue;
+    await venueCalendarModel.acknowledgeHoldNotice({
+      holdId: work.current.id, expectedVersion: work.current.version,
+      expiresAt: work.current.holdExpiresAt, kind: work.kind,
+    });
+    if (work.claimed) {
+      if (work.kind === "EXPIRED") expired += 1;
+      else reminded += 1;
+    }
+  }
+  return { checked: due.length, reminded, expired };
+};
+
 module.exports = {
+  requestVenueHold,
+  listEventHolds,
+  listHoldRequests,
+  withdrawVenueHoldRequest,
+  declineVenueHoldRequest,
+  placeVenueHold,
+  extendVenueHold,
+  releaseVenueHold,
+  processDueHolds,
   createVenueBlock,
   changeVenueBlock,
   restoreVenueIncident,
@@ -2092,6 +2946,8 @@ module.exports = {
   INCIDENT_AUDIENCE,
   requestVenueBookings,
   listEventVenueBookings,
+  checkVenueBookings,
+  assessBookingFit,
   withVenueLockTransaction,
   getVenueCatalogue,
   listManagedVenues,
@@ -2119,5 +2975,10 @@ module.exports = {
   compareOptions,
   findVenueBookings,
   findEventBookings,
+  hasReviewableBookings,
+  findBookingAvailability,
+  findVenueHistory,
   findVenueBooking,
+  approveVenueBooking,
+  rejectVenueBooking,
 };

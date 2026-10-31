@@ -27,18 +27,24 @@ const {
   listUnassignedEvents,
   getCoordinatorAvailability,
   getEventReadiness,
+  acceptFeasibility,
+  rejectSubmittedEvent,
   submitForSafetyReview,
   confirmEvent,
   startPreparation,
   completeEvent,
 } = require("../controller/eventController");
 const { getEventSafetyReviews } = require("../controller/safetyController");
+const { listEquipmentAvailability, requestTechnicalSupport } = require("../controller/equipmentController");
 const {
   getEventVenueOptions,
   getEventVenueAvailability,
   suggestEventVenue,
   requestVenueBookings,
   listEventVenueBookings,
+  checkVenueBookings,
+  requestVenueHold,
+  listEventHolds,
 } = require("../controller/venueController");
 const { requireAuth } = require("../middleware/auth");
 const { requireRole, requireVisibleEvent } = require("../middleware/authorize");
@@ -58,11 +64,14 @@ const anySignedInUser = [requireAuth];
 // SPM-173 lifecycle actions: the assigned coordinator only; any other coordinator
 // gets "not found" from requireVisibleEvent.
 const assignedCoordinatorOnly = [...coordinatorOnly, requireVisibleEvent];
+// SPM-286: organisers fill the Equipment section; coordinators edit the lines before sending.
+const equipmentChoosers = [requireAuth, requireRole(USER_ROLES.ORGANISER, USER_ROLES.COORDINATOR)];
 
 // GET / is left free for event discovery (Master section 3.4).
 router.post("/", organiserOnly, createAndSubmit);
 router.post("/drafts", organiserOnly, createDraft);
 router.get("/request-options", organiserOnly, getRequestOptions);
+router.get("/equipment-options", equipmentChoosers, listEquipmentAvailability); // must stay above "/:id"
 router.get("/mine", organiserOnly, validateCursorPagination, listMyEventRequests); // must stay above "/:id"
 router.get("/discovery", attendeeOnly, validateCursorPagination, listAttendeeDiscovery);
 router.get("/discovery/:id", attendeeOnly, getAttendeeEventDetail);
@@ -74,11 +83,14 @@ router.get("/assignments", leadOnly, listLeadAssignments); // must stay above "/
 router.post("/:id/coordinator", leadOnly, assignCoordinatorAsLead);
 router.patch("/:id/coordinator", leadOnly, patchCoordinator);
 router.get("/assigned", coordinatorOnly, listAssignedEvents); // must stay above "/:id"
+router.post("/:id/reject", assignedCoordinatorOnly, rejectSubmittedEvent);
 router.get("/:id/readiness", assignedCoordinatorOnly, getEventReadiness);
+router.post("/:id/accept-feasibility", assignedCoordinatorOnly, acceptFeasibility);
 router.post("/:id/submit-for-safety-review", assignedCoordinatorOnly, submitForSafetyReview);
 router.post("/:id/confirm", assignedCoordinatorOnly, confirmEvent);
 router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation);
 router.post("/:id/complete", assignedCoordinatorOnly, completeEvent);
+router.post("/:id/technical-requests", assignedCoordinatorOnly, requestTechnicalSupport); // SPM-286 AC5-AC7
 // Venue section of the event (SPM-72/74): the assigned coordinator and the
 // supervising Lead browse; only the coordinator suggests a venue. Photos are
 // read through GET /api/venues/options/:venueId/photos.
@@ -90,6 +102,11 @@ router.put("/:id/venue-suggestion", ...coordinatorOnly, requireVisibleEvent, sug
 // related users who are not the assigned coordinator of a PLANNING event.
 router.get("/:id/venue-bookings", ...eventVenueReaders, listEventVenueBookings);
 router.post("/:id/venue-bookings", anySignedInUser, requireVisibleEvent, requestVenueBookings);
+// Advisory per-booking checks while the request is prepared (SPM-186); nothing is saved.
+router.post("/:id/venue-bookings/check", anySignedInUser, requireVisibleEvent, checkVenueBookings);
+// Tentative holds (SPM-190): the coordinator requests, Venue Staff place.
+router.get("/:id/venue-holds", ...eventVenueReaders, listEventHolds);
+router.post("/:id/venue-holds", anySignedInUser, requireVisibleEvent, requestVenueHold);
 router.get("/:id/history", anySignedInUser, validateCursorPagination, requireVisibleEvent, getEventHistory);
 router.post("/:id/history/viewed", anySignedInUser, requireVisibleEvent, markEventHistoryViewed);
 // SPM-41 clarification threads: another coordinator gets 404; same-organisation

@@ -236,19 +236,30 @@ describe("PUT /api/venues/:venueId/status", () => {
     expect(venueModel.setVenueStatus).not.toHaveBeenCalled();
   });
 
+  const affectedEvent = {
+    eventId: 442, requestId: "REQ-000442", title: "Planning summit", status: "CONFIRMED",
+    firstStart: "2027-03-02T01:00:00+00:00", bookings: 2,
+  };
+
   test("[SPM-73-TC8] should_warn_about_upcoming_bookings_before_deactivating", async () => {
     venueModel.setVenueStatus.mockRejectedValue(
-      venueError("VENUE_HAS_UPCOMING_BOOKINGS", { upcomingBookings: 2, firstStart: "2027-03-02T01:00:00+00:00" }),
+      venueError("VENUE_HAS_UPCOMING_BOOKINGS", {
+        upcomingBookings: 2,
+        firstStart: "2027-03-02T01:00:00+00:00",
+        affectedEvents: [affectedEvent],
+      }),
     );
 
     const response = await as("put", "/api/venues/7/status").send({ status: "INACTIVE", version: 1 });
 
     expect(response.status).toBe(409);
     expect(response.body).toEqual({
-      error: "This venue has 2 upcoming bookings. Confirm to continue; existing bookings are kept.",
+      error: "This venue has 2 upcoming bookings. Confirm to continue; existing bookings and events are kept, "
+        + "and their coordinators and organisers are notified.",
       code: "VENUE_HAS_UPCOMING_BOOKINGS",
       upcomingBookings: 2,
       firstStart: "2027-03-02T01:00:00+00:00",
+      affectedEvents: [affectedEvent],
     });
   });
 

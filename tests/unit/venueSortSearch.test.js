@@ -84,6 +84,15 @@ describe("findVenueBookings search and sort (SPM-181)", () => {
     ]);
   });
 
+  test("[SPM-186] should_reverse_the_request_status_order_and_keep_the_soonest_booking_first", async () => {
+    const { list } = await callsFor({ order: "desc" });
+    expect(list.filter(([method]) => method === "order")).toEqual([
+      ["order", "status", { ascending: false }],
+      ["order", "start_datetime", { ascending: true }],
+      ["order", "booking_id", { ascending: true }],
+    ]);
+  });
+
   test.each([
     ["date", "start_datetime"],
     ["attendance", "expected_attendance"],
@@ -133,7 +142,8 @@ describe("findVenueBookings search and sort (SPM-181)", () => {
       room: { venue: { venue_id: 45, name: "Hall" } },
       event: { event_id: 1, title: "T", event_type: null, status: "PLANNING" },
     };
-    supabase.from.mockReturnValueOnce(queryReturning({ data: [row], error: null })).mockReturnValueOnce(queryReturning({ count: 1, error: null }));
+    supabase.from.mockReturnValueOnce(queryReturning({ data: [row], error: null })).mockReturnValueOnce(queryReturning({ count: 1, error: null }))
+      .mockReturnValueOnce(queryReturning({ count: 0, error: null }));
 
     const { bookings } = await venueModel.findVenueBookings({ limit: 10 });
 

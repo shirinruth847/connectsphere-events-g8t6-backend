@@ -1,5 +1,6 @@
 const eventModel = require("../model/eventModel");
 const activityModel = require("../model/activityModel");
+const equipmentModel = require("../model/equipmentModel");
 const { getEventAccess, getEditDenial, loadEventForViewer, EVENT_NOT_FOUND } = require("../middleware/authorize");
 const { parseEventId, readIdempotencyKey, IDEMPOTENCY_KEY_MESSAGE } = require("../middleware/validate");
 const {
@@ -132,12 +133,38 @@ const mergeWithExisting = (existingRow, input) => ({
 const savedEquipmentIds = (existingRow) =>
   (existingRow?.event_equipment_requirement || []).map((item) => item.equipment_id);
 
+// SPM-286 AC3: once the event has a valid date and time, each quantity is at
+// most what is free in that window. Items no longer offered (kept under SPM-52
+// AC9) are not rechecked. Nothing is reserved here.
+const checkEquipmentQuantities = async (input, errors) => {
+  const requirements = input.equipmentRequirements;
+  if (errors.equipmentRequirements || !Array.isArray(requirements) || !requirements.length) return {};
+  const start = Date.parse(input.startDatetime);
+  const end = Date.parse(input.endDatetime);
+  if (errors.startDatetime || errors.endDatetime || !(start < end)) return {};
+
+  const available = await equipmentModel.findAvailableQuantities(
+    requirements.map((item) => Number(item.equipmentId)),
+    { start: new Date(start).toISOString(), end: new Date(end).toISOString() },
+  );
+  const over = requirements
+    .map((item) => ({ quantity: Number(item.quantity), option: available.get(Number(item.equipmentId)) }))
+    .filter(({ quantity, option }) => option && quantity > option.availableQuantity);
+  if (!over.length) return {};
+  return {
+    equipmentRequirements: `Not enough equipment for the event's date and time: ${over
+      .map(({ option }) => `${option.name} (${option.availableQuantity} available)`)
+      .join(", ")}.`,
+  };
+};
+
 const validateWith = async (validate, input, existingRow = null) => {
   const context = await eventModel.findValidationContext(input, savedEquipmentIds(existingRow));
-  return {
+  const errors = {
     ...validate(input, { allowedLayouts: context.allowedLayouts }),
     ...validateRequirements(input, context),
   };
+  return { ...errors, ...(await checkEquipmentQuantities(input, errors)) };
 };
 
 const markReplay = (res, result) => {
@@ -434,7 +461,9 @@ const getAttendeeEventDetail = async (req, res, next) => {
 const getEventRequest = async (req, res, next) => {
   try {
     const { event, access } = req.visibleEvent;
-    return res.status(200).json({ event: eventModel.toEventView(event, req.user, access) });
+    const view = eventModel.toEventView(event, req.user, access);
+    if (event.status === "REJECTED") view.rejectionReason = await activityModel.findRejectionReason(event.event_id);
+    return res.status(200).json({ event: view });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -675,17 +704,17 @@ const LIFECYCLE_REFUSALS = Object.freeze({
 
 // The body carries only the version of the event the coordinator loaded, so an
 // action taken from an outdated page is refused (409) instead of applied.
-const readActionRequest = (req) => {
+const readActionRequest = (req, requireIdempotency = false) => {
   const body = req.body ?? {};
   if (!isPlainObject(body)) return { errors: { body: "Send the request as a JSON object." } };
   const errors = toUnsupportedFieldErrors(Object.keys(body).filter((key) => key !== "version"));
   const expectedVersion = readVersion(body, true, errors);
-  const idempotencyKey = readRequestIdempotencyKey(req, false, errors);
+  const idempotencyKey = readRequestIdempotencyKey(req, requireIdempotency, errors);
   return { errors, expectedVersion, idempotencyKey };
 };
 
-// POST /api/events/:id/submit-for-safety-review, /confirm, /start-preparation and
-// /complete — SPM-173 AC9-AC12. Outside the coordinator's scope is 404 (before
+// POST /api/events/:id/accept-feasibility (SPM-39), /submit-for-safety-review,
+// /confirm, /start-preparation and /complete (SPM-173 AC9-AC12). Outside the coordinator's scope is 404 (before
 // this, in requireVisibleEvent); then 400 for the request itself. The database
 // decides the rest under the event lock: 403 for an action the status does not
 // allow (naming the status, AC3), 409 for a stale version (AC5) or an unmet
@@ -693,7 +722,7 @@ const readActionRequest = (req) => {
 const lifecycleAction = (action) => async (req, res, next) => {
   const { eventId } = req.visibleEvent;
   try {
-    const { errors, expectedVersion, idempotencyKey } = readActionRequest(req);
+    const { errors, expectedVersion, idempotencyKey } = readActionRequest(req, action === "ACCEPT_FEASIBILITY");
     if (hasErrors(errors)) return validationFailed(res, errors);
 
     const result = await eventModel.runLifecycleAction({
@@ -715,16 +744,64 @@ const lifecycleAction = (action) => async (req, res, next) => {
     if (isRequestError && error.code === "EVENT_VERSION_CONFLICT") {
       return sendVersionConflict(req, res, eventId).catch(next);
     }
+    if (isRequestError && action === "ACCEPT_FEASIBILITY") {
+      if (error.code === "FEASIBILITY_REQUIREMENTS_MISSING") {
+        const labels = {
+          title: "Event title", purpose: "Event purpose", description: "Event description",
+          startDatetime: "Start date and time", endDatetime: "Valid end date and time",
+          expectedAttendance: "Positive expected attendance", preferredLayoutType: "Preferred layout",
+          venuePreferences: "Venue preference", contactName: "Organiser contact name", contactEmail: "Organiser contact email",
+        };
+        const fields = Object.fromEntries((error.missingFields || []).filter((field) => labels[field]).map((field) => [field, `${labels[field]} is required.`]));
+        return res.status(409).json({ error: "Complete the mandatory event fields before approving this request.", code: error.code, fields });
+      }
+      if (error.code === "TRANSITION_NOT_ALLOWED") {
+        const message = error.currentStatus === "REJECTED" ? "A rejected event request cannot be approved."
+          : error.currentStatus === "CANCELLED" ? "A cancelled event request cannot be approved."
+            : "Only an event request under review can be approved.";
+        return res.status(409).json({ error: message, code: error.code, currentStatus: error.currentStatus });
+      }
+    }
     const sendRefusal = isRequestError ? LIFECYCLE_REFUSALS[error.code] : undefined;
     if (sendRefusal) return sendRefusal(res, error);
     return handleError(error, res, next);
   }
 };
 
+const acceptFeasibility = lifecycleAction("ACCEPT_FEASIBILITY");
 const submitForSafetyReview = lifecycleAction("SUBMIT_FOR_SAFETY_REVIEW");
 const confirmEvent = lifecycleAction("CONFIRM");
 const startPreparation = lifecycleAction("START_PREPARATION");
 const completeEvent = lifecycleAction("COMPLETE");
+
+// SPM-40: the actor comes exclusively from verified authentication.
+const rejectSubmittedEvent = async (req, res, next) => {
+  const body = req.body;
+  if (!isPlainObject(body)) return validationFailed(res, { body: "Send the request as a JSON object." });
+  const errors = toUnsupportedFieldErrors(Object.keys(body).filter(key => !["version", "reason"].includes(key)));
+  const expectedVersion = readVersion(body, true, errors);
+  const idempotencyKey = readRequestIdempotencyKey(req, true, errors);
+  const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+  if (!reason) errors.reason = "Rejection notes are required";
+  else if (Array.from(reason).length < 10) errors.reason = "Rejection notes must contain at least 10 characters.";
+  else if (Array.from(reason).length > 2000 || reason.includes("\0")) errors.reason = "Rejection notes must contain at most 2,000 characters and no null characters.";
+  if (hasErrors(errors)) return validationFailed(res, errors);
+  const { eventId } = req.visibleEvent;
+  try {
+    const result = await eventModel.rejectSubmittedEvent({ eventId, actorId: req.user.user_id, expectedVersion, reason, idempotencyKey });
+    markReplay(res, result);
+    const current = await loadEventForViewer(eventId, req.user);
+    if (!current) return eventNotFound(res);
+    return res.status(200).json({ message: "Event request rejected. The organiser has been notified.", event: eventModel.toEventView(current.event, req.user, current.access) });
+  } catch (error) {
+    if (error.name === "EventRequestError") {
+      if (error.code === "EVENT_VERSION_CONFLICT") return sendVersionConflict(req, res, eventId).catch(next);
+      if (error.code === "TRANSITION_NOT_ALLOWED") return res.status(409).json({ code: error.code, error: "Only an event request under review that has never been confirmed can be rejected here.", currentStatus: error.currentStatus });
+      if (error.code === "INVALID_REJECTION_REASON") return validationFailed(res, { reason: "Rejection notes must contain 10 to 2,000 characters and no null characters." });
+    }
+    return handleError(error, res, next);
+  }
+};
 
 // GET /api/events/:id/readiness — SPM-173 AC8: what still blocks safety review and
 // confirmation, one entry per failing condition. Read-only; the actions recheck it.
@@ -989,6 +1066,8 @@ module.exports = {
   listUnassignedEvents,
   assignCoordinatorAsLead,
   getEventReadiness,
+  acceptFeasibility,
+  rejectSubmittedEvent,
   submitForSafetyReview,
   confirmEvent,
   startPreparation,

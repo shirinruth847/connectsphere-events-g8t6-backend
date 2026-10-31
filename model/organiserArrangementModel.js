@@ -138,9 +138,6 @@ async function readTechnical(event) {
   const canonical = await optionalRows(supabase.from("technical_requests")
     .select("request_id,status,support_required,technical_request_lines(equipment_id,quantity,equipment(name))")
     .eq("event_id", event.event_id).order("created_at", { ascending: false }).order("request_id", { ascending: false }));
-  const legacy = canonical?.length ? [] : await rows(supabase.from("equipment_request")
-    .select("equip_request_id,equipment_id,quantity_requested,status,start_datetime,end_datetime,equipment(name)")
-    .eq("event_id", event.event_id).order("request_datetime", { ascending: false }).order("equip_request_id", { ascending: false }));
   const item = (line, quantity) => ({ equipmentId: line.equipment_id, name: line.equipment?.name ?? "Equipment name unavailable", quantity });
   return {
     status: "READY",
@@ -151,13 +148,42 @@ async function readTechnical(event) {
       status: request.status,
       supportRequired: request.support_required,
       equipment: (request.technical_request_lines || []).map((line) => item(line, line.quantity)),
-    })) : legacy.map((request) => ({
-      requestId: request.equip_request_id,
+    })) : await readTechnicalRequests(event, item),
+  };
+}
+
+// SPM-286/287: one row per technical_request header (newest first) with its
+// lines. Lines inserted without a header (seed scripts) follow, one row each,
+// with no requestId.
+async function readTechnicalRequests(event, item) {
+  const [headers, loose] = await Promise.all([
+    rows(supabase.from("technical_request")
+      .select("technical_request_id,status,created_at,decided_at,equipment_request(equipment_id,quantity_requested,equipment(name))")
+      .eq("event_id", event.event_id).order("created_at", { ascending: false }).order("technical_request_id", { ascending: false })),
+    rows(supabase.from("equipment_request")
+      .select("equip_request_id,equipment_id,quantity_requested,status,equipment(name)")
+      .eq("event_id", event.event_id).is("technical_request_id", null)
+      .order("request_datetime", { ascending: false }).order("equip_request_id", { ascending: false })),
+  ]);
+  const byName = (left, right) => left.name.localeCompare(right.name) || left.equipmentId - right.equipmentId;
+  return [
+    ...headers.map((request) => ({
+      requestId: request.technical_request_id,
       status: request.status,
       supportRequired: null,
-      equipment: [item(request, request.quantity_requested)],
+      createdAt: request.created_at,
+      decidedAt: request.decided_at,
+      equipment: (request.equipment_request || []).map((line) => item(line, line.quantity_requested)).sort(byName),
     })),
-  };
+    ...loose.map((line) => ({
+      requestId: null,
+      status: line.status,
+      supportRequired: null,
+      createdAt: null,
+      decidedAt: null,
+      equipment: [item(line, line.quantity_requested)],
+    })),
+  ];
 }
 
 async function readSafety(event) {
@@ -206,4 +232,10 @@ async function findOrganiserArrangements(event, clock = () => new Date()) {
   return { venues, technical, safety };
 }
 
-module.exports = { findOrganiserArrangements };
+// SPM-286 AC5: the assigned coordinator's view of the event's technical
+// requests. Only this section: venues and safety stay organiser-only (SPM-199 AC9).
+async function findTechnicalArrangements(event) {
+  return { technical: await safely(() => readTechnical(event)) };
+}
+
+module.exports = { findOrganiserArrangements, findTechnicalArrangements };
