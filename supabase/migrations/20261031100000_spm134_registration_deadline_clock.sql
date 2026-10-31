@@ -1,10 +1,24 @@
 -- SPM-134 corrective migration. Existing applied migrations stay intact.
 -- Evaluate admission using fresh database time after waiting row locks.
 -- Keep one availability rule; Discovery retains its computed-field signature.
+-- Preserve SPM-163 offer reservations and eligible queue priority when installed.
+-- Ordered after the known 20261031080611 waitlist correction.
 -- No backfill, business-row changes or HTTP contract changes.
 BEGIN;
 
-CREATE FUNCTION public._event_registration_availability_at(p_event public.event, p_now timestamptz)
+-- Standalone SPM-134 has no waitlist tables. If SPM-163 is installed, both
+-- mutation helpers must be available before replacing shared entry points.
+DO $waitlist_dependencies$
+BEGIN
+  IF to_regclass('public.waitlist_offer') IS NOT NULL
+     AND (to_regprocedure('public._expire_overdue_waitlist_offers(integer)') IS NULL
+       OR to_regprocedure('public._offer_freed_places(integer)') IS NULL) THEN
+    RAISE EXCEPTION 'SPM134_WAITLIST_DEPENDENCIES_MISSING';
+  END IF;
+END;
+$waitlist_dependencies$;
+
+CREATE OR REPLACE FUNCTION public._event_registration_availability_at(p_event public.event, p_now timestamptz)
 RETURNS text
 LANGUAGE plpgsql
 STABLE
@@ -14,6 +28,8 @@ AS $$
 DECLARE
   v_venue_capacity integer;
   v_registered integer;
+  v_offered integer := 0;
+  v_waiting integer := 0;
 BEGIN
   IF p_event.status IS DISTINCT FROM 'CONFIRMED' THEN
     RETURN 'CLOSED';
@@ -36,7 +52,31 @@ BEGIN
   SELECT count(*) INTO v_registered
     FROM public.registration
    WHERE event_id = p_event.event_id AND registration_status = 'REGISTERED';
-  IF v_registered >= LEAST(v_venue_capacity, COALESCE(p_event.registration_capacity, v_venue_capacity)) THEN
+  -- Preserve SPM-163's reserved places and queue priority. Use the same
+  -- explicit post-lock time for offer expiry and admission. An overdue OPEN
+  -- offer holds no place and its departing attendee is not counted as queued.
+  IF to_regclass('public.waitlist_offer') IS NOT NULL THEN
+    SELECT count(*) INTO v_offered
+      FROM public.waitlist_offer AS o
+      JOIN public.registration AS r ON r.registration_id = o.registration_id
+     WHERE r.event_id = p_event.event_id
+       AND o.state = 'OPEN' AND o.expires_at > p_now;
+
+    -- The registration window is already open above. Offers can still be
+    -- made only before event start (also capped by registration close).
+    IF p_event.start_datetime > p_now THEN
+      SELECT count(*) INTO v_waiting
+        FROM public.registration AS r
+        JOIN public."user" AS u ON u.user_id = r.attendee_id AND u.is_active
+       WHERE r.event_id = p_event.event_id AND r.registration_status = 'WAITLISTED'
+         AND NOT EXISTS (
+           SELECT 1 FROM public.waitlist_offer AS o
+            WHERE o.registration_id = r.registration_id AND o.state = 'OPEN'
+         );
+    END IF;
+  END IF;
+
+  IF v_registered + v_offered + v_waiting >= LEAST(v_venue_capacity, COALESCE(p_event.registration_capacity, v_venue_capacity)) THEN
     RETURN 'FULL_WAITLIST';
   END IF;
   RETURN 'OPEN';
@@ -110,6 +150,13 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'ALREADY_REGISTERED';
   ELSIF v_existing.registration_status = 'WAITLISTED' THEN
     RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'ALREADY_WAITLISTED';
+  END IF;
+
+  -- Keep SPM-163's expiry/allocation work in this transaction under the
+  -- event lock. Standalone SPM-134 does not require the waitlist module.
+  IF to_regclass('public.waitlist_offer') IS NOT NULL THEN
+    PERFORM public._expire_overdue_waitlist_offers(p_event_id);
+    PERFORM public._offer_freed_places(p_event_id);
   END IF;
 
   -- All potentially waiting row locks are held. Use a fresh database clock,

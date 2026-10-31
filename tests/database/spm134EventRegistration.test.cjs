@@ -639,3 +639,112 @@ test("[TC-REG-013] should_keep_the_submitted_answers_when_the_attendee_profile_c
   const stored = await one("SELECT dietary_restrictions, accessibility_requirements FROM public.registration WHERE registration_id = $1", [registration.registration_id]);
   assert.deepEqual(stored, { dietary_restrictions: "Vegetarian, no peanuts", accessibility_requirements: "Step-free access" });
 });
+
+// Reduced waitlist integration surface: the real timed admission functions
+// run against offer rows; private mutation helpers record delegation only.
+// The complete SPM-163/147 suites separately exercise actual helper effects.
+const withWaitlist = async operation => {
+  await db.exec('BEGIN');
+  try {
+    await db.exec(`
+      CREATE TABLE public.waitlist_offer (
+        registration_id integer REFERENCES public.registration(registration_id),
+        state text NOT NULL, expires_at timestamptz NOT NULL
+      );
+      CREATE TABLE public.compatibility_calls(kind text);
+      CREATE FUNCTION public._expire_overdue_waitlist_offers(integer) RETURNS integer
+        LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.compatibility_calls VALUES('EXPIRE'); RETURN 0; END $$;
+      CREATE FUNCTION public._offer_freed_places(integer) RETURNS integer
+        LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.compatibility_calls VALUES('OFFER'); RETURN 0; END $$;
+    `);
+    await operation();
+  } finally { await db.exec('ROLLBACK'); }
+};
+const offeredPlace = async (eventId, attendee, expires = "1 hour") => {
+  const registrationId = await seed(attendee, eventId, 'WAITLISTED');
+  await db.query("INSERT INTO public.waitlist_offer VALUES($1,'OPEN',clock_timestamp()+$2::interval)", [registrationId,expires]);
+  return registrationId;
+};
+const refusesFullWithWaitlist = async eventId => {
+  assert.equal(await availabilityOf(eventId),'FULL_WAITLIST');
+  await db.exec('SAVEPOINT admission');
+  await assert.rejects(register(ATTENDEE,eventId),hasCode('REGISTRATION_FULL'));
+  await db.exec('ROLLBACK TO SAVEPOINT admission');
+  assert.equal(await count("SELECT count(*)::int n FROM public.registration WHERE event_id=$1 AND registration_status='REGISTERED'",[eventId]),0);
+};
+
+test('[SPM-134/SPM-163] eligible queue keeps its place before direct registration', async () => withWaitlist(async () => {
+  const eventId = await createEvent({registration_capacity:1});
+  await seed(OTHER_ATTENDEE,eventId,'WAITLISTED');
+  await refusesFullWithWaitlist(eventId);
+}));
+test('[SPM-134/SPM-163] an active offer reserves a place without double counting its attendee', async () => withWaitlist(async () => {
+  const eventId = await createEvent({registration_capacity:1});
+  await offeredPlace(eventId,OTHER_ATTENDEE);
+  await refusesFullWithWaitlist(eventId);
+  await db.query('UPDATE public.event SET registration_capacity=2 WHERE event_id=$1',[eventId]);
+  assert.equal(await availabilityOf(eventId),'OPEN');
+}));
+test('[SPM-134/SPM-163] registered and offered places both consume the limit', async () => withWaitlist(async () => {
+  const eventId = await createEvent({registration_capacity:2});
+  await seed(OTHER_ATTENDEE,eventId,'REGISTERED');
+  await offeredPlace(eventId,THIRD_ATTENDEE);
+  assert.equal(await availabilityOf(eventId),'FULL_WAITLIST');
+}));
+test('[SPM-134/SPM-163] overdue offers and inactive queued attendees do not hold places', async () => withWaitlist(async () => {
+  const eventId = await createEvent({registration_capacity:1});
+  await offeredPlace(eventId,OTHER_ATTENDEE,'-1 second');
+  await seed(INACTIVE_ATTENDEE,eventId,'WAITLISTED');
+  assert.equal(await availabilityOf(eventId),'OPEN');
+}));
+test('[SPM-134/SPM-163] admission delegates expiry then allocation before writing registration', async () => withWaitlist(async () => {
+  const eventId = await createEvent({registration_capacity:2});
+  await seed(OTHER_ATTENDEE,eventId,'WAITLISTED');
+  const result = await register(ATTENDEE,eventId);
+  assert.equal(result.registration.registration_status,'REGISTERED');
+  assert.deepEqual((await db.query('SELECT kind FROM public.compatibility_calls')).rows.map(r=>r.kind),['EXPIRE','OFFER']);
+}));
+test('[SPM-134/SPM-163] helper work cannot use a clock captured before it crosses closing', async () => withWaitlist(async () => {
+  const eventId = await createEvent();
+  await db.query("UPDATE public.event SET registration_close_at=clock_timestamp()+interval '100 milliseconds' WHERE event_id=$1",[eventId]);
+  await db.exec(`CREATE OR REPLACE FUNCTION public._offer_freed_places(integer) RETURNS integer
+    LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.25); RETURN 0; END $$;`);
+  await db.exec('SAVEPOINT admission');
+  await assert.rejects(register(ATTENDEE,eventId),hasCode('REGISTRATION_CLOSED'));
+  await db.exec('ROLLBACK TO SAVEPOINT admission');
+  assert.equal(await count('SELECT count(*)::int n FROM public.registration WHERE event_id=$1',[eventId]),0);
+}));
+test('[SPM-134/SPM-163] committed replay remains valid after remaining places are offered', async () => withWaitlist(async () => {
+  const eventId = await createEvent({registration_capacity:2});
+  const first = await register(ATTENDEE,eventId,null,null,'compat-replay','compat-hash');
+  await offeredPlace(eventId,OTHER_ATTENDEE);
+  assert.equal(await availabilityOf(eventId),'FULL_WAITLIST');
+  const replay = await register(ATTENDEE,eventId,null,null,'compat-replay','compat-hash');
+  assert.equal(replay.registration.registration_id,first.registration.registration_id);
+  assert.equal(replay.replayed,true);
+  assert.equal(await count('SELECT count(*)::int n FROM public.compatibility_calls'),2);
+}));
+
+test('[SPM-134/SPM-163] migration can replace shared functions after waitlist installation', async () => withWaitlist(async () => {
+  // Execute the reviewed migration in this fixture transaction, without its
+  // outer transaction delimiters, then verify the combined installed rule.
+  const sql = readBySuffix('_spm134_registration_deadline_clock.sql')
+    .replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,'');
+  await db.exec(sql);
+  const eventId = await createEvent({registration_capacity:1});
+  await offeredPlace(eventId,OTHER_ATTENDEE);
+  await refusesFullWithWaitlist(eventId);
+}));
+test('[SPM-134/SPM-163] partial waitlist installation refuses migration before replacing entry points', async () => {
+  await db.exec('BEGIN');
+  try {
+    await db.exec('CREATE TABLE public.waitlist_offer(registration_id integer,state text,expires_at timestamptz)');
+    const before = (await one("SELECT prosrc FROM pg_proc WHERE oid='public.register_for_event(integer,integer,text,text,text,text)'::regprocedure")).prosrc;
+    await db.exec('SAVEPOINT migration_attempt');
+    const sql = readBySuffix('_spm134_registration_deadline_clock.sql')
+      .replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,'');
+    await assert.rejects(db.exec(sql),/SPM134_WAITLIST_DEPENDENCIES_MISSING/);
+    await db.exec('ROLLBACK TO SAVEPOINT migration_attempt');
+    assert.equal((await one("SELECT prosrc FROM pg_proc WHERE oid='public.register_for_event(integer,integer,text,text,text,text)'::regprocedure")).prosrc,before);
+  } finally { await db.exec('ROLLBACK'); }
+});
