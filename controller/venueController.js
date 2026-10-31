@@ -9,7 +9,7 @@ const {
 } = require("../validators/venueBookingValidator");
 const { formatRequestId } = require("../model/eventModel");
 const { EVENT_RELATIONSHIP, EVENT_TYPE_LABELS, HISTORY_AUDIENCE, VENUE_STAFF_HISTORY_FIELDS } = require("../config/eventConstants");
-const { validateAvailabilityQuery } = require("../validators/venueAvailabilityValidator");
+const { validateAvailabilityQuery, validateRequestAvailabilityQuery } = require("../validators/venueAvailabilityValidator");
 const {
   validateVenueCreate,
   validateVenueUpdate,
@@ -18,6 +18,7 @@ const {
   validateVenueDetails,
   validateCatalogueQuery,
   validateVenueOptionsQuery,
+  validateRequestVenueOptionsQuery,
   hasErrors,
   MESSAGES,
 } = require("../validators/venueValidator");
@@ -475,6 +476,30 @@ const getEventVenueAvailability = async (req, res, next) => {
     return res.status(200).json(await venueModel.getVenueAvailability(
       { ...query, excludeEventId: req.visibleEvent.eventId }, req.user
     ));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+// GET /api/venues/options (SPM-76): the organiser's form values come in the query.
+const getRequestVenueOptions = async (req, res, next) => {
+  const { need, options, fields } = validateRequestVenueOptionsQuery(req.query);
+  if (hasErrors(fields)) return validationFailed(res, fields);
+  try {
+    return res.status(200).json(await venueModel.getRequestVenueOptions(need, req.user, options));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+// GET /api/venues/options/:venueId/availability (SPM-76).
+const getRequestVenueAvailability = async (req, res, next) => {
+  const venueId = parseVenueId(req.params.venueId);
+  if (!venueId) return venueNotFound(res);
+  const { query, fields } = validateRequestAvailabilityQuery(req.query);
+  if (fields) return validationFailed(res, fields);
+  try {
+    return res.status(200).json(await venueModel.getRequestVenueAvailability(venueId, query, req.user));
   } catch (err) {
     return handleError(err, res, next);
   }
@@ -1016,6 +1041,8 @@ module.exports = {
   listEventVenueBookings,
   getEventVenueAvailability,
   getEventVenueOptions,
+  getRequestVenueOptions,
+  getRequestVenueAvailability,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,
   suggestEventVenue,

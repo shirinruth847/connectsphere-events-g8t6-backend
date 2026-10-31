@@ -45,4 +45,22 @@ const validateAvailabilityQuery = (query) => {
   return { query: { from, to, venueIds, check } };
 };
 
-module.exports = { validateAvailabilityQuery, MAX_RANGE_DAYS, MAX_VENUES };
+// GET /api/venues/options/:venueId/availability?start=&end= (SPM-76): the
+// organiser's requested time at one venue, named by the path.
+const validateRequestAvailabilityQuery = (query) => {
+  const fields = {};
+  for (const key of Object.keys(query)) {
+    if (key !== "start" && key !== "end") fields[key] = "This parameter is not supported.";
+  }
+  const start = parseDate(Array.isArray(query.start) ? null : query.start);
+  const end = parseDate(Array.isArray(query.end) ? null : query.end);
+  if (!start) fields.start = DATE_MESSAGE;
+  if (!end) fields.end = DATE_MESSAGE;
+  if (start && end && (end <= start || end - start > MAX_RANGE_DAYS * DAY_MS)) {
+    fields.end = `The requested time must end after it starts and span at most ${MAX_RANGE_DAYS} days.`;
+  }
+  if (Object.keys(fields).length) return { fields };
+  return { query: { start, end } };
+};
+
+module.exports = { validateAvailabilityQuery, validateRequestAvailabilityQuery, MAX_RANGE_DAYS, MAX_VENUES };

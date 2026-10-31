@@ -6,6 +6,8 @@ const { validatePagination, validateCursorPagination } = require("../middleware/
 const { USER_ROLES } = require("../config/roles");
 const {
   getVenueCatalogue,
+  getRequestVenueOptions,
+  getRequestVenueAvailability,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,
   listManagedVenues,
@@ -53,9 +55,16 @@ const imageBody = express.raw({ type: PHOTO_TYPES, limit: "2mb" });
 // inside each event instead (GET /api/events/:id/venue-options, SPM-72/74).
 router.get("/", ...venueStaffOnly, getVenueCatalogue);
 
-// Read-only photos of available venues for coordinators and Leads choosing a
-// venue in the event's venue section (SPM-72/74). Declared before /:venueId.
-const venueChoosers = [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD)];
+// The organiser's venue step (SPM-76): available venues checked against the
+// unsaved request, and one chosen venue checked over its requested time. Both
+// say only what kind of entry is in the way, never when or whose.
+// Read-only photos of available venues serve everyone who chooses venues:
+// organisers here, coordinators and Leads in the event's venue section
+// (SPM-72/74). Declared before /:venueId.
+const organiserOnly = [requireAuth, requireRole(USER_ROLES.ORGANISER)];
+router.get("/options", ...organiserOnly, getRequestVenueOptions);
+router.get("/options/:venueId/availability", ...organiserOnly, getRequestVenueAvailability);
+const venueChoosers = [requireAuth, requireRole(USER_ROLES.ORGANISER, USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD)];
 router.get("/options/:venueId/photos", ...venueChoosers, listSelectableVenuePhotos);
 router.get("/options/:venueId/photos/:photoId", ...venueChoosers, getSelectableVenuePhotoImage);
 

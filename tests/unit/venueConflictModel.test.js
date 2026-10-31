@@ -262,6 +262,12 @@ describe("operating hours", () => {
     const warning = operatingHoursWarning({ start: at("21:00"), end: at("09:00", "2026-11-05") }, "08:00-22:00");
     expect(warning.outside).toEqual([{ start: at("22:00").toISOString(), end: at("08:00", "2026-11-05").toISOString() }]);
   });
+
+  test("[SPM-76] a range across several nights warns once, without listing each night", () => {
+    const warning = operatingHoursWarning({ start: at("09:00"), end: at("18:00", "2026-11-07") }, "08:00-22:00");
+    expect(warning.outside).toHaveLength(3);
+    expect(warning.message).toBe("Parts of the occupied time are outside operating hours (08:00-22:00).");
+  });
 });
 
 // SPM-74 / SPM-72 AC6: a multi-day event occupies the venue as one block from
