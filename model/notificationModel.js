@@ -41,8 +41,12 @@ const decodeCursor = (value) => {
   return decoded;
 };
 
-const targetPageFor = (role) =>
-  role === USER_ROLES.ATTENDEE ? NOTIFICATION_TARGET_PAGES.MY_EVENTS : NOTIFICATION_TARGET_PAGES.EVENT_WORKSPACE;
+const TARGET_PAGE_BY_ROLE = Object.freeze({
+  [USER_ROLES.ATTENDEE]: NOTIFICATION_TARGET_PAGES.MY_EVENTS,
+  [USER_ROLES.TECH_SUPPORT]: NOTIFICATION_TARGET_PAGES.TECHNICAL_REQUESTS,
+});
+
+const targetPageFor = (role) => TARGET_PAGE_BY_ROLE[role] ?? NOTIFICATION_TARGET_PAGES.EVENT_WORKSPACE;
 
 // Only the reader's own copy: no other recipients, no staff-only fields.
 const toNotificationItem = (row, role) => ({

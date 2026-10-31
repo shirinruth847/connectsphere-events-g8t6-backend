@@ -1,6 +1,6 @@
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/userModel");
-jest.mock("../../model/organiserArrangementModel", () => ({ findOrganiserArrangements: jest.fn() }));
+jest.mock("../../model/organiserArrangementModel", () => ({ findOrganiserArrangements: jest.fn(), findTechnicalArrangements: jest.fn() }));
 jest.mock("../../model/eventModel", () => ({
   ...jest.requireActual("../../model/eventModel"), findVisibleEvent: jest.fn(),
 }));
@@ -37,7 +37,6 @@ test("AC9: unauthenticated requests cannot load events or linked arrangements", 
 
 test.each([
   ["unrelated organiser", "ORGANISER", 99, []],
-  ["assigned coordinator", "COORDINATOR", 21, []],
   ["other coordinator", "COORDINATOR", 22, []],
   ["attendee", "ATTENDEE", 11, []],
   ["venue staff", "VENUE_STAFF", 11, []],
@@ -48,6 +47,18 @@ test.each([
   const res = await get();
   expect(res.status).toBe(404);
   expect(res.body).toEqual({ code: "EVENT_NOT_FOUND", error: "Event request not found." });
+  expect(arrangements.findOrganiserArrangements).not.toHaveBeenCalled();
+});
+
+test("[SPM-286-AC5] the assigned coordinator reads the technical section only", async () => {
+  signIn("COORDINATOR", 21);
+  const technical = { status: "READY", supportStatus: "READY", requirements: [], requests: [{ requestId: 6, status: "APPROVED", equipment: [] }] };
+  arrangements.findTechnicalArrangements.mockResolvedValue({ technical });
+  const res = await get();
+  expect(res.status).toBe(200);
+  expect(res.headers["cache-control"]).toBe("no-store");
+  expect(res.body).toEqual({ arrangements: { technical } });
+  expect(arrangements.findTechnicalArrangements).toHaveBeenCalledWith(row);
   expect(arrangements.findOrganiserArrangements).not.toHaveBeenCalled();
 });
 
