@@ -1,8 +1,11 @@
 jest.mock("../../config/supabase", () => ({ from: jest.fn() }));
 jest.mock("../../model/venueDetailModel", () => ({ getVenueDetailsByIds: jest.fn() }));
+jest.mock("../../model/venueCalendarModel", () => ({ findCalendarEntries: jest.fn() }));
 
 const supabase = require("../../config/supabase");
 const venueModel = require("../../model/venueModel");
+const venueDetailModel = require("../../model/venueDetailModel");
+const venueCalendarModel = require("../../model/venueCalendarModel");
 
 // A chainable stand-in for a supabase-js query that resolves to `result` and
 // records every filter call.
@@ -12,7 +15,7 @@ const queryReturning = (result) => {
     calls,
     then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
   };
-  for (const method of ["select", "eq", "lt", "gt", "order", "limit"]) {
+  for (const method of ["select", "eq", "in", "lt", "gt", "order", "limit"]) {
     query[method] = jest.fn((...args) => {
       calls.push([method, ...args]);
       return query;
@@ -74,12 +77,16 @@ describe("findVenueBookings", () => {
     }));
     const list = queryReturning({ data: rows, error: null });
     const pending = queryReturning({ count: 3, error: null });
-    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(pending);
+    const approved = queryReturning({ count: 5, error: null });
+    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(pending).mockReturnValueOnce(approved);
 
     const result = await venueModel.findVenueBookings({ status: "PENDING", venueId: 45, eventId: null, from: null, to: null, limit: 2 });
 
     expect(result.hasMore).toBe(true);
     expect(result.pendingCount).toBe(3);
+    expect(result.approvedCount).toBe(5);
+    expect(pending.eq).toHaveBeenCalledWith("status", "PENDING");
+    expect(approved.eq).toHaveBeenCalledWith("status", "APPROVED");
     expect(result.bookings).toHaveLength(2);
     expect(result.bookings[0]).toEqual({
       bookingId: 1,
@@ -104,7 +111,7 @@ describe("findVenueBookings", () => {
 
   test("[SPM-181-AC5] should_filter_by_overlap_with_the_requested_day", async () => {
     const list = queryReturning({ data: [], error: null });
-    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(queryReturning({ count: 0, error: null }));
+    supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(queryReturning({ count: 0, error: null })).mockReturnValueOnce(queryReturning({ count: 0, error: null }));
 
     await venueModel.findVenueBookings({ status: null, venueId: null, eventId: 442, from: "A", to: "B", limit: 100 });
 
@@ -114,6 +121,7 @@ describe("findVenueBookings", () => {
   test("should_throw_database_errors_instead_of_returning_an_empty_list", async () => {
     supabase.from
       .mockReturnValueOnce(queryReturning({ data: null, error: { code: "42P01" } }))
+      .mockReturnValueOnce(queryReturning({ count: 0, error: null }))
       .mockReturnValueOnce(queryReturning({ count: 0, error: null }));
 
     await expect(venueModel.findVenueBookings({ limit: 10 })).rejects.toEqual({ code: "42P01" });
@@ -125,11 +133,18 @@ describe("findVenueBooking", () => {
     supabase.from
       .mockReturnValueOnce(queryReturning({ data: { event_id: 442 }, error: null }))
       .mockReturnValueOnce(queryReturning({ data: event, error: null }))
-      .mockReturnValueOnce(queryReturning({ data: bookings, error: null }));
+      .mockReturnValueOnce(queryReturning({ data: bookings, error: null }))
+      // The venues and nearby active bookings for the per-booking checks (SPM-186).
+      .mockReturnValueOnce(queryReturning({ data: [], error: null }))
+      .mockReturnValueOnce(queryReturning({ data: [], error: null }))
+      // SPM-195: the event's open incidents.
+      .mockReturnValueOnce(queryReturning({ data: [], error: null }));
+    venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
   };
 
   test("[SPM-181-AC2][SPM-181-AC3] should_return_requirements_event_details_and_sibling_bookings", async () => {
     mockEventContext(eventRow(), [bookingRow(110, "PENDING", 45, "Hall A"), bookingRow(112, "REJECTED", 47, "Room C")]);
+    venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([["45", { setupMinutes: 30, turnaroundMinutes: 45 }]]));
 
     const result = await venueModel.findVenueBooking(110);
 
@@ -138,8 +153,11 @@ describe("findVenueBooking", () => {
       requiredFacilities: ["Stage"],
       accessibilityRequirements: [],
       layoutType: "Theater",
-      venue: { venueId: 45, name: "Hall A", maxCapacity: 300, setupTurnaroundMinutes: 30 },
+      // SPM-186: setup and turnaround come from MongoDB, not the deprecated column.
+      venue: { venueId: 45, name: "Hall A", maxCapacity: 300, setupMinutes: 30, turnaroundMinutes: 45, detailsAvailable: true },
     });
+    expect(result.booking.venue).not.toHaveProperty("setupTurnaroundMinutes");
+    expect(venueDetailModel.getVenueDetailsByIds).toHaveBeenCalledWith([45, 47]);
     expect(result.event).toMatchObject({
       requestId: "REQ-000442",
       eventTypeLabel: "Seminar",
@@ -152,6 +170,15 @@ describe("findVenueBooking", () => {
       expect.objectContaining({ bookingId: 112, venueName: "Room C", status: "REJECTED", statusLabel: "Rejected" }),
     ]);
     expect(result.otherBookings[0]).not.toHaveProperty("requiredFacilities");
+  });
+
+  test("[SPM-186] should_report_setup_and_turnaround_as_unknown_when_mongodb_is_down", async () => {
+    mockEventContext(eventRow(), [bookingRow(110, "PENDING", 45, "Hall A")]);
+    venueDetailModel.getVenueDetailsByIds.mockRejectedValue(Object.assign(new Error("down"), { code: "ECONNREFUSED" }));
+
+    const result = await venueModel.findVenueBooking(110);
+
+    expect(result.booking.venue).toMatchObject({ setupMinutes: null, turnaroundMinutes: null, detailsAvailable: false });
   });
 
   test("should_return_null_for_a_missing_booking", async () => {

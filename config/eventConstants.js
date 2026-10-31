@@ -195,6 +195,18 @@ const SAFETY_REVIEW_HISTORY_FIELDS = Object.freeze([
   "equipmentRequirements",
 ]);
 
+// The event history Venue Staff read (SPM-186, Master 4.2 "relevant portion"):
+// venue entries (VENUE_*) and changes to what a venue booking depends on.
+const VENUE_STAFF_HISTORY_FIELDS = Object.freeze([
+  "startDatetime",
+  "endDatetime",
+  "expectedAttendance",
+  "preferredLayoutType",
+  "accessibilityNeeds",
+  "venuePreferences",
+  "venueBookings",
+]);
+
 // Values of the event_type check constraint (SPM-181) and their display labels.
 const EVENT_TYPE_LABELS = Object.freeze({
   CONFERENCE: "Conference",
@@ -232,6 +244,7 @@ module.exports = {
   MIN_LEAD_TIME_HOURS,
   EVENT_RELATIONSHIP,
   HISTORY_AUDIENCE,
+  VENUE_STAFF_HISTORY_FIELDS,
   EVENT_FIELD_GROUPS,
   OWNER_DRAFT_FIELDS,
   COORDINATOR_EDITABLE_STATUSES,

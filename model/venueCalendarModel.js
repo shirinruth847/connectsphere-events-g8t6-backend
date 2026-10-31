@@ -1,4 +1,8 @@
+const { ObjectId } = require("mongodb");
 const { getMongoDb } = require("../config/mongodb");
+
+const DUPLICATE_KEY = 11000;
+const OBJECT_ID = /^[0-9a-f]{24}$/;
 
 // MongoDB venue_calendar access: tentative holds and operational blocks
 // (Master 5.4.3, 5.4.4, 6.4, T27). Field names follow
@@ -17,8 +21,14 @@ const toEntry = (document) => ({
   eventId: document.eventId ?? null,
   label: document.label ?? null,
   holdExpiresAt: document.holdExpiresAt ?? null,
+  extendedAt: document.extendedAt ?? null,
+  convertedBookingId: document.convertedBookingId ?? null,
   reason: document.reason ?? null,
   note: document.note ?? null,
+  version: document.version ?? null,
+  writeRecovery: document.writeRecovery ?? null,
+  createdAt: document.createdAt ?? null,
+  updatedAt: document.updatedAt ?? null,
 });
 
 // Every hold and block whose occupied range overlaps [from, to), whatever its
@@ -54,4 +64,270 @@ const findEventHolds = async (eventId) => {
   return documents.map(toEntry);
 };
 
-module.exports = { findCalendarEntries, findEventHolds };
+// ---------- operational blocks (SPM-195) ----------
+// Written only by venueModel.js while it holds the venue lock (Master 7.4).
+
+const calendar = async () => (await getMongoDb()).collection("venue_calendar");
+
+const findCalendarEntry = async (entryId, { maxTimeMS, readPreference } = {}) => {
+  if (!OBJECT_ID.test(entryId || "")) return null;
+  const document = await (await calendar()).findOne({ _id: new ObjectId(entryId) }, { ...(maxTimeMS ? { maxTimeMS } : {}), ...(readPreference ? { readPreference } : {}) });
+  return document ? toEntry(document) : null;
+};
+
+// The venue's blocks still in effect or yet to come (end after `from`), newest
+// start last; lifted ones are included so the venue page can show them. At most
+// `limit` are returned; hasMore says whether later ones were left out.
+const findVenueBlocks = async (venueId, from, { limit = 200 } = {}) => {
+  const documents = await (await calendar())
+    .find({ venueId: String(venueId), type: "BLOCK", end: { $gt: new Date(from) } })
+    .sort({ start: 1, _id: 1 })
+    .limit(limit + 1)
+    .toArray();
+  return { blocks: documents.slice(0, limit).map(toEntry), hasMore: documents.length > limit };
+};
+
+// Holds and blocks by ID, for incident cards and restorability.
+const findEntriesByIds = async (entryIds) => {
+  const ids = [...new Set(entryIds)].filter((id) => OBJECT_ID.test(id || ""));
+  if (!ids.length) return new Map();
+  const documents = await (await calendar())
+    .find({ _id: { $in: ids.map((id) => new ObjectId(id)) } })
+    .toArray();
+  return new Map(documents.map((document) => [document._id.toString(), toEntry(document)]));
+};
+
+// A block has no setup or turnaround time, so its occupied range is its
+// interval (T4). The ID is chosen by the caller, so a retried request that
+// already wrote its document finds it instead of writing a second one: the
+// existing entry is returned with `existing: true`.
+const insertBlock = async ({ blockId, venueId, reason, note, start, end, createdBy, writeToken }) => {
+  const document = {
+    _id: new ObjectId(blockId),
+    venueId: String(venueId),
+    type: "BLOCK",
+    start: new Date(start),
+    end: new Date(end),
+    occupiedStart: new Date(start),
+    occupiedEnd: new Date(end),
+    status: "ACTIVE",
+    eventId: null,
+    reason,
+    note,
+    createdBy,
+    writeToken,
+    createdAt: new Date(),
+    updatedAt: null,
+    version: 1,
+  };
+  const collection = await calendar();
+  try {
+    await collection.insertOne(document);
+    return { ...toEntry(document), existing: false };
+  } catch (error) {
+    if (error?.code !== DUPLICATE_KEY) throw error;
+    const current = await collection.findOne({ _id: document._id });
+    if (!current) throw error;
+    return { ...toEntry(current), existing: true };
+  }
+};
+
+// Shortens or lifts an active block. Matches only the version the caller read
+// under the venue lock; returns the updated entry, or null when nothing matched.
+const updateBlock = async ({ blockId, venueId, expectedVersion, start, end, lift = false, writeToken, writeRecovery }) => {
+  const set = lift
+    ? { status: "LIFTED", updatedAt: new Date() }
+    : {
+      start: new Date(start),
+      end: new Date(end),
+      occupiedStart: new Date(start),
+      occupiedEnd: new Date(end),
+      updatedAt: new Date(),
+    };
+  const document = await (await calendar()).findOneAndUpdate(
+    { _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", status: "ACTIVE", version: expectedVersion },
+    { $set: { ...set, writeToken, ...(writeRecovery ? { writeRecovery } : {}) }, $inc: { version: 1 } },
+    { returnDocument: "after" }
+  );
+  return document ? toEntry(document) : null;
+};
+
+// Undo steps, run only when the PostgreSQL side certainly did not commit
+// (venueModel.withVenueLockTransaction). Each matches the exact document state
+// the operation left, so nothing written since is touched.
+const deleteBlock = async ({ blockId, venueId, writeToken }) => {
+  await (await calendar()).deleteOne({
+    _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", status: "ACTIVE", version: 1, writeToken,
+  });
+};
+
+const revertBlock = async ({ blockId, venueId, version, start, end, writeToken }) => {
+  await (await calendar()).updateOne(
+    { _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", version, writeToken },
+    {
+      $set: {
+        status: "ACTIVE",
+        start: new Date(start),
+        end: new Date(end),
+        occupiedStart: new Date(start),
+        occupiedEnd: new Date(end),
+        updatedAt: new Date(),
+      },
+      $unset: { writeRecovery: "" },
+      $inc: { version: 1 },
+    }
+  );
+};
+
+const ownsBlockWrite = async ({ blockId, venueId, writeToken }) =>
+  Boolean(await (await calendar()).findOne({ _id: new ObjectId(blockId), venueId: String(venueId), type: "BLOCK", writeToken }, { projection: { _id: 1 }, readPreference: "primary", maxTimeMS: 2000 }));
+
+// Remove only this attempt's recovery metadata, after PostgreSQL commits.
+const clearBlockRecovery = async ({ blockId, venueId, writeToken }) => {
+  await (await calendar()).updateOne(
+    { _id: new ObjectId(blockId), venueId: String(venueId), writeToken },
+    { $unset: { writeRecovery: "" } }
+  );
+};
+
+// ---------- tentative holds (SPM-190) ----------
+// Written only by venueModel.js while it holds the venue lock (Master 7.4),
+// except the expiry job's status change, which only records what every read
+// already treats as expired (Master 5.4.3).
+
+const insertHold = async ({ holdId, venueId, eventId, label, start, end, occupiedStart, occupiedEnd, holdExpiresAt, createdBy, writeToken }) => {
+  const document = {
+    _id: new ObjectId(holdId),
+    venueId: String(venueId),
+    type: "HOLD",
+    start: new Date(start),
+    end: new Date(end),
+    occupiedStart: new Date(occupiedStart),
+    occupiedEnd: new Date(occupiedEnd),
+    status: "ACTIVE",
+    eventId,
+    label,
+    holdExpiresAt: new Date(holdExpiresAt),
+    extendedAt: null,
+    createdBy,
+    writeToken,
+    createdAt: new Date(),
+    updatedAt: null,
+    version: 1,
+  };
+  const collection = await calendar();
+  try {
+    await collection.insertOne(document);
+    return { ...toEntry(document), existing: false };
+  } catch (error) {
+    if (error?.code !== DUPLICATE_KEY) throw error;
+    const current = await collection.findOne({ _id: document._id });
+    if (!current) throw error;
+    return { ...toEntry(current), existing: true };
+  }
+};
+
+// Internal placement-recovery read. Write identity never enters API views.
+const findHoldPlacementWrite = async (holdId) => {
+  const document = await (await calendar()).findOne(
+    { _id: new ObjectId(holdId) },
+    { readPreference: "primary", maxTimeMS: 3000 }
+  );
+  return document ? { ...toEntry(document), createdBy: document.createdBy, writeToken: document.writeToken } : null;
+};
+
+// Extends (once) or releases an active hold read under the venue lock; matches
+// only that version. Returns the updated entry, or null when nothing matched.
+const changeHold = async ({ holdId, venueId, expectedVersion, holdExpiresAt = null, release = false, writeToken }) => {
+  const filter = { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "ACTIVE", version: expectedVersion };
+  const set = release
+    ? { status: "RELEASED", updatedAt: new Date(), writeToken }
+    : { holdExpiresAt: new Date(holdExpiresAt), extendedAt: new Date(), updatedAt: new Date(), writeToken };
+  if (!release) filter.extendedAt = null;
+  const document = await (await calendar()).findOneAndUpdate(filter, { $set: set, $inc: { version: 1 } }, { returnDocument: "after" });
+  return document ? toEntry(document) : null;
+};
+
+// Undo steps, run only when PostgreSQL certainly did not commit; each matches
+// the exact state this attempt left (writeToken), so nothing newer is touched.
+const deleteHold = async ({ holdId, venueId, writeToken }) => {
+  await (await calendar()).deleteOne({
+    _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "ACTIVE", version: 1, writeToken,
+  });
+};
+
+const revertHold = async ({ holdId, venueId, version, holdExpiresAt, extendedAt, writeToken }) => {
+  await (await calendar()).updateOne(
+    { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", version, writeToken },
+    {
+      $set: { status: "ACTIVE", holdExpiresAt: new Date(holdExpiresAt), extendedAt: extendedAt ? new Date(extendedAt) : null, updatedAt: new Date() },
+      $inc: { version: 1 },
+    }
+  );
+};
+
+const ownsHoldWrite = async ({ holdId, venueId, writeToken }) =>
+  Boolean(await (await calendar()).findOne(
+    { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", writeToken },
+    { projection: { _id: 1 }, readPreference: "primary", maxTimeMS: 2000 }
+  ));
+
+// Active holds expiring by `until`, soonest first, for the expiry job.
+const findHoldsExpiringBy = async (until, { limit = 100, now } = {}) => {
+  const documents = await (await calendar())
+    .find({ type: "HOLD", status: "ACTIVE", holdExpiresAt: { $lte: new Date(until) },
+      $or: [
+        { holdExpiresAt: { $lte: new Date(now) } },
+        { $expr: { $ne: [{ $ifNull: ["$remindedForExpiry", null] }, "$holdExpiresAt"] } },
+      ],
+    })
+    .sort({ holdExpiresAt: 1, _id: 1 })
+    .limit(limit)
+    .toArray();
+  return documents.map(toEntry);
+};
+
+// Post-commit acknowledgement only. A concurrent extension changes version
+// and expiry, so an old reminder/expiry acknowledgement cannot touch it.
+const acknowledgeHoldNotice = async ({ holdId, expectedVersion, expiresAt, kind }) => {
+  const result = await (await calendar()).updateOne(
+    { _id: new ObjectId(holdId), type: "HOLD", status: "ACTIVE", version: expectedVersion, holdExpiresAt: new Date(expiresAt) },
+    kind === "EXPIRED"
+      ? { $set: { status: "EXPIRED", updatedAt: new Date() }, $inc: { version: 1 } }
+      : { $set: { remindedForExpiry: new Date(expiresAt) } }
+  );
+  return result.modifiedCount === 1;
+};
+
+// Reminder-only progress helper: an extension changes expiry, so an old
+// acknowledgement cannot suppress a reminder for the new expiry.
+const markHoldReminded = async ({ holdId, expiresAt }) => {
+  const result = await (await calendar()).updateOne(
+    { _id: new ObjectId(holdId), type: "HOLD", status: "ACTIVE", holdExpiresAt: new Date(expiresAt) },
+    { $set: { remindedForExpiry: new Date(expiresAt) } }
+  );
+  return result.modifiedCount === 1;
+};
+
+module.exports = {
+  findHoldPlacementWrite,
+  insertHold,
+  changeHold,
+  deleteHold,
+  revertHold,
+  ownsHoldWrite,
+  findHoldsExpiringBy,
+  markHoldReminded,
+  acknowledgeHoldNotice,
+  clearBlockRecovery,
+  ownsBlockWrite,
+  deleteBlock,
+  revertBlock,
+  findCalendarEntries,
+  findEventHolds,
+  findCalendarEntry,
+  findVenueBlocks,
+  findEntriesByIds,
+  insertBlock,
+  updateBlock,
+};

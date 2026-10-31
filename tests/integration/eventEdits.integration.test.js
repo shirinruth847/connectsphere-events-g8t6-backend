@@ -231,7 +231,8 @@ describe("viewing by role and relationship (AC1)", () => {
       expect.objectContaining({
         viewerRelationship: "ASSIGNED_COORDINATOR",
         coordinatorId: userId("coordinator"),
-        organiser: { userId: userId("organiserA"), name: "spm32 organiserA" },
+        // SPM-38: the assigned coordinator also sees the organiser's email.
+        organiser: { userId: userId("organiserA"), name: "spm32 organiserA", email: fixtures.accounts.organiserA.email },
         purpose: "Internal planning purpose that attendees must not see",
       })
     );

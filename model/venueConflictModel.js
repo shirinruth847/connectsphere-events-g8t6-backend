@@ -81,6 +81,24 @@ const formatLocal = (time) => {
   return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 };
 
+// "12:45pm" in venue local time (SGT), as conflict messages show it (SPM-185 AC2, AC6).
+const formatClock = (time) => {
+  const minutes = localMinutes(time);
+  const hour = Math.floor(minutes / 60);
+  return `${hour % 12 || 12}:${String(minutes % 60).padStart(2, "0")}${hour < 12 ? "am" : "pm"}`;
+};
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const localDay = (time) => Math.floor((time + VENUE_UTC_OFFSET_MINUTES * MINUTE_MS) / DAY_MS);
+
+// The clock time alone on the request's first day; with the date on any other
+// day, so multi-day conflicts stay unambiguous.
+const formatMoment = (time, requestDay) => {
+  if (localDay(time) === requestDay) return formatClock(time);
+  const date = new Date(time + VENUE_UTC_OFFSET_MINUTES * MINUTE_MS);
+  return `${date.getUTCDate()} ${MONTH_NAMES[date.getUTCMonth()]} ${date.getUTCFullYear()}, ${formatClock(time)}`;
+};
+
 // The parts of an occupied range outside operating hours, as instant ranges.
 // A warning, never a block (Master 5.4, Q8).
 const outsideOperatingHours = (range, hours) => {
@@ -172,6 +190,35 @@ const calendarEntry = (entry, now) => {
 
 const occupied = (entry) => ({ start: entry.occupiedStart, end: entry.occupiedEnd });
 
+const CONFLICT_PART_LABELS = Object.freeze({ BOOKING: "booking", HOLD: "active hold", BLOCK: "operational block" });
+
+// Explains a refused request (SPM-185 AC2): the part of the existing entry it
+// hits (the entry's own time first, then its turnaround, then its setup) and
+// whether the request's own setup or turnaround causes it. `request` carries
+// the requested window and its occupied range.
+const conflictMessage = (entry, request) => {
+  const requested = occupied(request);
+  const parts = [
+    { label: CONFLICT_PART_LABELS[entry.type] || "booking", start: entry.start, end: entry.end },
+    { label: "turnaround period", start: entry.end, end: entry.occupiedEnd },
+    { label: "setup period", start: entry.occupiedStart, end: entry.start },
+  ];
+  const part = parts.find((candidate) => toTime(candidate.start) < toTime(candidate.end) && overlaps(candidate, requested)) || parts[0];
+
+  const requestDay = localDay(toTime(request.start));
+  const setupMinutes = (toTime(request.start) - toTime(request.occupiedStart)) / MINUTE_MS;
+  const turnaroundMinutes = (toTime(request.occupiedEnd) - toTime(request.end)) / MINUTE_MS;
+  const own = [];
+  if (setupMinutes > 0 && overlaps({ start: request.occupiedStart, end: request.start }, occupied(entry))) {
+    own.push(`its ${setupMinutes}-minute setup from ${formatMoment(toTime(request.occupiedStart), requestDay)}`);
+  }
+  if (turnaroundMinutes > 0 && overlaps({ start: request.end, end: request.occupiedEnd }, occupied(entry))) {
+    own.push(`its ${turnaroundMinutes}-minute turnaround until ${formatMoment(toTime(request.occupiedEnd), requestDay)}`);
+  }
+  const period = `${formatMoment(toTime(part.start), requestDay)}–${formatMoment(toTime(part.end), requestDay)}`;
+  return `Venue's ${part.label} (${period}) overlaps with your requested booking${own.length ? `, including ${own.join(" and ")}` : ""}.`;
+};
+
 // Pairs of blocking entries whose occupied ranges overlap (SPM-74 AC).
 const findOverlaps = (entries) => {
   const blocking = entries.filter((entry) => entry.blocking);
@@ -207,9 +254,16 @@ const freePeriods = (entries, from, to) => {
 // Booking conflicts come first, then holds, then blocks, for the summary status.
 const checkRequestedPeriod = (venue, entries, requested) => {
   const range = occupiedRange(requested.start, requested.end, venue.setupMinutes, venue.turnaroundMinutes);
+  const request = { start: requested.start, end: requested.end, occupiedStart: range.start, occupiedEnd: range.end };
   const conflicts = entries
     .filter((entry) => entry.blocking && overlaps(range, occupied(entry)))
-    .map((entry) => ({ entryId: entry.entryId, type: entry.type, occupiedStart: entry.occupiedStart, occupiedEnd: entry.occupiedEnd }));
+    .map((entry) => ({
+      entryId: entry.entryId,
+      type: entry.type,
+      occupiedStart: entry.occupiedStart,
+      occupiedEnd: entry.occupiedEnd,
+      message: conflictMessage(entry, request),
+    }));
   const warning = operatingHoursWarning(range, venue.operatingHours);
   const firstType = ["BOOKING", "HOLD", "BLOCK"].find((type) => conflicts.some((conflict) => conflict.type === type));
   let availability = AVAILABILITY.AVAILABLE;
@@ -256,11 +310,78 @@ const buildVenueCalendar = ({ venue, bookings, calendarEntries, from, to, now, r
   };
 };
 
+// ---------- operational blocks and restoration (SPM-195) ----------
+
+// Active holds at the venue whose occupied range overlaps the block (AC3). A
+// hold past its expiry is expired, whatever its stored status (Master 5.4.3).
+const findHoldsUnderBlock = (entries, { venueId, start, end }, now) =>
+  entries.filter((entry) => entry.type === ENTRY_TYPES.HOLD
+    && entry.venueId === venueId
+    && entry.eventId != null
+    && isHoldActive(entry, now)
+    && overlaps(occupied(entry), { start, end }));
+
+// Active blocks overlapping a booking's or hold's occupied range.
+const findActiveBlocks = (entries, range, { excludeBlockId = null } = {}) =>
+  entries.filter((entry) => entry.type === ENTRY_TYPES.BLOCK
+    && entry.status === "ACTIVE"
+    && entry.id !== excludeBlockId
+    && overlaps(occupied(entry), range));
+
+// A booking can be restored once its whole occupied range is free of blocks
+// (Master 5.4.4 option 1, AC9). Unknown when the range or the calendar is missing.
+const canBeRestored = (range, entries) => {
+  if (!range?.start || !range?.end || !Array.isArray(entries)) return null;
+  return findActiveBlocks(entries, range).length === 0;
+};
+
+// SHORTEN keeps the new interval inside the old one; anything longer is a new
+// block (AC9). UNCHANGED lets a repeated request succeed without a write.
+const BLOCK_CHANGE = Object.freeze({ SHORTEN: "SHORTEN", UNCHANGED: "UNCHANGED", EXTEND: "EXTEND" });
+const classifyBlockChange = (current, next) => {
+  const [start, end, nextStart, nextEnd] = [current.start, current.end, next.start, next.end].map(toTime);
+  if (nextStart === start && nextEnd === end) return BLOCK_CHANGE.UNCHANGED;
+  return nextStart >= start && nextEnd <= end ? BLOCK_CHANGE.SHORTEN : BLOCK_CHANGE.EXTEND;
+};
+
+// ---------- hold expiry (Master 5.4.3) ----------
+
+const HOUR_MS = 60 * MINUTE_MS;
+const HOLD_LIFETIME_MS = 7 * 24 * HOUR_MS;
+const HOLD_CUTOFF_MS = 24 * HOUR_MS;
+
+// The latest a hold may last: 24 hours before its occupied range starts.
+const holdCutoff = (occupiedStart) => new Date(toTime(occupiedStart) - HOLD_CUTOFF_MS);
+
+// A new hold's expiry: 7 days from now, or 24 hours before setup, whichever is
+// earlier. Null when setup starts within 24 hours: no hold is possible then.
+const holdExpiryFor = (occupiedStart, now = new Date()) => {
+  const cutoff = holdCutoff(occupiedStart);
+  if (cutoff.getTime() <= toTime(now)) return null;
+  return new Date(Math.min(toTime(now) + HOLD_LIFETIME_MS, cutoff.getTime()));
+};
+
+// One extension, by 1–7 days, still within the cutoff. Null when it would end
+// after the cutoff.
+const extendedHoldExpiry = (hold, days) => {
+  const proposed = new Date(toTime(hold.holdExpiresAt) + days * 24 * HOUR_MS);
+  return proposed.getTime() <= holdCutoff(hold.occupiedStart).getTime() ? proposed : null;
+};
+
 module.exports = {
+  holdCutoff,
+  holdExpiryFor,
+  extendedHoldExpiry,
+  HOLD_CUTOFF_MS,
   ENTRY_TYPES,
   AVAILABILITY,
   AVAILABILITY_LABELS,
   BLOCK_REASON_LABELS,
+  BLOCK_CHANGE,
+  findHoldsUnderBlock,
+  findActiveBlocks,
+  canBeRestored,
+  classifyBlockChange,
   VENUE_UTC_OFFSET_MINUTES,
   overlaps,
   occupiedRange,
@@ -268,8 +389,10 @@ module.exports = {
   parseOperatingHours,
   outsideOperatingHours,
   operatingHoursWarning,
+  formatLocal,
   findOverlaps,
   freePeriods,
   checkRequestedPeriod,
+  conflictMessage,
   buildVenueCalendar,
 };
