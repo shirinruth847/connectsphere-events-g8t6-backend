@@ -154,6 +154,7 @@ afterAll(async () => {
     }
     await cleanupAuthFixtures(runId);
   } finally {
+    await require("../../config/venueLockDatabase").closeVenueLockPool();
     await closeMongoDb();
     if (mongoServer) await mongoServer.stop();
     process.env.MONGODB_URI = ORIGINAL_MONGODB_URI;
@@ -237,13 +238,14 @@ describe("SPM-186 approve a venue booking", () => {
     const late = await hostEvent("2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
     const later = await hostEvent("2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z", { coordinator_id: fixtures.accounts.coordinatorTwo.userId });
     const first = await insertBooking("Main", morning, "2027-05-01T10:00:00Z", "2027-05-01T12:00:00Z");
-    const overlapping = await insertBooking("Main", late, "2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
-    const adjacent = await insertBooking("Main", later, "2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z");
     expect((await approve(first)).status).toBe(200);
+    const overlapping = await insertBooking("Main", late, "2027-05-01T13:14:00Z", "2027-05-01T14:00:00Z");
 
     const conflict = await approve(overlapping);
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe("VENUE_BOOKING_CONFLICT");
+    expect((await reject(overlapping, "Release the conflicting test request")).status).toBe(200);
+    const adjacent = await insertBooking("Main", later, "2027-05-01T13:15:00Z", "2027-05-01T14:00:00Z");
     expect((await approve(adjacent)).status).toBe(200);
   });
 
@@ -383,7 +385,23 @@ describe("SPM-189 reject a venue booking", () => {
     expect(again.body).toEqual(expect.objectContaining({ code: "BOOKING_ALREADY_DECIDED", currentStatus: "REJECTED" }));
   });
 
-  test("[T32] should_reject_an_approved_future_booking_and_keep_the_confirmed_event", async () => {
+  test("[SPM-186-AC7] should_refuse_approval_over_another_pending_legacy_booking", async () => {
+    const start = "2028-04-01T02:00:00Z";
+    const end = "2028-04-01T04:00:00Z";
+    const eventId = await hostEvent(start, end);
+    const otherEventId = await hostEvent(start, end, { coordinator_id: fixtures.accounts.coordinatorTwo.userId });
+    const target = await insertBooking("Main", eventId, start, end);
+    const other = await insertBooking("Main", otherEventId, start, end);
+    const before = await eventRow(eventId);
+    const response = await approve(target);
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("VENUE_BOOKING_CONFLICT");
+    expect((await bookingRow(target)).status).toBe("PENDING");
+    expect((await bookingRow(other)).status).toBe("PENDING");
+    expect(await eventRow(eventId)).toEqual(before);
+  });
+
+  test("[T32] should_reject_an_approved_future_booking_and_return_the_event_to_planning", async () => {
     const eventId = await hostEvent("2027-09-01T10:00:00Z", "2027-09-01T11:00:00Z", { status: "CONFIRMED" });
     const target = await insertBooking("Closing", eventId, "2027-09-01T10:00:00Z", "2027-09-01T11:00:00Z", { status: "APPROVED" });
     const before = await eventRow(eventId);
@@ -393,7 +411,7 @@ describe("SPM-189 reject a venue booking", () => {
     expect(response.status).toBe(200);
     expect((await bookingRow(target)).status).toBe("REJECTED");
     const after = await eventRow(eventId);
-    expect(after.status).toBe("CONFIRMED");
+    expect(after.status).toBe("PLANNING");
     expect(after.arrangement_version).toBe(before.arrangement_version + 1);
     const sent = await notificationsFor(`VENUE_BOOKING_REJECTED:${target}:APPROVED:`);
     expect(sent.map(({ title }) => title)).toEqual(["Venue no longer available", "Venue no longer available"]);

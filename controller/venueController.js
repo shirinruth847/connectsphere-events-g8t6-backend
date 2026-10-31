@@ -66,7 +66,7 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_NOT_AVAILABLE: [409, "This venue is not available for bookings. Reject the request or make the venue active first."],
   VENUE_CAPACITY_EXCEEDED: [409, "The expected attendance is more than this venue's capacity."],
   VENUE_BUFFERS_NOT_SET: [409, "Set this venue's setup and turnaround times before approving bookings."],
-  VENUE_BOOKING_CONFLICT: [409, "Another approved booking already occupies this venue at that time."],
+  VENUE_BOOKING_CONFLICT: [409, "Another active booking already occupies this venue at that time, including its setup and turnaround."],
   VENUE_BLOCKED: [409, "The venue is blocked for part of this booking's time."],
   VENUE_HELD: [409, "The venue is held for another event during part of this booking's time."],
   VENUE_LOCK_TIMEOUT: [409, "Another change to this venue is in progress. Try again."],
