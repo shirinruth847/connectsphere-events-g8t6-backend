@@ -567,6 +567,8 @@ An attendee keeps reusable details for event registration. Name, email and phone
 
 ### Event Registration (SPM-134)
 
+**Deadline corrective rollout:** apply `20261031070000_spm134_registration_deadline_clock.sql` before deploying this version. Registration takes fresh PostgreSQL clock time after acquiring its waiting row locks, then applies the same private availability rule used by Discovery's existing computed field. A transaction that started before closing but acquires the lock after closing is refused. Exact boundaries remain `[open, close)`; successful idempotent replay is preserved. No HTTP fields, status codes, registration answers, profile data or scope decisions change. The helper taking an explicit time is inaccessible to browser and service roles. The migration is prepared but has not been applied to shared development by this fix. No data backfill is needed; retain the corrected functions on application rollback, since restoring the previous function restores the stale-time defect. The hosted suite includes a separate-client lock-wait regression; local PGlite tests model elapsed transaction time and are not hosted concurrency evidence.
+
 An attendee registers themselves for an event. The form starts from `GET /api/attendee-profile/mine` (name and email from the user record, saved dietary restrictions and accessibility requirements), and the attendee may change the two answers for this event only. Registering never changes the saved profile. Every other role gets `403 FORBIDDEN`.
 
 | Method & path | Input | Success | Errors |

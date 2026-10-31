@@ -177,6 +177,7 @@ before(async () => {
   await db.exec(readBySuffix("_spm134_hidden_events_not_found.sql"));
   await db.exec(readBySuffix("_spm134_close_time_only_registration.sql"));
   await db.exec(readBySuffix("_spm134_window_and_venue_capacity.sql"));
+  await db.exec(readBySuffix("_spm134_registration_deadline_clock.sql"));
 });
 after(async () => { if (db) await db.close(); });
 beforeEach(async () => {
@@ -535,43 +536,66 @@ test("[SPM-134] should_allow_only_the_backend_role_to_run_the_registration_funct
 
 // ---------- exact boundaries (Master 5.6: [registration_open_at, registration_close_at)) ----------
 
-// Inside one transaction now() is a single instant, so an event created there
-// with "0 seconds" opens or closes exactly when register_for_event checks it.
-const atOneInstant = async (window) => {
+// Exercise exact microsecond boundaries using the private pure-time rule;
+// admission tests below separately verify the real clock and actual writes.
+const atOneInstant = async (window, full = false) => {
   await db.exec("BEGIN");
   try {
-    const eventId = await createEvent(window);
-    return await register(ATTENDEE, eventId);
-  } finally {
-    await db.exec("ROLLBACK");
-  }
+    const eventId = await createEvent({ ...window, registration_capacity: 1 });
+    if (full) await seed(OTHER_ATTENDEE, eventId, "REGISTERED");
+    return (await one("SELECT public._event_registration_availability_at(e, now()) a FROM public.event e WHERE event_id=$1", [eventId])).a;
+  } finally { await db.exec("ROLLBACK"); }
 };
+for (const [label, window, expected, full] of [
+  ["at opening", { open: "0 seconds", close: "5 days" }, "OPEN"],
+  ["one microsecond before opening", { open: "1 microsecond", close: "5 days" }, "NOT_YET_OPEN"],
+  ["one microsecond before closing", { open: "-5 days", close: "1 microsecond" }, "OPEN"],
+  ["at closing", { open: "-5 days", close: "0 seconds" }, "CLOSED"],
+  ["full one microsecond before closing", { open: "-5 days", close: "1 microsecond" }, "FULL_WAITLIST", true],
+]) {
+  test(`[SPM-134] shared availability rule ${label}`, async () => {
+    assert.equal(await atOneInstant(window, full), expected);
+  });
+}
 
-test("[SPM-134] should_accept_the_registration_when_database_time_is_exactly_registration_open_at", async () => {
-  assert.equal((await atOneInstant({ open: "0 seconds", close: "5 days" })).registration.registration_status, "REGISTERED");
-});
-
-test("[SPM-134] should_refuse_with_registration_not_yet_open_when_database_time_is_one_microsecond_before_open", async () => {
-  await assert.rejects(atOneInstant({ open: "1 microsecond", close: "5 days" }), hasCode("REGISTRATION_NOT_YET_OPEN"));
-});
-
-test("[SPM-134] should_accept_the_registration_when_database_time_is_one_microsecond_before_close", async () => {
-  assert.equal((await atOneInstant({ open: "-5 days", close: "1 microsecond" })).registration.registration_status, "REGISTERED");
-});
-
-test("[SPM-134] should_refuse_with_registration_closed_when_database_time_is_exactly_registration_close_at", async () => {
-  await assert.rejects(atOneInstant({ open: "-5 days", close: "0 seconds" }), hasCode("REGISTRATION_CLOSED"));
-});
-
-test("[TC-REG-017] should_refuse_with_registration_full_not_closed_when_capacity_is_reached_one_microsecond_before_close", async () => {
+// A delayed transaction reproduces the stale-time condition of a lock wait.
+// This is single-connection SQL evidence, not hosted concurrency verification.
+test("[SPM-134] a transaction started before closing cannot register after the deadline", async () => {
+  const eventId = await createEvent();
   await db.exec("BEGIN");
   try {
-    const eventId = await createEvent({ registration_capacity: 1, open: "-5 days", close: "1 microsecond" });
-    await seed(OTHER_ATTENDEE, eventId, "REGISTERED");
-    await assert.rejects(register(ATTENDEE, eventId), hasCode("REGISTRATION_FULL"));
-  } finally {
-    await db.exec("ROLLBACK");
-  }
+    await db.query("UPDATE public.event SET registration_close_at=clock_timestamp()+interval '100 milliseconds' WHERE event_id=$1",[eventId]);
+    await new Promise(resolve => setTimeout(resolve,250));
+    const timing=await one("SELECT clock_timestamp()>registration_close_at past_close, now()<registration_close_at old_time FROM public.event WHERE event_id=$1",[eventId]);
+    assert.equal(timing.past_close,true); assert.equal(timing.old_time,true);
+    assert.equal(await availabilityOf(eventId),"CLOSED");
+    await db.exec("SAVEPOINT registration_attempt");
+    await assert.rejects(register(ATTENDEE,eventId,null,null,'deadline-key','deadline-hash'),hasCode("REGISTRATION_CLOSED"));
+    await db.exec("ROLLBACK TO SAVEPOINT registration_attempt");
+    assert.equal((await sideEffects(eventId)).registrations.length,0);
+    assert.equal((await one("SELECT count(*)::int n FROM public.idempotency_records WHERE idempotency_key='deadline-key'")).n,0);
+  } finally { await db.exec("ROLLBACK"); }
+});
+
+test("[SPM-134] registration opening during a delayed transaction is admitted using the fresh clock", async () => {
+  const eventId=await createEvent();
+  await db.exec("BEGIN");
+  try {
+    await db.query("UPDATE public.event SET registration_open_at=clock_timestamp()+interval '100 milliseconds' WHERE event_id=$1",[eventId]);
+    await new Promise(resolve => setTimeout(resolve,250));
+    assert.equal(await availabilityOf(eventId),"OPEN");
+    const oldTime=(await one('SELECT now() n')).n;
+    const registered=await register(ATTENDEE,eventId);
+    assert.equal(registered.registration.registration_status,"REGISTERED");
+    assert.ok(new Date(registered.registration.registration_datetime)>new Date(oldTime));
+  } finally { await db.exec("ROLLBACK"); }
+});
+
+test("[SPM-134] private timed availability cannot be called by browser or runtime roles", async () => {
+  const grants=await one(`SELECT
+    has_function_privilege('authenticated','public._event_registration_availability_at(public.event,timestamptz)','EXECUTE') browser,
+    has_function_privilege('service_role','public._event_registration_availability_at(public.event,timestamptz)','EXECUTE') service`);
+  assert.deepEqual(grants,{browser:false,service:false});
 });
 
 // ---------- atomicity at the activity stage ----------

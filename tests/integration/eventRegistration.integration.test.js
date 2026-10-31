@@ -701,3 +701,48 @@ describe("[SPM-134] re-entry after withdrawal (Master 5.6, D05)", () => {
     expect(await registrationActivityCount()).toBe(activityBefore + 1);
   });
 });
+
+
+// Real API/independent-client regression. Runs only with the explicitly
+// authorized hosted suite and its namespaced fixtures, never as a unit test.
+test("[SPM-134] an event-lock wait across the deadline refuses registration without side effects", async () => {
+  await signIn("racer");
+  const eventId = await insertEvent();
+  const { Client } = require("pg");
+  if (!process.env.TEST_DATABASE_URL?.includes("rvwiflsedoujspmzfrbq")) throw new Error("Development test connection required");
+  const blocker = new Client({ connectionString: process.env.TEST_DATABASE_URL, connectionTimeoutMillis: 5000 });
+  let pending;
+  try {
+    await blocker.connect();
+    await blocker.query("BEGIN");
+    await blocker.query("SET LOCAL statement_timeout='15s'");
+    await blocker.query("SELECT 1 FROM public.event WHERE event_id=$1 FOR UPDATE", [eventId]);
+    await blocker.query("UPDATE public.event SET registration_close_at=clock_timestamp()+interval '5 seconds' WHERE event_id=$1", [eventId]);
+    pending = registerAs("racer", eventId, answers("Synthetic deadline test"), {
+      "Idempotency-Key": `spm134-${runId}-deadline-lock`,
+    }).then(response => { recordRegistrations([response]); return response; });
+    let blocked = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const result = await blocker.query(`SELECT EXISTS(
+        SELECT 1 FROM pg_stat_activity WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))
+      ) AS blocked`);
+      if (result.rows[0].blocked) { blocked = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    expect(blocked).toBe(true);
+    const timing = await blocker.query("SELECT clock_timestamp()<registration_close_at before_close FROM public.event WHERE event_id=$1", [eventId]);
+    expect(timing.rows[0].before_close).toBe(true);
+    // Database time controls this wait, independent of the test host clock.
+    await blocker.query(`SELECT pg_sleep(GREATEST(0, extract(epoch FROM
+      ((SELECT registration_close_at FROM public.event WHERE event_id=$1)-clock_timestamp())))+0.05)`, [eventId]);
+    await blocker.query("COMMIT");
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("REGISTRATION_CLOSED");
+    expect(await registrationsFor(eventId)).toHaveLength(0);
+  } finally {
+    await blocker.query("ROLLBACK").catch(() => {});
+    await blocker.end();
+    if (pending) await pending;
+  }
+});
