@@ -557,6 +557,25 @@ describe("listVenueBlocks (SPM-195 AC9)", () => {
       incidentId: 7, canBeRestored: false, restoreLabel: "Booking or hold has ended",
     }));
   });
+
+  test("should_count_overlapping_bookings_of_finished_events_that_the_block_left_alone", async () => {
+    tables({
+      venue: { venue_id: HALL, name: "Hall" },
+      resource_incidents: [],
+      venue_booking: [
+        // Occupied 12:30–15:30 UTC with setup and turnaround: overlaps the 13:00–15:00 block.
+        { booking_id: 114, start_datetime: "2030-03-10T05:30:00Z", end_datetime: "2030-03-10T06:30:00Z", occupied_range: "[\"2030-03-10 04:30:00+00\",\"2030-03-10 07:30:00+00\")", event: { status: "COMPLETED" } },
+        // Ends before the block starts.
+        { booking_id: 115, start_datetime: "2030-03-10T02:00:00Z", end_datetime: "2030-03-10T03:00:00Z", occupied_range: "[\"2030-03-10 01:30:00+00\",\"2030-03-10 03:30:00+00\")", event: { status: "CANCELLED" } },
+      ],
+    });
+    venueCalendarModel.findVenueBlocks.mockResolvedValue({ blocks: [blockEntry()], hasMore: false });
+    venueCalendarModel.findEntriesByIds.mockResolvedValue(new Map());
+
+    const result = await venueModel.listVenueBlocks(HALL);
+
+    expect(result.blocks[0]).toMatchObject({ incidents: [], closedEventBookings: 1 });
+  });
 });
 
 

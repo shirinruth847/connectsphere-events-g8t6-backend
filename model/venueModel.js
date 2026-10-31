@@ -2524,11 +2524,48 @@ const describeBlockIncidents = async (blockIds) =>
 
 // GET /api/venues/:venueId/blocks: the venue's current and upcoming blocks,
 // lifted ones included, each with its incidents (Venue Staff venue page, AC9).
+const CLOSED_EVENT_STATUSES = [EVENT_STATUS.COMPLETED, EVENT_STATUS.CANCELLED, EVENT_STATUS.REJECTED];
+
+// Bookings a block overlaps but never affects, because their event has
+// finished, been cancelled or rejected (SPM-195): counted per block so the
+// block can say why they have no incident.
+const countClosedEventOverlaps = async (venueId, blocks) => {
+  const counts = new Map(blocks.map((block) => [block.id, 0]));
+  if (!blocks.length) return counts;
+  const from = Math.min(...blocks.map((block) => new Date(block.start).getTime()));
+  const to = Math.max(...blocks.map((block) => new Date(block.end).getTime()));
+  const { data, error } = await supabase
+    .from("venue_booking")
+    .select("booking_id,start_datetime,end_datetime,occupied_range,event:event!inner(status)")
+    .eq("venue_id", venueId)
+    .in("status", ACTIVE_BOOKING_STATUSES)
+    .in("event.status", CLOSED_EVENT_STATUSES)
+    .lt("start_datetime", new Date(to + BUFFER_MARGIN_MS).toISOString())
+    .gt("end_datetime", new Date(from - BUFFER_MARGIN_MS).toISOString());
+  if (error) throw error;
+  for (const booking of data || []) {
+    const { occupiedStart, occupiedEnd } = parseOccupiedRange(booking.occupied_range);
+    const range = {
+      start: Date.parse(occupiedStart ?? booking.start_datetime),
+      end: Date.parse(occupiedEnd ?? booking.end_datetime),
+    };
+    for (const block of blocks) {
+      if (range.start < new Date(block.end).getTime() && new Date(block.start).getTime() < range.end) {
+        counts.set(block.id, counts.get(block.id) + 1);
+      }
+    }
+  }
+  return counts;
+};
+
 const listVenueBlocks = async (venueId) => {
   const venue = await findManagedVenueRow(venueId);
   if (!venue) throw venueError("VENUE_NOT_FOUND");
   const { blocks, hasMore } = await calendarCall(() => venueCalendarModel.findVenueBlocks(venueId, new Date()));
-  const incidents = blocks.length ? await describeBlockIncidents(blocks.map((block) => block.id)) : [];
+  const [incidents, closedOverlaps] = await Promise.all([
+    blocks.length ? describeBlockIncidents(blocks.map((block) => block.id)) : [],
+    countClosedEventOverlaps(venueId, blocks),
+  ]);
   return {
     venueId,
     venueName: venue.name,
@@ -2536,6 +2573,7 @@ const listVenueBlocks = async (venueId) => {
     blocks: blocks.map((block) => ({
       ...toBlock(block),
       incidents: incidents.filter((incident) => incident.calendarBlockId === block.id),
+      closedEventBookings: closedOverlaps.get(block.id) ?? 0,
     })),
   };
 };

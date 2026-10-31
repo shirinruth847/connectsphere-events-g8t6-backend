@@ -18,9 +18,9 @@ const EVENT = {
   start_datetime: "2035-01-01T01:00:00Z", end_datetime: "2035-01-01T10:00:00Z",
   expected_attendance: 150, preferred_layout_type: "NO_PREFERENCE",
 };
-const save = async (db, { id = null, fields = EVENT, preferences = null, key = null } = {}) =>
-  (await one(db, "SELECT public.save_event_draft(1,$1,$2::jsonb,$3::jsonb,NULL,false,$4,$5,NULL) AS result",
-    [id, JSON.stringify(fields), preferences === null ? null : JSON.stringify(preferences), key, key ? "c".repeat(64) : null])).result;
+const save = async (db, { id = null, fields = EVENT, preferences = null, equipment = null, key = null } = {}) =>
+  (await one(db, "SELECT public.save_event_draft(1,$1,$2::jsonb,$3::jsonb,$4::jsonb,false,$5,$6,NULL) AS result",
+    [id, JSON.stringify(fields), preferences === null ? null : JSON.stringify(preferences), equipment === null ? null : JSON.stringify(equipment), key, key ? "c".repeat(64) : null])).result;
 const submit = async (db, id) =>
   (await one(db, "SELECT public.submit_event_request(1,$1,'{}'::jsonb,NULL,NULL,NULL,NULL) AS result", [id])).result;
 const stored = async (db, id) =>
@@ -50,9 +50,14 @@ async function setup() {
   await db.exec(functionSql(read("20261019183324_spm36_submission_time_and_lead_receipt.sql"), "_record_event_submission_time"));
   await db.exec("CREATE TRIGGER event_record_submission_time BEFORE INSERT OR UPDATE ON public.event FOR EACH ROW EXECUTE FUNCTION public._record_event_submission_time()");
   await db.exec(read("20261028120000_spm38_submitted_support_needs.sql"));
+  // The live table and equipment catalogue carry these; the reduced fixture does not.
+  await db.exec(`ALTER TABLE public.event_venue_preference ADD UNIQUE (event_id, preference_order);
+    ALTER TABLE public.equipment ADD COLUMN is_active boolean NOT NULL DEFAULT true, ADD COLUMN details_pending boolean NOT NULL DEFAULT false`);
   await db.exec(read("20261031140000_spm76_venue_preference_times.sql"));
+  await db.exec(read("20261031150000_spm76_restore_choice_removal.sql"));
   await db.exec(`INSERT INTO public.venue (venue_id,name,address,max_capacity) VALUES
-    (1,'SPM-76 Hall','1 Synthetic Road',300),(2,'SPM-76 Breakout','1 Synthetic Road',60)`);
+    (1,'SPM-76 Hall','1 Synthetic Road',300),(2,'SPM-76 Breakout','1 Synthetic Road',60),(3,'SPM-76 Studio','1 Synthetic Road',40)`);
+  await db.exec(`INSERT INTO public.equipment (equipment_id,name,category) VALUES (1,'Projector','AV'),(2,'Microphone','AV')`);
   await db.exec(`INSERT INTO public."user" (user_id,email,name,role,is_active) VALUES
     (1,'spm76-owner@example.test','Owner','ORGANISER',true),
     (4,'spm76-lead@example.test','Lead','COORDINATOR_LEAD',true)`);
@@ -123,5 +128,41 @@ test("[SPM-76] malformed choices are refused by the function and the table", asy
       await assert.rejects(save(db, { id, fields: {}, preferences }), /INVALID_VENUE_PREFERENCES/);
     }
     await assert.rejects(save(db, { id, fields: {}, preferences: [choice(1, "2035-01-01T04:00:00Z", "2035-01-01T02:00:00Z")] }), /event_venue_preference_requested_window_check/);
+  } finally { await db.close(); }
+});
+
+const equipmentOf = async (db, id) =>
+  (await db.query("SELECT equipment_id, quantity_requested FROM public.event_equipment_requirement WHERE event_id=$1 ORDER BY equipment_id", [id])).rows;
+
+test("[SPM-76] reordering and narrowing keep the other choices; only a removed venue goes", async () => {
+  const db = await setup();
+  try {
+    const id = (await save(db, { key: "spm76-reorder", preferences: [1, 2, 3] })).event.event_id;
+    await save(db, { id, fields: {}, preferences: [3, choice(2, "2035-01-01T05:00:00Z", "2035-01-01T07:00:00Z")] });
+    assert.deepEqual(await stored(db, id), [[3, null, null], [2, "2035-01-01T05:00:00.000Z", "2035-01-01T07:00:00.000Z"]]);
+  } finally { await db.close(); }
+});
+
+test("[SPM-76] a refused save changes nothing, and duplicates are refused", async () => {
+  const db = await setup();
+  try {
+    const id = (await save(db, { key: "spm76-refused", preferences: [1, 2], equipment: [{ equipment_id: 1, quantity: 2 }] })).event.event_id;
+    await assert.rejects(save(db, { id, fields: {}, preferences: [3, 3] }), /INVALID_VENUE_PREFERENCES/);
+    await assert.rejects(save(db, { id, fields: {}, preferences: [2, choice(1, "2034-01-01T00:00:00Z", "2034-01-01T02:00:00Z")] }), /VENUE_PREFERENCE_OUTSIDE_EVENT/);
+    await assert.rejects(save(db, { id, fields: {}, equipment: [{ equipment_id: 2, quantity: 1 }, { equipment_id: 2, quantity: 3 }] }), /INVALID_EQUIPMENT_REQUIREMENTS/);
+    assert.deepEqual(await stored(db, id), [[1, null, null], [2, null, null]]);
+    assert.deepEqual(await equipmentOf(db, id), [{ equipment_id: 1, quantity_requested: 2 }]);
+  } finally { await db.close(); }
+});
+
+test("[SPM-52] equipment quantities update; a kept deactivated item stays, a removed one cannot come back", async () => {
+  const db = await setup();
+  try {
+    const id = (await save(db, { key: "spm76-equipment", equipment: [{ equipment_id: 1, quantity: 2 }, { equipment_id: 2, quantity: 1 }] })).event.event_id;
+    await db.exec("UPDATE public.equipment SET is_active = false");
+    await save(db, { id, fields: {}, equipment: [{ equipment_id: 1, quantity: 5 }] });
+    assert.deepEqual(await equipmentOf(db, id), [{ equipment_id: 1, quantity_requested: 5 }]);
+    await assert.rejects(save(db, { id, fields: {}, equipment: [{ equipment_id: 1, quantity: 5 }, { equipment_id: 2, quantity: 1 }] }), /INVALID_EQUIPMENT_REQUIREMENTS/);
+    assert.deepEqual(await equipmentOf(db, id), [{ equipment_id: 1, quantity_requested: 5 }]);
   } finally { await db.close(); }
 });
