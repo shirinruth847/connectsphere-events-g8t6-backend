@@ -9,6 +9,14 @@ const read = (name) => fs.readFileSync(path.join(root, "supabase/migrations", na
 const helpers = read("20261007075542_event_request_review_fixes.sql");
 const lifecycle = read("20261019075510_spm173_lifecycle_transitions.sql");
 const versioning = read("20261012120000_spm33_event_edit_history.sql");
+// The newest migration that defines `name`, so later changes to it are tested.
+const newestDefining = (name) => {
+  const pattern = new RegExp(`CREATE(?: OR REPLACE)? FUNCTION public\\.${name}\\(`);
+  const files = fs.readdirSync(path.join(root, "supabase/migrations")).filter((file) => file.endsWith(".sql")).sort().reverse();
+  const file = files.find((candidate) => pattern.test(read(candidate)));
+  assert.ok(file, `Missing migration for ${name}`);
+  return read(file);
+};
 const extract = (sql, name) => {
   const start = sql.search(new RegExp(`CREATE(?: OR REPLACE)? FUNCTION public\\.${name}\\(`));
   assert.ok(start >= 0, `Missing real helper ${name}`);
@@ -22,7 +30,9 @@ const setup = async () => {
   await db.exec(helpers.slice(tableStart, helpers.indexOf("\n);", tableStart) + 3));
   for (const name of ["_claim_idempotency_key", "_store_idempotent_response"]) await db.exec(extract(helpers, name));
   await db.exec("CREATE TABLE public.safety_reviews (review_id integer, event_id integer, status text, claimed_by integer)");
-  for (const name of ["_lifecycle_transitions", "_check_event_transition", "_apply_event_transition", "_notify_event_users"]) await db.exec(extract(lifecycle, name));
+  // The four-argument transition and notification overloads used here are only defined in the SPM-173 migration.
+  await db.exec(extract(newestDefining("_lifecycle_transitions"), "_lifecycle_transitions"));
+  for (const name of ["_check_event_transition", "_apply_event_transition", "_notify_event_users"]) await db.exec(extract(lifecycle, name));
   await db.exec(extract(versioning, "_bump_event_version"));
   await db.exec("CREATE TRIGGER event_bump_version BEFORE UPDATE ON public.event FOR EACH ROW EXECUTE FUNCTION public._bump_event_version()");
   await db.exec(read("20261026190415_spm39_accept_feasibility.sql"));

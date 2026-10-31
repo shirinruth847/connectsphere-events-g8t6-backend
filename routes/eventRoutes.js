@@ -28,7 +28,6 @@ const {
   getCoordinatorAvailability,
   getEventReadiness,
   acceptFeasibility,
-
   rejectSubmittedEvent,
   submitForSafetyReview,
   confirmEvent,

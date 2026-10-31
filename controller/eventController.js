@@ -770,7 +770,7 @@ const rejectSubmittedEvent = async (req, res, next) => {
     if (error.name === "EventRequestError") {
       if (error.code === "EVENT_VERSION_CONFLICT") return sendVersionConflict(req, res, eventId).catch(next);
       if (error.code === "TRANSITION_NOT_ALLOWED") return res.status(409).json({ code: error.code, error: "Only an event request under review that has never been confirmed can be rejected here.", currentStatus: error.currentStatus });
-      if (error.code === "INVALID_REJECTION_REASON") return validationFailed(res, { reason: "Enter rejection notes of 10 to 2,000 characters." });
+      if (error.code === "INVALID_REJECTION_REASON") return validationFailed(res, { reason: "Rejection notes must contain 10 to 2,000 characters and no null characters." });
     }
     return handleError(error, res, next);
   }
@@ -1040,7 +1040,6 @@ module.exports = {
   assignCoordinatorAsLead,
   getEventReadiness,
   acceptFeasibility,
-
   rejectSubmittedEvent,
   submitForSafetyReview,
   confirmEvent,

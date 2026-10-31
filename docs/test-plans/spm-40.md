@@ -75,8 +75,10 @@ rejections as a deployment rollback.
   cancel with no request, denied roles, terminal states, stale version, duplicate
   replay, changed key payload, rollback on audit/notification errors, actor/time,
   notes delivered to owner, unsaved edits, reload/retry and desktop/mobile.
-- Local merge commit integrates SPM-39 into the SPM-40 branch. Rejection work
-  remains uncommitted. No real user changes, hosted fixtures or pushes. Only the explicitly authorised SPM-40 migration was applied.
+- SPM-39 is on `main` and merged into this branch. The rejection work is
+  committed on `feature/SPM-40-reject-submitted-event-request`. No real user
+  changes or hosted fixtures. Only the explicitly authorised SPM-40 migration
+  was applied.
 
 ## Rejection reason and history follow-up
 
@@ -108,3 +110,20 @@ Hosted verification read only confirmed the saved reason; no event was mutated.
   the authorised development project before fixture creation. It has NOT run;
   explicit shared-fixture permission is pending. It creates namespaced fixtures
   and uses existing cleanup manifests. This is not production test evidence.
+
+## Review fixes (31 October 2026)
+
+- The rejection SQL suite now loads `_lifecycle_transitions` from the newest
+  migration that defines it, so later changes to the transition table are
+  tested. The four-argument `_apply_event_transition` and `_notify_event_users`
+  overloads used by the RPC are only defined in the SPM-173 migration.
+- Validation messages are aligned with the frontend; the RPC fallback now reads
+  "Rejection notes must contain 10 to 2,000 characters and no null characters."
+- Rejection from `AWAITING_CLARIFICATION`, `PLANNING` and `SAFETY_REVIEW`
+  (Master 5.2) remains out of scope and needs its own ticket: it must release
+  holds, bookings and reservations and close open clarification rounds and
+  safety reviews in the same transaction.
+- Verified: `npm test` 2,389 passed (94 suites); `node --test
+  tests/database/*.test.cjs` 382 passed, including 27 SPM-40 tests.
+- `tests/integration/eventRejection.integration.test.js` (separate-connection
+  races, Master 11) has still not run; it needs permission for shared fixtures.
