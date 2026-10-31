@@ -16,6 +16,7 @@ const {
   listTechnicalRequests,
   getTechnicalRequest,
   decideTechnicalRequest,
+  listEquipmentSchedule,
 } = require("../controller/equipmentController");
 
 // Equipment catalogue (SPM-52): Technical Support only, reads included.
@@ -28,6 +29,8 @@ router.get("/options", ...techSupportOnly, listEquipmentOptions);
 router.get("/requests", ...techSupportOnly, validatePagination, listTechnicalRequests);
 router.get("/requests/:requestId", ...techSupportOnly, getTechnicalRequest);
 router.post("/requests/:requestId/decision", ...techSupportOnly, decideTechnicalRequest);
+// Technical Support calendar; declared before /:equipmentId.
+router.get("/schedule", ...techSupportOnly, listEquipmentSchedule);
 router.get("/:equipmentId", ...techSupportOnly, getEquipment);
 router.post("/", ...techSupportOnly, createEquipment);
 router.put("/:equipmentId", ...techSupportOnly, updateEquipment);

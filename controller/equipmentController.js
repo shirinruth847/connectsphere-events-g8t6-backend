@@ -11,6 +11,7 @@ const {
   validateTechnicalItems,
   validateTechnicalDecision,
   validateTechnicalRequestListQuery,
+  validateScheduleRange,
   parseId,
   hasErrors,
   MESSAGES,
@@ -310,6 +311,17 @@ const listTechnicalRequests = async (req, res, next) => {
   }
 };
 
+// GET /api/equipment/schedule?from&to — Technical Support calendar
+const listEquipmentSchedule = async (req, res, next) => {
+  const { values, fields } = validateScheduleRange(req.query);
+  if (hasErrors(fields)) return validationFailed(res, fields);
+  try {
+    return res.status(200).json(await equipmentModel.listEquipmentSchedule(values));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
 // GET /api/equipment/requests/:requestId — SPM-287 AC3
 const getTechnicalRequest = async (req, res, next) => {
   const requestId = parseId(req.params.requestId);
@@ -354,4 +366,5 @@ module.exports = {
   listTechnicalRequests,
   getTechnicalRequest,
   decideTechnicalRequest,
+  listEquipmentSchedule,
 };

@@ -272,12 +272,13 @@ Migration `20261031090000_spm286_287_technical_requests.sql`. A `technical_reque
 | `GET /api/equipment/requests` | Technical Support | `?status=PENDING\|APPROVED\|REJECTED`, `?search=` (event title), `?limit`, `?offset` | `200 { technicalRequests, total, nextOffset }`: Pending first (oldest first), then decided (latest first); each with event title, dates, venue, items, requesting coordinator and status | `400` |
 | `GET /api/equipment/requests/:requestId` | Technical Support | — | `200 { technicalRequestId, status, rejectionReason, requestedBy, decidedBy, event, items: [{ …, availableQuantity }], history }` | `404` |
 | `POST /api/equipment/requests/:requestId/decision` | Technical Support | `{ decision: "APPROVE"\|"REJECT", reason }` (`reason` 1–1000, required to reject) | `200 { technicalRequestId, eventId, status, rejectionReason, decidedAt, arrangementVersion }` | `400`, `404`, `409 TECHNICAL_REQUEST_ALREADY_DECIDED` (`status`), `EVENT_NOT_IN_PLANNING`, `EQUIPMENT_NOT_AVAILABLE` |
+| `GET /api/equipment/schedule` | Technical Support | `?from=&to=` (Singapore dates `YYYY-MM-DD`, both included, at most 62 days) | `200 { from, to, days: [{ date, events: [{ eventId, requestId, title, status, start, end, venue: { venueId, name } \| null, equipment: [{ equipmentId, name, quantity, status, technicalRequestId }] }] }] }`: only dates with events that have `PENDING` or `APPROVED` equipment; an event spanning several dates is listed on each | `400` |
 
 - **Availability (Master 5.5, 7.2):** usable stock minus the peak concurrent use in `[start, end)`: active unavailability plus other events' `PENDING` or `APPROVED` lines (cancelled or rejected events hold nothing). No venue setup or turnaround. A rejected request releases its quantities.
 - **Saving requirements (SPM-286 AC3):** once a draft, auto-save or amendment has a valid date and time, each `equipmentRequirements` quantity must be at most the available quantity (`400` on `equipmentRequirements`). Selecting equipment reserves nothing.
 - **Concurrency:** sending locks the event, then the requested items in ascending ID, so the last units go to one request; deciding locks the event, items, then the request, so a second decision gets `TECHNICAL_REQUEST_ALREADY_DECIDED`. Approval rechecks stock and approves every line or none.
 - **One active request per event:** a partial unique index on `PENDING`/`APPROVED`. After a rejection the coordinator can send a new one.
-- **History and notices:** `TECHNICAL_REQUEST_SENT` (`STAFF_ONLY`), `TECHNICAL_REQUEST_APPROVED`/`_REJECTED` (`ORGANISER_SAFE`; the reason is a separate `STAFF_ONLY` entry). Every active Technical Support user is notified of a new request; the coordinator of both outcomes (`_notify_coordinator_technical_decision`, with the reason); the owner only of approval. Technical Support read these in `/api/notifications` (target page `TECHNICAL_REQUESTS`).
+- **History and notices:** the event history gets `TECHNICAL_REQUEST_SENT` (`STAFF_ONLY`) and `TECHNICAL_REQUEST_APPROVED`/`_REJECTED` (`ORGANISER_SAFE`), each with one change, `technicalRequestStatus`, which the history API returns with `label: "Technical request"` and `beforeLabel`/`afterLabel` (`Pending`, `Approved`, `Rejected`). Each action also writes a `STAFF_ONLY` `technical_request` entry (status, and the reason on rejection): the request's own history in the detail view (migration `20261031110000`). History is never rewritten: entries written before that migration keep `technicalRequestId` and `technicalRequest` in `changes`. Every active Technical Support user is notified of a new request; the coordinator of both outcomes (`_notify_coordinator_technical_decision`, with the reason); the owner only of approval. Technical Support read these in `/api/notifications` (target page `TECHNICAL_REQUESTS`).
 - **Legacy lines:** the migration gives each event's existing lines one active header (or a `REJECTED` one). Lines inserted directly without a header (seed and fixture scripts) still hold stock but are not on the dashboard.
 
 ### Venue Photo Gallery (T28, SPM-181)
@@ -842,14 +843,18 @@ review of target migration history; no hosted migration was applied here.
 event visibility check. The owner can read it; permitted organisation members
 can read submitted events. Unrelated users and staff receive the same
 `404 EVENT_NOT_FOUND` as a missing event; unauthenticated requests receive 401.
-The response is private and carries `Cache-Control: no-store`.
+The response is private and carries `Cache-Control: no-store`. The assigned
+coordinator receives `{ arrangements: { technical } }` only (SPM-286 AC5); venues
+and safety stay organiser-only.
 
 The `{ arrangements: { venues, technical, safety } }` response contains
 independent sections with `status: READY | UNAVAILABLE`. A failed read never
 becomes a successful empty array. Venue data includes individually identified
 bookings, primary designation, holds with expiry and safe availability/next
 action messages. Technical data separates named equipment requirements from
-request decisions and technical support requirements. Safety rounds contain
+request decisions and technical support requirements; `requests` has one row
+per technical request (`requestId` = `technical_request_id`, newest first) with
+its items, then any line saved without a request (`requestId: null`). Safety rounds contain
 only the outcome, organiser comment, timestamps and whether they apply to the
 current arrangement version. Internal notes, checklists, staff IDs and raw
 database errors are excluded. This endpoint performs no writes. A final

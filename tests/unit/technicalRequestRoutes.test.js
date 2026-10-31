@@ -11,6 +11,7 @@ jest.mock("../../model/equipmentModel", () => ({
   listTechnicalRequests: jest.fn(),
   getTechnicalRequest: jest.fn(),
   decideTechnicalRequest: jest.fn(),
+  listEquipmentSchedule: jest.fn(),
 }));
 jest.mock("../../model/eventModel", () => ({
   ...jest.requireActual("../../model/eventModel"),
@@ -228,6 +229,7 @@ const DASHBOARD_ROUTES = [
   ["get", "/api/equipment/requests"],
   ["get", "/api/equipment/requests/5"],
   ["post", "/api/equipment/requests/5/decision"],
+  ["get", "/api/equipment/schedule?from=2026-11-01&to=2026-11-30"],
 ];
 
 describe("SPM-287 access (AC6, TC-07)", () => {
@@ -241,6 +243,7 @@ describe("SPM-287 access (AC6, TC-07)", () => {
     expect(equipmentModel.listTechnicalRequests).not.toHaveBeenCalled();
     expect(equipmentModel.getTechnicalRequest).not.toHaveBeenCalled();
     expect(equipmentModel.decideTechnicalRequest).not.toHaveBeenCalled();
+    expect(equipmentModel.listEquipmentSchedule).not.toHaveBeenCalled();
   });
 });
 
@@ -333,5 +336,38 @@ describe("POST /api/equipment/requests/:requestId/decision (SPM-287 AC4-AC7)", (
     const res = await send("post", path, { decision: "APPROVE" });
     expect(res.status).toBe(400);
     expect(res.body.fields).toHaveProperty("idempotencyKey");
+  });
+});
+
+describe("GET /api/equipment/schedule (Technical Support calendar)", () => {
+  test("[SPM-287-SCHEDULE] the Singapore date range reaches the model", async () => {
+    signInAs("TECH_SUPPORT");
+    const schedule = { from: "2026-11-01", to: "2026-11-30", days: [{ date: "2026-11-04", events: [] }] };
+    equipmentModel.listEquipmentSchedule.mockResolvedValue(schedule);
+    const res = await send("get", "/api/equipment/schedule?from=2026-11-01&to=2026-11-30");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(schedule);
+    expect(equipmentModel.listEquipmentSchedule).toHaveBeenCalledWith({ from: "2026-11-01", to: "2026-11-30" });
+  });
+
+  test.each([
+    ["", ["from", "to"]],
+    ["?from=2026-11-01", ["to"]],
+    ["?from=2026-02-30&to=2026-03-01", ["from"]],
+    ["?from=2026-11-01T00:00:00Z&to=2026-11-02", ["from"]],
+    ["?from=2026-11-05&to=2026-11-04", ["to"]],
+    ["?from=2026-11-01&to=2027-01-02", ["to"]],
+  ])("[SPM-287-SCHEDULE] %s is a field error", async (query, fields) => {
+    signInAs("TECH_SUPPORT");
+    const res = await send("get", `/api/equipment/schedule${query}`);
+    expect(res.status).toBe(400);
+    expect(Object.keys(res.body.fields).sort()).toEqual(fields);
+    expect(equipmentModel.listEquipmentSchedule).not.toHaveBeenCalled();
+  });
+
+  test("[SPM-287-SCHEDULE] 62 days is the longest range", async () => {
+    signInAs("TECH_SUPPORT");
+    equipmentModel.listEquipmentSchedule.mockResolvedValue({ days: [] });
+    expect((await send("get", "/api/equipment/schedule?from=2026-11-01&to=2027-01-01")).status).toBe(200);
   });
 });

@@ -12,6 +12,7 @@ const {
   MAX_TECHNICAL_REQUEST_ITEMS,
   MAX_TECHNICAL_ITEM_QUANTITY,
   MAX_REJECTION_REASON,
+  MAX_SCHEDULE_DAYS,
 } = require("../config/equipmentConstants");
 const { toWholeNumber, MAX_INTEGER } = require("./eventValidator");
 
@@ -71,6 +72,8 @@ const MESSAGES = Object.freeze({
   rejectionReasonRequired: "A reason is required to reject the request.",
   rejectionReasonTooLong: `Reason must be ${MAX_REJECTION_REASON} characters or fewer`,
   windowIncomplete: "Send both start and end, or neither.",
+  scheduleDateInvalid: "Enter a date as YYYY-MM-DD, for example 2026-11-04",
+  scheduleRangeInvalid: `End must be on or after the start, at most ${MAX_SCHEDULE_DAYS} days in all`,
 });
 
 // API field name -> key the database functions read.
@@ -380,6 +383,29 @@ const validateTechnicalDecision = (body) => {
   return { values: { decision: source.decision, reason: source.decision === "REJECT" ? reason : null }, fields };
 };
 
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// A real calendar date as written, or null.
+const readCalendarDate = (value) => {
+  if (typeof value !== "string" || !CALENDAR_DATE.test(value)) return null;
+  const time = Date.parse(`${value}T00:00:00Z`);
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === value ? time : null;
+};
+
+// GET /api/equipment/schedule?from&to: Singapore dates, both included.
+const validateScheduleRange = (query) => {
+  const fields = {};
+  const from = readCalendarDate(query.from);
+  const to = readCalendarDate(query.to);
+  if (from === null) fields.from = MESSAGES.scheduleDateInvalid;
+  if (to === null) fields.to = MESSAGES.scheduleDateInvalid;
+  if (from !== null && to !== null && (to < from || (to - from) / DAY_MS >= MAX_SCHEDULE_DAYS)) {
+    fields.to = MESSAGES.scheduleRangeInvalid;
+  }
+  return { values: { from: query.from, to: query.to }, fields };
+};
+
 // GET /api/equipment/requests filters (SPM-287 AC2).
 const validateTechnicalRequestListQuery = (query) => {
   const fields = {};
@@ -404,6 +430,7 @@ module.exports = {
   validateTechnicalItems,
   validateTechnicalDecision,
   validateTechnicalRequestListQuery,
+  validateScheduleRange,
   parseId,
   hasErrors,
   MESSAGES,

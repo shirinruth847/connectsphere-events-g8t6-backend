@@ -277,3 +277,57 @@ describe("SPM-287 equipment dashboard", () => {
     expect(res.body.technicalRequests.map((item) => item.technicalRequestId)).toContain(older.requestId);
   });
 });
+
+describe("SPM-286/287 review fixes", () => {
+  let event;
+  let first;
+  let second;
+
+  beforeAll(async () => {
+    event = await planningEvent(15, 9, 17);
+    first = (await send(event, [{ equipmentId: projectors, quantity: 1 }, { equipmentId: mics, quantity: 2 }])).body.technicalRequestId;
+    expect((await decide(first, { decision: "REJECT", reason: "Projector booked" })).status).toBe(200);
+    second = (await send(event, [{ equipmentId: mics, quantity: 3 }])).body.technicalRequestId;
+    expect((await decide(second, { decision: "APPROVE" })).status).toBe(200);
+  });
+
+  test("[SPM-286-AC5] the assigned coordinator reads the event's requests, one row per request", async () => {
+    const res = await call("get", `/api/events/${event.event_id}/arrangements`, "coordinator");
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body.arrangements)).toEqual(["technical"]);
+    expect(res.body.arrangements.technical.requests.map((request) => [request.requestId, request.status, request.equipment.length])).toEqual([
+      [second, "APPROVED", 1],
+      [first, "REJECTED", 2],
+    ]);
+    expect((await call("get", `/api/events/${event.event_id}/arrangements`, "coordinatorTwo")).status).toBe(404);
+  });
+
+  test("[SPM-286-AC4] the organiser view groups requests the same way", async () => {
+    const res = await call("get", `/api/events/${event.event_id}/arrangements`, "organiserA");
+    expect(res.status).toBe(200);
+    expect(res.body.arrangements.technical.requests.map((request) => request.requestId)).toEqual([second, first]);
+    expect(res.body.arrangements.venues).toBeDefined();
+  });
+
+  test("[SPM-287-HISTORY] the event history shows only labelled status changes", async () => {
+    const res = await call("get", `/api/events/${event.event_id}/history?limit=50`, "coordinator");
+    expect(res.status).toBe(200);
+    const technical = res.body.history.filter((entry) => entry.action.startsWith("TECHNICAL_REQUEST_"));
+    expect(technical).toHaveLength(4);
+    for (const entry of technical) {
+      expect(entry.changes).toEqual([expect.objectContaining({ field: "technicalRequestStatus", label: "Technical request" })]);
+    }
+    expect(technical.map((entry) => entry.changes[0].afterLabel).sort()).toEqual(["Approved", "Pending", "Pending", "Rejected"]);
+  });
+
+  test("[SPM-287-SCHEDULE] Technical Support see the event on its Singapore date with its active equipment", async () => {
+    const res = await call("get", "/api/equipment/schedule?from=2031-05-15&to=2031-05-15", "techSupport");
+    expect(res.status).toBe(200);
+    const [day] = res.body.days;
+    expect(day.date).toBe("2031-05-15");
+    const listed = day.events.find((item) => item.eventId === event.event_id);
+    expect(listed).toMatchObject({ title: event.title, start: expect.any(String), end: expect.any(String) });
+    expect(listed.equipment).toEqual([expect.objectContaining({ equipmentId: mics, quantity: 3, status: "APPROVED", technicalRequestId: second })]);
+    expect((await call("get", "/api/equipment/schedule?from=2031-05-15&to=2031-05-15", "coordinator")).status).toBe(403);
+  });
+});

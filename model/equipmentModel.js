@@ -500,6 +500,10 @@ const listTechnicalRequests = async ({ status, search }, { limit, offset }) => {
 // SPM-287 AC3. Null when no such request.
 const getTechnicalRequest = async (requestId) => callRpc("get_technical_request", { p_request_id: requestId });
 
+// Technical Support calendar: per Singapore date, the events with PENDING or
+// APPROVED equipment.
+const listEquipmentSchedule = async ({ from, to }) => callRpc("list_equipment_schedule", { p_from: from, p_to: to });
+
 // SPM-287 AC4-AC7.
 const decideTechnicalRequest = async ({ actorId, requestId, decision, reason, idempotencyKey }) =>
   callRpc("decide_technical_request", {
@@ -530,6 +534,7 @@ module.exports = {
   listTechnicalRequests,
   getTechnicalRequest,
   decideTechnicalRequest,
+  listEquipmentSchedule,
   toEquipmentError,
   toStatus,
   toDetailStatus,
