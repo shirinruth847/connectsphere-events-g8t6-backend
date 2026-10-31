@@ -279,7 +279,8 @@ const validateBookingItem = (item, index, context) => {
     accessibilityNeeds: accessibilityNeeds || [],
     specialRequirements,
     isPrimary: item.isPrimary === true,
-    holdId,
+    // Keep ordinary bookings' pre-conversion hash stable across deployment.
+    ...(holdId !== null ? { holdId } : {}),
   };
 };
 

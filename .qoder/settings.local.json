@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la && echo \"---DOCS---\" && ls -la *.md 2>/dev/null; find . -maxdepth 2 -name \"AGENTS.md\" -o -maxdepth 2 -name \"CLAUDE.md\" -o -maxdepth 2 -name \"COMMIT_MESSAGES.md\" -o -maxdepth 2 -name \"ConnectSphere-Master.md\" 2>/dev/null | head -50)",
+      "Bash(gh pr view 42 --json number,title,state,headRefName,baseRefName,headRefOid,baseRefOid,mergeable,additions,deletions,changedFiles,body --jq '{number,title,state,headRefName,baseRefName,headRefOid,baseRefOid,mergeable,additions,deletions,changedFiles,body}' 2>&1 | head -100)",
+      "Bash(git fetch origin main --quiet 2>&1; echo \"---MERGE-BASE---\"; git merge-base origin/main HEAD; echo \"---MAIN-HEAD---\"; git rev-parse origin/main; echo \"---HEAD---\"; git rev-parse HEAD; echo \"---DIFFSTAT---\"; git diff --stat origin/main...HEAD | tail -60)",
+      "Bash(gh pr:*)",
+      "Bash(git log --oneline origin/main ^HEAD | head -20; echo \"---COMMITS-IN-PR---\"; gh pr view 42 --json commits --jq '.commits[] | \"\\\\\\(.oid[0:7]\\) \\\\\\(.messageHeadline\\)\"')",
+      "Bash(ls jobs model routes controller tests/unit tests/integration supabase/migrations | sed -n '1,250p'; echo \"---HOLD-REFERENCES---\"; grep -ril \"hold\" --include=*.js --include=*.sql . | grep -v node_modules | head -50)",
+      "Bash(git diff origin/main...HEAD -- model/venueModel.js | tail -90)",
+      "Bash(grep -n \"visibleEvent\\\\|eventId\" middleware/eventAccess.js | head -60; echo \"---ROUTES-CHECK---\"; grep -n \"checkVenueBookings\\\\|venue-bookings/check\" routes/*.js controller/venueController.js | head -20)",
+      "Bash(grep -n \"record_venue_hold_conversion\\\\|request_venue_bookings\\\\|begin_venue_booking_request\\\\|venue_hold_request\\\\|convertedBookingId\\\\|calendar_hold_id\" supabase/migrations/20261028162013_spm179_request_venue_bookings.sql supabase/migrations/20261030143144_spm190_venue_holds.sql supabase/migrations/20261031040000_spm190_hold_review_fixes.sql supabase/migrations/20261031050000_spm190_hold_placement_recovery.sql supabase/migrations/20261031060000_spm190_hold_capacity_guard.sql | head -120)",
+      "Bash(grep -rn \"requireVisibleEvent\\\\s*=\\\\|const requireVisibleEvent\\\\|visibleEvent =\" middleware routes | head -20; echo \"---\"; ls middleware; echo \"---PROCESS-HOLDS---\"; grep -n \"processDueHolds\\\\|expireDueHolds\\\\|markHoldExpired\\\\|begin_hold\\\\|hold expiry\" model/venueModel.js | head -40)",
+      "Bash(grep:*)",
+      "Bash(cat supabase/migrations/20261028162014_spm179_venue_calendar_writer_role.sql; echo \"===ENV-EXAMPLE===\"; grep -n \"VENUE_LOCK_DATABASE_URL\\\\|TEST_DATABASE_URL\\\\|DATABASE_URL\" .env.example README.md | head -40)",
+      "Bash(grep -rn \"venue_calendar_writer\" README.md ConnectSphere-Master.md supabase/migrations/*.sql | head -60)",
+      "Bash(ls -la ..; echo \"---FRONTEND?---\"; ls -d ../connectsphere-events-g8t6-frontend 2>/dev/null; ls -d ../connectsphere-events-g8t6-frontend/connectsphere-g8t6 2>/dev/null)",
+      "Read(//Users/shirinruth/Desktop/school/Y3/sem 1/SPM/**)",
+      "Bash(grep -n \"HOLD_STATUS_LABELS\\\\|VENUE_BOOKING_STATUS_LABELS\" -A12 model/venueModel.js config/eventConstants.js | head -60; echo \"---SUGGEST-CAPACITY---\"; grep -n \"CAPACITY\\\\|expected_attendance\\\\|max_capacity\" supabase/migrations/20261023041519_spm72_event_venue_suggestion.sql | head -30)",
+      "Bash(cd ../connectsphere-events-g8t6-frontend/connectsphere-g8t6 && git branch --show-current && git log --oneline -5 && echo \"---STATUS---\" && git status --porcelain=v1 | head -20 && echo \"---REFERENCES---\" && grep -rn \"holdId\\\\|convertedBooking\\\\|bookingMissing\\\\|capacityAssessment\\\\|Capacity Sufficient\\\\|Capacity Adequate\\\\|Capacity Insufficient\\\\|Find Alternative Venues\\\\|fromHold\" --include=*.ts --include=*.tsx --include=*.js --include=*.jsx app src components lib 2>/dev/null | head -80)",
+      "Bash(grep -n \"^+.*SPM-188\\\\|^+.*SPM-198\\\\|^+.*SPM-200\\\\|^+.*hold\\\\|^+.*capacity\\\\|^+.*Capacity\\\\|^+.*accessib\" /Users/shirinruth/.qoder/tmp/-Users-shirinruth-Desktop-school-Y3-sem-1-SPM-connectsphere-events-g8t6-backend/tool-outputs/session-b91743ed-f7f9-43a3-9e3c-3f41f41c2f4f/b5jn291pf.output | head -80)",
+      "Bash(cd \"$\\(dirname \"$PWD\"\\)/connectsphere-events-g8t6-frontend/connectsphere-g8t6\" && pwd && grep -rn --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' -E \"holdId|convertedBooking|bookingMissing|bookingUnavailable|capacityAssessment|Capacity Sufficient|Capacity Insufficient|Find Alternative Venues|fromHold|assessment\\\\.level\" app src components lib 2>/dev/null | head -120)",
+      "Bash(cd \"$\\(dirname \"$PWD\"\\)/connectsphere-events-g8t6-frontend/connectsphere-g8t6\" && ls && find . -maxdepth 2 -type d -not -path '*/node_modules*' | head -40)",
+      "Bash(npx jest tests/unit/venueHoldConversion.test.js tests/unit/venueHoldConversionModel.test.js tests/unit/venueHoldReadRecovery.test.js tests/unit/eventVenueOptionsModel.test.js --runInBand 2>&1 | tail -80)"
+    ]
+  }
+}
