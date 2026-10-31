@@ -287,6 +287,48 @@ const findHoldsExpiringBy = async (until, { limit = 100, now } = {}) => {
   return documents.map(toEntry);
 };
 
+// SPM-188 AC9/AC10: an active, unexpired hold becomes CONVERTED, naming its
+// booking. It runs under the same event and venue locks as the expiry job and
+// with database time, and it needs the version it read and an expiry still
+// ahead, so a hold is converted or expired, never both. Null when the hold was
+// no longer active, had expired or had changed version.
+const convertHold = async ({ holdId, venueId, expectedVersion, bookingId, now, writeToken }) => {
+  const document = await (await calendar()).findOneAndUpdate(
+    {
+      _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "ACTIVE",
+      version: expectedVersion, holdExpiresAt: { $gt: new Date(now) },
+      // Check at the MongoDB write itself too: PostgreSQL time was read just
+      // before this call, and the hold may expire while the call is in flight.
+      $expr: { $gt: ["$holdExpiresAt", "$$NOW"] },
+    },
+    { $set: { status: "CONVERTED", convertedBookingId: bookingId, updatedAt: new Date(), writeToken }, $inc: { version: 1 } },
+    { returnDocument: "after" }
+  );
+  return document ? toEntry(document) : null;
+};
+
+// Undo for convertHold when the PostgreSQL transaction rolls back; only this
+// write's own conversion (same token and version) is put back.
+const revertConvertedHold = async ({ holdId, venueId, version, writeToken }) => {
+  await (await calendar()).updateOne(
+    { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "CONVERTED", version, writeToken },
+    { $set: { status: "ACTIVE", convertedBookingId: null, updatedAt: new Date() }, $inc: { version: 1 } }
+  );
+};
+
+// Repairs a conversion whose PostgreSQL COMMIT was lost (Master T35): the hold
+// says CONVERTED but no booking names it. Called under the event and venue
+// locks once PostgreSQL shows no linked booking; only the version read is
+// changed, so a concurrent change wins. Returns the ACTIVE hold, or null.
+const restoreOrphanConversion = async ({ holdId, venueId, expectedVersion, convertedBookingId }) => {
+  const document = await (await calendar()).findOneAndUpdate(
+    { _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "CONVERTED", version: expectedVersion, convertedBookingId },
+    { $set: { status: "ACTIVE", convertedBookingId: null, updatedAt: new Date() }, $inc: { version: 1 } },
+    { returnDocument: "after" }
+  );
+  return document ? toEntry(document) : null;
+};
+
 // Post-commit acknowledgement only. A concurrent extension changes version
 // and expiry, so an old reminder/expiry acknowledgement cannot touch it.
 const acknowledgeHoldNotice = async ({ holdId, expectedVersion, expiresAt, kind }) => {
@@ -319,6 +361,9 @@ module.exports = {
   findHoldsExpiringBy,
   markHoldReminded,
   acknowledgeHoldNotice,
+  convertHold,
+  revertConvertedHold,
+  restoreOrphanConversion,
   clearBlockRecovery,
   ownsBlockWrite,
   deleteBlock,
