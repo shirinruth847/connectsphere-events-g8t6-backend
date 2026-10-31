@@ -336,6 +336,8 @@ Venue Staff review the venue booking requests that coordinators raise. Every rou
 
 Both corrective migrations remain unapplied by this local fix. Preserve additive claim rows and MongoDB fields/indexes on application rollback; removing the validator field while documents contain it would invalidate those documents. Reverting to the old worker restores the batching/race defects. No business data backfill or deletion is required.
 
+**Placement recovery rollout:** apply additive PostgreSQL migration `20261031050000_spm190_hold_placement_recovery.sql` before deploying this backend. A retry with the same actor and key re-reads the deterministic hold ID under the event/venue locks. It verifies the unchanged payload, creator, initial version and write token, and proves no committed request links the hold before excluding it from self-conflict checks. It rechecks all other bookings, holds and blocks, records the pending placement transactionally, and reuses the original MongoDB document and expiry. If recovery rolls back, the original remains retryable. Changed, released, extended, expired, mismatched or committed holds are never overwritten or silently renewed. The helper is restricted to the venue-lock role; write metadata stays out of API responses. No MongoDB schema change or data backfill is required. The migration remains unapplied by this local fix.
+
 The assigned coordinator asks Venue Staff to hold one venue for one window of an event in `PLANNING`; Venue Staff place or decline the hold (Master 5.4.3, T34). A hold is a MongoDB `venue_calendar` `HOLD` entry; the request and decision are a `venue_hold_request` row (migration `20261030143144_spm190_venue_holds`).
 
 | Method & path | Who | Input | Success | Errors |

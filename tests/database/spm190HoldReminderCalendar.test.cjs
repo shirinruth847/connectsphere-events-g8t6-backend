@@ -41,4 +41,13 @@ test('reminder batches advance, expired holds stay eligible, stale acknowledgeme
   assert.equal(await calendar.acknowledgeHoldNotice({holdId:first[0].id,expectedVersion:1,expiresAt:expiry,kind:'EXPIRED'}),true);
   assert.equal((await calendar.findCalendarEntry(first[0].id)).status,'EXPIRED');
   assert.equal((await db.collection('venue_calendar').indexes()).some(x=>x.name==='hold_expiry_work'),true);
+  const placed=await calendar.insertHold({holdId:new ObjectId().toString(),venueId:7,eventId:1,label:'Synthetic recovery',
+    start:new Date(+now+10*86400000),end:new Date(+now+10*86400000+3600000),
+    occupiedStart:new Date(+now+10*86400000),occupiedEnd:new Date(+now+10*86400000+3600000),
+    holdExpiresAt:expiry,createdBy:4,writeToken:'synthetic-placement-token'});
+  const internal=await calendar.findHoldPlacementWrite(placed.id);
+  assert.equal(internal.createdBy,4);assert.equal(internal.writeToken,'synthetic-placement-token');
+  const publicEntry=await calendar.findCalendarEntry(placed.id);
+  assert.equal('createdBy' in publicEntry,false);assert.equal('writeToken' in publicEntry,false);
+
 });

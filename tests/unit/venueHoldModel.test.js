@@ -7,6 +7,7 @@ jest.mock("../../config/venueLockDatabase", () => ({ getVenueLockPool: jest.fn()
 jest.mock("../../model/venueDetailModel", () => ({ getVenueDetailsByIds: jest.fn() }));
 jest.mock("../../model/venueCalendarModel", () => ({
   findCalendarEntries: jest.fn(),
+  findHoldPlacementWrite: jest.fn(),
   findCalendarEntry: jest.fn(),
   findEntriesByIds: jest.fn(),
   insertHold: jest.fn(),
@@ -80,6 +81,7 @@ beforeEach(() => {
   supabase.from.mockImplementation(() => chain({ data: requestRow(), error: null }));
   venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map([[String(HALL), { setupMinutes: 30, turnaroundMinutes: 15 }]]));
   venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
+  venueCalendarModel.findHoldPlacementWrite.mockReset().mockResolvedValue(null);
   venueCalendarModel.findEntriesByIds.mockResolvedValue(new Map());
   venueCalendarModel.ownsHoldWrite.mockResolvedValue(false);
   venueCalendarModel.insertHold.mockImplementation(async (input) => {
@@ -202,6 +204,97 @@ describe("placeVenueHold (SPM-190 AC1–AC4)", () => {
       ids.push(JSON.parse(client.query.mock.calls.find(([sql]) => sql.includes("record_venue_hold_placement"))[1][2]).holdId);
     }
     expect(ids[0]).toBe(ids[1]);
+  });
+});
+
+describe("orphan placement recovery", () => {
+  let row;
+  let orphan;
+  const answers = () => ({ begin_venue_hold_placement: { replay: null, bookingConflicts: [] },
+    can_recover_venue_hold_placement: true, record_venue_hold_placement: { holdRequestId: 3 } });
+  beforeEach(() => {
+    row = requestRow(); orphan = null;
+    supabase.from.mockImplementation(() => chain({ data: row, error: null }));
+    venueCalendarModel.findHoldPlacementWrite.mockImplementation(async () => orphan);
+    venueCalendarModel.findCalendarEntries.mockImplementation(async () => orphan ? [orphan] : []);
+  });
+  const leaveOrphan = async () => {
+    lockClient(answers());
+    venueCalendarModel.insertHold.mockImplementationOnce(async input => {
+      orphan = { ...activeHold(), ...input, id: input.holdId, type: "HOLD", status: "ACTIVE", version: 1,
+        extendedAt: null, createdBy: input.createdBy };
+      throw new Error("synthetic acknowledgement lost after persistence");
+    });
+    venueCalendarModel.ownsHoldWrite.mockRejectedValueOnce(new Error("synthetic recovery read unavailable"));
+    venueCalendarModel.deleteHold.mockRejectedValueOnce(new Error("synthetic compensation unavailable"));
+    await expect(place()).rejects.toMatchObject({ code: "VENUE_CALENDAR_OUTCOME_UNKNOWN" });
+    expect(statements).toContain("ROLLBACK");
+    expect(orphan.status).toBe("ACTIVE");
+  };
+
+  test("same-key retry recovers after persistence, acknowledgement, read and compensation failures", async () => {
+    await leaveOrphan();
+    const original = { ...orphan };
+    const client = lockClient(answers());
+    await place();
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+    expect(venueCalendarModel.deleteHold).toHaveBeenCalledTimes(1);
+    expect(orphan).toEqual(original);
+    const payload = JSON.parse(client.query.mock.calls.find(([sql]) => sql.includes("record_venue_hold_placement"))[1][2]);
+    expect(payload.expiresAt).toBe(new Date(original.holdExpiresAt).toISOString());
+    expect(payload.holdId).toBe(original.id);
+    expect(statements.at(-1)).toBe("COMMIT");
+    // A lost success response replays PostgreSQL and does not touch MongoDB.
+    const reads = venueCalendarModel.findHoldPlacementWrite.mock.calls.length;
+    lockClient({ begin_venue_hold_placement: { replay: { holdRequestId: 3 } } });
+    await place();
+    expect(venueCalendarModel.findHoldPlacementWrite.mock.calls.length).toBe(reads);
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+  });
+
+  test("failed recovery commit leaves the old write recoverable without undoing it", async () => {
+    await leaveOrphan();
+    const client = lockClient(answers()); const query = client.query.getMockImplementation();
+    client.query.mockImplementation(async (sql, params) => {
+      if (sql === "COMMIT") throw Object.assign(new Error("synthetic commit refused"), { code: "40001" });
+      return query(sql, params);
+    });
+    await expect(place()).rejects.toBeDefined();
+    expect(venueCalendarModel.deleteHold).toHaveBeenCalledTimes(1); // original attempt only
+    lockClient(answers()); await place();
+    expect(orphan.status).toBe("ACTIVE");
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ["actor", h => { h.createdBy++; }, "IDEMPOTENCY_KEY_REUSED"],
+    ["event", h => { h.eventId++; }, "IDEMPOTENCY_KEY_REUSED"],
+    ["venue", h => { h.venueId++; }, "IDEMPOTENCY_KEY_REUSED"],
+    ["window", h => { h.start = inDays(40); }, "IDEMPOTENCY_KEY_REUSED"],
+    ["label", h => { h.label = "Different request"; }, "IDEMPOTENCY_KEY_REUSED"],
+    ["write identity", h => { delete h.writeToken; }, "VENUE_CALENDAR_OUTCOME_UNKNOWN"],
+    ["version", h => { h.version++; }, "VENUE_CALENDAR_OUTCOME_UNKNOWN"],
+    ["release", h => { h.status = "RELEASED"; }, "VENUE_CALENDAR_OUTCOME_UNKNOWN"],
+    ["expiry", h => { h.holdExpiresAt = inDays(-1); }, "HOLD_EXPIRED"],
+  ])("refuses recovery with changed %s and never overwrites the hold", async (_name, mutate, code) => {
+    await leaveOrphan(); mutate(orphan); lockClient(answers());
+    await expect(place()).rejects.toMatchObject({ code });
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+    expect(venueCalendarModel.deleteHold).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not adopt a hold linked to a committed placement", async () => {
+    await leaveOrphan();
+    lockClient({ ...answers(), can_recover_venue_hold_placement: false });
+    await expect(place()).rejects.toMatchObject({ code: "VENUE_CALENDAR_OUTCOME_UNKNOWN" });
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
+  });
+
+  test("other active holds still block a recovered placement", async () => {
+    await leaveOrphan(); lockClient(answers());
+    venueCalendarModel.findCalendarEntries.mockImplementation(async () => [orphan, { ...orphan, id: "b".repeat(24), eventId: 99 }]);
+    await expect(place()).rejects.toMatchObject({ code: "VENUE_HELD" });
+    expect(venueCalendarModel.insertHold).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -2730,6 +2730,31 @@ const writeCalendarHold = async (identity, write) => {
   }
 };
 
+// Recover only this actor/key's unchanged, still-active placement write. The
+// key-derived ID alone is not sufficient: verify its payload and prove that
+// no committed request owns it. Never overwrite, extend or undo an old write.
+const recoverHoldPlacement = async (client, { actorId, requestId, holdId, row, range, now }) => {
+  const saved = await calendarCall(() => venueCalendarModel.findHoldPlacementWrite(holdId));
+  if (!saved) return null;
+  const sameTime = (left, right) => new Date(left).getTime() === new Date(right).getTime();
+  if (saved.type !== "HOLD" || saved.eventId !== row.event_id || saved.venueId !== row.venue_id
+      || saved.createdBy !== actorId || saved.label !== row.label
+      || !sameTime(saved.start, row.start_datetime) || !sameTime(saved.end, row.end_datetime)
+      || !sameTime(saved.occupiedStart, range.start) || !sameTime(saved.occupiedEnd, range.end)) {
+    throw venueError("IDEMPOTENCY_KEY_REUSED");
+  }
+  if (saved.status !== "ACTIVE" || saved.version !== 1 || saved.extendedAt
+      || typeof saved.writeToken !== "string" || !saved.writeToken) {
+    throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  }
+  const recoverable = await selectResult(client,
+    "SELECT public.can_recover_venue_hold_placement($1,$2,$3) AS result", [actorId, requestId, holdId]);
+  if (!recoverable) throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  if (!venueConflictModel.isHoldActive(saved, now)) throw venueError("HOLD_EXPIRED");
+  if (new Date(saved.holdExpiresAt) > venueConflictModel.holdCutoff(range.start)) throw venueError("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+  return saved;
+};
+
 // POST /api/venues/hold-requests/:requestId/place (AC1–AC4, AC8, AC9). The
 // venue's set-once minutes give the occupied range and the expiry; under the
 // event and venue locks, active bookings (PostgreSQL) and unexpired holds and
@@ -2760,12 +2785,15 @@ const placeVenueHold = async ({ actorId, requestId, idempotencyKey }) => {
       if ((started.bookingConflicts || []).length) throw venueError("VENUE_BOOKING_CONFLICT");
 
       const now = new Date(started.serverNow);
-      const expiresAt = venueConflictModel.holdExpiryFor(range.start, now);
+      const recovered = await recoverHoldPlacement(client, { actorId, requestId, holdId, row, range, now });
+      const expiresAt = recovered ? new Date(recovered.holdExpiresAt) : venueConflictModel.holdExpiryFor(range.start, now);
       if (!expiresAt) throw venueError("HOLD_TOO_LATE");
       const entries = await calendarCall(() => venueCalendarModel.findCalendarEntries(
         [row.venue_id], range.start, range.end, { maxTimeMS: MONGO_READ_UNDER_LOCK_MS }
       ));
-      const conflicts = findCalendarConflicts(entries, { venueId: row.venue_id, range, now });
+      // Exclude only the write whose identity and uncommitted ownership were
+      // verified above. Other holds, including the event's own, still block.
+      const conflicts = findCalendarConflicts(entries.filter(entry => !recovered || entry.id !== holdId), { venueId: row.venue_id, range, now });
       if (conflicts.some((entry) => entry.type === venueConflictModel.ENTRY_TYPES.BLOCK)) throw venueError("VENUE_BLOCKED");
       if (conflicts.length) throw venueError("VENUE_HELD");
 
@@ -2775,6 +2803,10 @@ const placeVenueHold = async ({ actorId, requestId, idempotencyKey }) => {
           holdId, occupiedStart: range.start.toISOString(), occupiedEnd: range.end.toISOString(), expiresAt: expiresAt.toISOString(),
         }), idempotencyKey, requestHash]
       );
+
+      // The original MongoDB write already exists. If this transaction fails,
+      // leave it recoverable for the next retry; its original expiry is kept.
+      if (recovered) return result;
 
       const writeToken = crypto.randomUUID();
       // Registered before the write: a network error can follow persistence.

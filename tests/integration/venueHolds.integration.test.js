@@ -313,6 +313,40 @@ describeLive("SPM-190 tentative venue holds (live)", () => {
     expect(await db.collection("venue_calendar").countDocuments({ venueId: String(venues.annex.venueId), type: "HOLD", status: "ACTIVE" })).toBe(1);
   });
 
+  test("same-key placement recovers a persisted hold after acknowledgement and cleanup failures", async () => {
+    const recoveryVenue = await insertVenue("Recovery", 100);
+    const db = await getMongoDb();
+    await db.collection("venue_details").insertOne({ _id: String(recoveryVenue.venueId), pg_version: 1,
+      name: `${prefix} Recovery`, location: `${prefix} Recovery Road`, setupMinutes: 30, turnaroundMinutes: 0, version: 1 });
+    const requested = await requestHold(eventId, recoveryVenue, AT("10:00"), AT("11:00"));
+    expect(requested.status).toBe(201);
+    const requestId = requested.body.holdRequest.holdRequestId;
+    const key = nextKey();
+    const calendarModel = require("../../model/venueCalendarModel");
+    const realInsert = calendarModel.insertHold;
+    const spies = [
+      jest.spyOn(calendarModel, "insertHold").mockImplementationOnce(async input => {
+        await realInsert(input); throw new Error("synthetic acknowledgement lost after persistence");
+      }),
+      jest.spyOn(calendarModel, "ownsHoldWrite").mockRejectedValueOnce(new Error("synthetic recovery read unavailable")),
+      jest.spyOn(calendarModel, "deleteHold").mockRejectedValueOnce(new Error("synthetic cleanup unavailable")),
+    ];
+    try {
+      const failed = await placeHold(requestId, key);
+      expect(failed.status).toBeGreaterThanOrEqual(500);
+      expect(failed.body.code).toBe("VENUE_CALENDAR_OUTCOME_UNKNOWN");
+    } finally { spies.forEach(spy => spy.mockRestore()); }
+    const orphan = await db.collection("venue_calendar").findOne({ venueId: String(recoveryVenue.venueId) });
+    expect(orphan.status).toBe("ACTIVE");
+    expect((await holdRows(eventId)).find(row => row.hold_request_id === requestId).status).toBe("PENDING");
+    const recovered = await placeHold(requestId, key);
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.holdRequest.hold.holdId).toBe(orphan._id.toString());
+    expect(new Date(recovered.body.holdRequest.hold.expiresAt).getTime()).toBe(orphan.holdExpiresAt.getTime());
+    expect((await placeHold(requestId, key)).status).toBe(200);
+    expect(await db.collection("venue_calendar").countDocuments({ venueId: String(recoveryVenue.venueId) })).toBe(1);
+  });
+
   test("[SPM-190-TC-09] the hold functions are not callable by anon, and only the lock role may place or change holds", async () => {
     const rows = await withPrivilegedDb(async (client) => (await client.query(`
       SELECT p.proname,

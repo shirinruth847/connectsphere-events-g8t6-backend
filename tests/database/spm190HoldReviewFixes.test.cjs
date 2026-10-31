@@ -30,6 +30,7 @@ async function setup(t) {
     INSERT INTO public.venue_hold_request(event_id,venue_id,label,start_datetime,end_datetime,requested_by)
       VALUES(1,7,'Synthetic hold','2030-11-04T13:00Z','2030-11-04T14:00Z',5);`);
   await db.transaction(tx => tx.exec(read('20261031040000_spm190_hold_review_fixes.sql')));
+  await db.transaction(tx => tx.exec(read('20261031050000_spm190_hold_placement_recovery.sql')));
   return db;
 }
 const begin = db => db.query("SELECT public.begin_venue_hold_placement(4,1,'2030-11-04T12:30Z','2030-11-04T14:45Z','key','hash') AS result");
@@ -100,4 +101,23 @@ test('expiry functions and claim table are inaccessible to browser and service w
     has_function_privilege('venue_calendar_writer','public.record_venue_hold_expiry(text,integer,text,integer,timestamptz)','EXECUTE') writer,
     has_table_privilege('service_role','public.venue_hold_notice_claim','INSERT') direct_write`)).rows[0];
   assert.deepEqual(r,{browser:false,service:false,writer:true,direct_write:false});
+});
+
+
+test('orphan recovery requires active Venue Staff, a pending request and no committed hold link', async t => {
+  const db = await setup(t); const id = 'b'.repeat(24);
+  const check = async actor => (await db.query('SELECT public.can_recover_venue_hold_placement($1,1,$2) recoverable',[actor,id])).rows[0].recoverable;
+  assert.equal(await check(4),true);
+  await assert.rejects(check(5),/FORBIDDEN/);
+  await assert.rejects(db.query("SELECT public.can_recover_venue_hold_placement(4,1,'bad')"),/INVALID_HOLD/);
+  await db.query(`INSERT INTO public.venue_hold_request(event_id,venue_id,label,start_datetime,end_datetime,requested_by,status,decided_by,decided_at,calendar_hold_id)
+    VALUES(2,7,'Committed placement','2030-11-04T13:00Z','2030-11-04T14:00Z',5,'PLACED',4,now(),$1)`,[id]);
+  assert.equal(await check(4),false);
+  await db.exec("UPDATE public.venue_hold_request SET status='WITHDRAWN',decided_at=now(),decided_by=5 WHERE hold_request_id=1");
+  assert.equal(await check(4),false);
+  const grants = (await db.query(`SELECT
+    has_function_privilege('authenticated','public.can_recover_venue_hold_placement(integer,integer,text)','EXECUTE') browser,
+    has_function_privilege('service_role','public.can_recover_venue_hold_placement(integer,integer,text)','EXECUTE') service,
+    has_function_privilege('venue_calendar_writer','public.can_recover_venue_hold_placement(integer,integer,text)','EXECUTE') writer`)).rows[0];
+  assert.deepEqual(grants,{browser:false,service:false,writer:true});
 });

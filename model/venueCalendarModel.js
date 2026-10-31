@@ -227,6 +227,15 @@ const insertHold = async ({ holdId, venueId, eventId, label, start, end, occupie
   }
 };
 
+// Internal placement-recovery read. Write identity never enters API views.
+const findHoldPlacementWrite = async (holdId) => {
+  const document = await (await calendar()).findOne(
+    { _id: new ObjectId(holdId) },
+    { readPreference: "primary", maxTimeMS: 3000 }
+  );
+  return document ? { ...toEntry(document), createdBy: document.createdBy, writeToken: document.writeToken } : null;
+};
+
 // Extends (once) or releases an active hold read under the venue lock; matches
 // only that version. Returns the updated entry, or null when nothing matched.
 const changeHold = async ({ holdId, venueId, expectedVersion, holdExpiresAt = null, release = false, writeToken }) => {
@@ -301,6 +310,7 @@ const markHoldReminded = async ({ holdId, expiresAt }) => {
 };
 
 module.exports = {
+  findHoldPlacementWrite,
   insertHold,
   changeHold,
   deleteHold,
