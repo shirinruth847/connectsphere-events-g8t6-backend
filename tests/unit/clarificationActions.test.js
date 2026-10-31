@@ -439,14 +439,20 @@ describe("POST /api/events/:id/amendments (SPM-41 v2 AC3)", () => {
     expect(eventModel.saveClarificationAmendments).not.toHaveBeenCalled();
   });
 
-  test("[SPM-35] should_accept_an_amended_registration_window", async () => {
+  test("[SPM-35] should_judge_the_registration_window_only_when_it_is_amended", async () => {
+    // Registration enabled, saved before SPM-35 without a window.
     eventModel.findVisibleEvent.mockResolvedValue(awaiting({ is_registration_enabled: true, registration_capacity: 50 }));
     const changes = { registrationOpenAt: inDays(2), registrationCloseAt: inDays(10) };
 
-    const res = await post("/api/events/42/amendments", { changes, version: 4 });
+    const untouched = await post("/api/events/42/amendments", { changes: { title: "Alumni Gala" }, version: 4 });
+    const amended = await post("/api/events/42/amendments", { changes, version: 4 });
+    const halfAmended = await post("/api/events/42/amendments", { changes: { registrationCloseAt: inDays(10) }, version: 4 });
 
-    expect(res.status).toBe(200);
-    expect(eventModel.saveClarificationAmendments).toHaveBeenCalledWith(expect.objectContaining({ input: changes }));
+    expect(untouched.status).toBe(200);
+    expect(amended.status).toBe(200);
+    expect(eventModel.saveClarificationAmendments).toHaveBeenLastCalledWith(expect.objectContaining({ input: changes }));
+    expect(halfAmended.status).toBe(400);
+    expect(halfAmended.body.fields.registrationOpenAt).toBe("Registration open date and time is required when registration is enabled.");
   });
 
   test("[SPM-41-AC3] should_answer_400_for_an_unknown_change_or_body_field_including_the_v1_response", async () => {

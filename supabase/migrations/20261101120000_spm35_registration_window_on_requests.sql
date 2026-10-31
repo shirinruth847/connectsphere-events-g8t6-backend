@@ -8,7 +8,8 @@
 --   submit_event_request          writes both and checks them: required when
 --                                 registration is enabled, close after open,
 --                                 close no later than the event start
---   save_clarification_amendments accepts and writes both; close no later than start
+--   save_clarification_amendments accepts and writes both; an amended window
+--                                 closes no later than the event start
 -- Close after open is also the table's event_registration_window_check.
 
 BEGIN;
@@ -551,9 +552,10 @@ BEGIN
   IF v_changes ? 'startDatetime' AND v_event.start_datetime < now() + interval '48 hours' THEN
     RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'INVALID_EVENT_PATCH';
   END IF;
-  -- SPM-35: registration closes by the event start (close after open is
-  -- event_registration_window_check).
-  IF v_event.registration_close_at > v_event.start_datetime THEN
+  -- SPM-35: an amended window closes by the event start (close after open is
+  -- event_registration_window_check). Events saved without one are not rechecked.
+  IF (v_changes_in ? 'registration_open_at' OR v_changes_in ? 'registration_close_at')
+     AND v_event.registration_close_at > v_event.start_datetime THEN
     RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'INVALID_EVENT_SUBMISSION',
       DETAIL = 'registrationCloseAt:AFTER_START';
   END IF;

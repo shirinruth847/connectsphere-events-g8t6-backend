@@ -821,6 +821,7 @@ const getEventReadiness = async (req, res, next) => {
 /// ---------- SPM-41 clarification threads ----------
 
 const KNOWN_AMENDMENT_FIELDS = new Set(AMENDMENT_FIELDS);
+const REGISTRATION_WINDOW_FIELDS = ["registrationOpenAt", "registrationCloseAt"];
 const AMENDMENT_COORDINATOR_CONFLICT =
   "The new dates clash with your coordinator's schedule. Choose different dates or contact your coordinator.";
 
@@ -950,6 +951,11 @@ const checkAmendments = async (existing, changes) => {
   const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input), existing);
   // The 48-hour lead time applies only to a newly chosen start (team decision, 2026-10-24).
   if (input.startDatetime === undefined && errors.startDatetime === MESSAGES.leadTime) delete errors.startDatetime;
+  // SPM-35: the registration window is judged only when the organiser amends it,
+  // so an existing event without one can still be amended.
+  if (REGISTRATION_WINDOW_FIELDS.every((field) => input[field] === undefined)) {
+    for (const field of REGISTRATION_WINDOW_FIELDS) delete errors[field];
+  }
   return { input, errors };
 };
 
