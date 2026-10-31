@@ -37,7 +37,7 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end),event_equipment_requirement(equipment_id,quantity_requested),venue_suggestion:event_venue_suggestion(venue_id,suggested_at,version,venue(name,address,max_capacity),suggester:user(name))";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end,venue(name)),event_equipment_requirement(equipment_id,quantity_requested),venue_suggestion:event_venue_suggestion(venue_id,suggested_at,version,venue(name,address,max_capacity),suggester:user(name))";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
@@ -200,11 +200,13 @@ const sortPreferences = (list) =>
 
 const toIsoOrNull = (value) => (value ? new Date(value).toISOString() : null);
 
-// Each choice's requested time (SPM-76); null times mean the whole event.
+// Each choice's venue name and requested time (SPM-76); null times mean the
+// whole event. The name is null where the row was not read with its venue.
 const toVenuePreferenceTimes = (list) =>
   Array.isArray(list)
     ? sortPreferences(list).map((item) => ({
         venueId: typeof item === "number" ? item : item.venue_id,
+        venueName: typeof item === "number" ? null : item.venue?.name ?? null,
         requestedStart: typeof item === "number" ? null : toIsoOrNull(item.requested_start),
         requestedEnd: typeof item === "number" ? null : toIsoOrNull(item.requested_end),
       }))

@@ -57,14 +57,14 @@ describe("venue choice times (SPM-76 AC4, AC5)", () => {
       event_id: 9,
       status: "DRAFT",
       event_venue_preference: [
-        { venue_id: 2, preference_order: 2, requested_start: "2026-12-01T05:00:00+00:00", requested_end: "2026-12-01T07:00:00+00:00" },
-        { venue_id: 1, preference_order: 1, requested_start: null, requested_end: null },
+        { venue_id: 2, preference_order: 2, requested_start: "2026-12-01T05:00:00+00:00", requested_end: "2026-12-01T07:00:00+00:00", venue: { name: "Breakout" } },
+        { venue_id: 1, preference_order: 1, requested_start: null, requested_end: null, venue: { name: "Hall" } },
       ],
     });
     expect(api.venuePreferences).toEqual([1, 2]);
     expect(api.venuePreferenceTimes).toEqual([
-      { venueId: 1, requestedStart: null, requestedEnd: null },
-      { venueId: 2, requestedStart: "2026-12-01T05:00:00.000Z", requestedEnd: "2026-12-01T07:00:00.000Z" },
+      { venueId: 1, venueName: "Hall", requestedStart: null, requestedEnd: null },
+      { venueId: 2, venueName: "Breakout", requestedStart: "2026-12-01T05:00:00.000Z", requestedEnd: "2026-12-01T07:00:00.000Z" },
     ]);
   });
 
