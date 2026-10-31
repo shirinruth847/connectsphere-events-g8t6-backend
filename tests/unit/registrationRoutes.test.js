@@ -10,6 +10,7 @@ jest.mock("../../model/eventModel", () => {
 
 const request = require("supertest");
 const app = require("../../server");
+const supabase = require("../../config/supabase");
 const userModel = require("../../model/userModel");
 const eventModel = require("../../model/eventModel");
 
@@ -50,11 +51,16 @@ beforeEach(() => {
 });
 
 describe("GET /api/registrations/mine/:eventId", () => {
-  test("[SPM-155 AC4/AC5] returns the event and the attendee's own place", async () => {
+  test("[SPM-155 AC4/AC5][SPM-163 AC3] returns the event and the attendee's own place, with the queue position", async () => {
     eventModel.findRegisteredAttendeeEvent.mockResolvedValue(found);
+    supabase.rpc.mockResolvedValue({
+      data: [{ registration_id: 9, event_id: 42, waitlist_position: 3, offer_id: null, offer_expires_at: null }],
+      error: null,
+    });
     const res = await get("/api/registrations/mine/42");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual(found);
+    expect(res.body).toEqual({ ...found, myRegistration: { ...found.myRegistration, waitlistPosition: 3, offer: null } });
+    expect(supabase.rpc).toHaveBeenCalledWith("list_waitlist_positions", { p_attendee_id: ATTENDEE_ID });
     expect(eventModel.findRegisteredAttendeeEvent).toHaveBeenCalledWith(42, ATTENDEE_ID);
     expect(res.headers["cache-control"]).toBe("no-store");
   });

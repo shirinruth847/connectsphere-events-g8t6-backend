@@ -1,5 +1,5 @@
-// SPM-163 controllers, called directly until the routes are wired into
-// registrationRoutes.js after SPM-134 merges. Only the model is mocked.
+// SPM-163 controllers, called directly; waitlistRoutes.test.js covers the
+// routes. Only the model is mocked.
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/waitlistModel", () => {
   const actual = jest.requireActual("../../model/waitlistModel");
