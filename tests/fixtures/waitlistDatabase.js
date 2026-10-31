@@ -1,8 +1,9 @@
 // Shared in-memory PostgreSQL setup for the SPM-163 waitlist and SPM-147
 // withdrawal database tests. No hosted database, Auth or network.
 //
-// The migrations under test run whole, on top of SPM-134's live
-// register_for_event and event_registration_availability. Most tests seed
+// The migrations under test run whole, on top of SPM-134's
+// register_for_event and event_registration_availability, which the last
+// migration rebuilds so that open offers hold their places. Most tests seed
 // REGISTERED places directly (register); registerDirect calls SPM-134.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -158,6 +159,7 @@ const MIGRATIONS = [
   "20261030170100_spm163_waitlist_offers.sql",
   "20261030170200_spm147_withdraw_registration.sql",
   "20261031030000_spm163_venue_capacity_places.sql",
+  "20261031080611_spm163_offers_hold_places.sql",
 ];
 const applyMigration = (name) => db.exec(read(name));
 

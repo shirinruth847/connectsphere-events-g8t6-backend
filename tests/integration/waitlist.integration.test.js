@@ -21,6 +21,8 @@ const RACE_ARRIVALS_MS = [-600, -400, -250, -150, -50, 100];
 // Registration on a race event closes this long after it is created, so the
 // offer made on withdrawal expires then (D05: capped at registration close).
 const RACE_CLOSE_MS = 12000;
+// Rounds of each last-place race (two requests fired together).
+const CONCURRENCY_ROUNDS = 3;
 
 let fixtures;
 let eventOffset = 0;
@@ -98,10 +100,10 @@ const joinAs = async (key, eventId) => {
 // A full event: the holder has the one place and the waiter is first in the queue.
 const fullEventWithWaiter = async (options) => {
   const eventId = await insertEvent(options);
-  await insertRegistered(eventId, "holder");
+  const holderRegistrationId = await insertRegistered(eventId, "holder");
   const joined = await joinAs("waiter", eventId);
   expect(joined.status).toBe(201);
-  return { eventId, registrationId: joined.body.registration.registrationId };
+  return { eventId, registrationId: joined.body.registration.registrationId, holderRegistrationId };
 };
 
 const statusOf = async (registrationId) => {
@@ -126,6 +128,7 @@ beforeAll(async () => {
   fixtures = await createRegistrationFixtures(runId, [
     { key: "holder", role: "ATTENDEE" },
     { key: "waiter", role: "ATTENDEE" },
+    { key: "walkIn", role: "ATTENDEE" },
     { key: "organiserA", role: "ORGANISER", organisation: "A" },
   ]);
 });
@@ -230,5 +233,109 @@ describe("[SPM-163 AC6/AC7] accept against expiry at the deadline", () => {
       }
     }
     console.info(`[SPM-163] race outcomes: ${outcomes.join(", ")}`);
+  });
+});
+
+// An open offer holds its place against direct registration (20261031080611).
+const registerAs = async (key, eventId) => {
+  const res = await postAs(key, `/api/registrations/mine/${eventId}`, NO_ANSWERS);
+  if (res.status === 201) recordFixtureIds(runId, "registrationIds", [res.body.registration.registrationId]);
+  return res;
+};
+const availabilityOf = async (eventId) => {
+  const { data, error } = await supabase.from("event").select("event_registration_availability").eq("event_id", eventId).single();
+  if (error) throw error;
+  return data.event_registration_availability;
+};
+const registeredCount = async (eventId) => {
+  const { count, error } = await supabase
+    .from("registration")
+    .select("registration_id", { count: "exact", head: true })
+    .eq("event_id", eventId)
+    .eq("registration_status", "REGISTERED");
+  if (error) throw error;
+  return count;
+};
+const offerOf = async (key, eventId) => (await getAs(key, `/api/registrations/mine/${eventId}`)).body.myRegistration.offer;
+const withdrawAs = (key, eventId) => postAs(key, `/api/registrations/mine/${eventId}/withdraw`);
+const acceptAs = (key, eventId, offerId) => postAs(key, `/api/registrations/mine/${eventId}/offer/accept`, { offerId });
+const sortedStatuses = (responses) => responses.map((res) => res.status).sort();
+
+describe("[SPM-163] an open offer holds its place", () => {
+  test("[SPM-163 AC5/AC6] discovery shows the event full and a direct registration is refused until the offer is answered", async () => {
+    const { eventId, registrationId } = await fullEventWithWaiter();
+    expect((await withdrawAs("holder", eventId)).status).toBe(200);
+    const offer = await offerOf("waiter", eventId);
+    expect(offer).toEqual({ offerId: expect.any(Number), expiresAt: expect.any(String) });
+
+    expect(await availabilityOf(eventId)).toBe("FULL_WAITLIST");
+    const direct = await registerAs("walkIn", eventId);
+    expect(direct.status).toBe(409);
+    expect(direct.body.code).toBe("REGISTRATION_FULL");
+
+    const accepted = await acceptAs("waiter", eventId, offer.offerId);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.registration).toMatchObject({ registrationId, status: "REGISTERED", outcome: "ACCEPTED" });
+    expect(await registeredCount(eventId)).toBe(1);
+  });
+});
+
+// Two requests on two pooled connections at once, repeated. The event lock
+// serialises them, so whichever reaches the database first, one place is
+// allocated once and the queue keeps it.
+describe("[SPM-163][SPM-147] last-place races", () => {
+  test("[SPM-163 AC6] the offered attendee's accept against an unrelated direct registration", async () => {
+    for (let round = 0; round < CONCURRENCY_ROUNDS; round += 1) {
+      const { eventId } = await fullEventWithWaiter();
+      expect((await withdrawAs("holder", eventId)).status).toBe(200);
+      const { offerId } = await offerOf("waiter", eventId);
+
+      const [accepted, direct] = await Promise.all([acceptAs("waiter", eventId, offerId), registerAs("walkIn", eventId)]);
+      expect(accepted.status).toBe(200);
+      expect(direct.status).toBe(409);
+      expect(direct.body.code).toBe("REGISTRATION_FULL");
+      expect(await registeredCount(eventId)).toBe(1);
+    }
+  });
+
+  test("[SPM-147 AC4] a withdrawal against a direct registration: the freed place goes to the queue", async () => {
+    for (let round = 0; round < CONCURRENCY_ROUNDS; round += 1) {
+      const { eventId } = await fullEventWithWaiter();
+
+      const [withdrawn, direct] = await Promise.all([withdrawAs("holder", eventId), registerAs("walkIn", eventId)]);
+      expect(withdrawn.status).toBe(200);
+      expect(direct.status).toBe(409);
+      expect(direct.body.code).toBe("REGISTRATION_FULL");
+      expect(await offerOf("waiter", eventId)).toEqual({ offerId: expect.any(Number), expiresAt: expect.any(String) });
+      expect(await registeredCount(eventId)).toBe(0);
+      expect(await availabilityOf(eventId)).toBe("FULL_WAITLIST");
+    }
+  });
+
+  test("[SPM-163 AC6] two accepts of the same offer register the attendee once", async () => {
+    for (let round = 0; round < CONCURRENCY_ROUNDS; round += 1) {
+      const { eventId, registrationId } = await fullEventWithWaiter();
+      expect((await withdrawAs("holder", eventId)).status).toBe(200);
+      const { offerId } = await offerOf("waiter", eventId);
+
+      const responses = await Promise.all([acceptAs("waiter", eventId, offerId), acceptAs("waiter", eventId, offerId)]);
+      expect(sortedStatuses(responses)).toEqual([200, 409]);
+      expect(responses.find((res) => res.status === 409).body.code).toBe("OFFER_NOT_OPEN");
+      expect((await actionsOn(registrationId)).filter((action) => action === "WAITLIST_OFFER_ACCEPTED")).toHaveLength(1);
+      expect(await registeredCount(eventId)).toBe(1);
+    }
+  });
+
+  test("[SPM-147] two withdrawals at once free one place and make one offer", async () => {
+    for (let round = 0; round < CONCURRENCY_ROUNDS; round += 1) {
+      const { eventId, registrationId, holderRegistrationId } = await fullEventWithWaiter();
+
+      const responses = await Promise.all([withdrawAs("holder", eventId), withdrawAs("holder", eventId)]);
+      expect(sortedStatuses(responses)).toEqual([200, 409]);
+      expect(responses.find((res) => res.status === 409).body.code).toBe("NOT_REGISTERED");
+      expect((await actionsOn(holderRegistrationId)).filter((action) => action === "REGISTRATION_WITHDRAWN")).toHaveLength(1);
+      expect((await actionsOn(registrationId)).filter((action) => action === "WAITLIST_OFFER_CREATED")).toHaveLength(1);
+      expect(await availabilityOf(eventId)).toBe("FULL_WAITLIST");
+    }
   });
 });

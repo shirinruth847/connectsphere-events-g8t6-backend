@@ -16,6 +16,8 @@ const {
   noticesFor,
   visible,
   fullEventWithQueue,
+  availabilityOf,
+  one,
 } = require("../fixtures/waitlistDatabase");
 
 before(openWaitlistDatabase);
@@ -105,4 +107,22 @@ test("[SPM-147] a replayed withdrawal returns the stored result without duplicat
   assert.equal(replay.registration.withdrawal_date, first.registration.withdrawal_date);
   assert.equal((await noticesFor(A, eventId)).filter((notice) => notice.type === "REGISTRATION_WITHDRAWN").length, 1);
   assert.equal((await noticesFor(ORGANISER, eventId)).length, 1);
+});
+
+test("[SPM-147] withdrawing twice frees one place, makes one offer and writes each notice once", async () => {
+  const eventId = await fullEventWithQueue([B, C]);
+  const { registration_id: registrationId } = await placeOf(A, eventId);
+  await withdraw(A, eventId);
+  await assert.rejects(withdraw(A, eventId), /NOT_REGISTERED/);
+
+  assert.deepEqual((await offersFor(eventId)).map((offer) => [offer.attendee_id, offer.state]), [[B, "OPEN"]]);
+  assert.equal(await availabilityOf(eventId), "FULL_WAITLIST");
+  assert.equal((await noticesFor(A, eventId)).filter((notice) => notice.type === "REGISTRATION_WITHDRAWN").length, 1);
+  assert.equal((await noticesFor(B, eventId)).filter((notice) => notice.type === "WAITLIST_OFFER").length, 1);
+  assert.deepEqual((await noticesFor(C, eventId)).map((notice) => notice.type), ["WAITLIST_JOINED"]);
+  const { n: withdrawals } = await one(
+    "SELECT count(*)::int AS n FROM public.activity_log WHERE entity_id = $1 AND action = 'REGISTRATION_WITHDRAWN'",
+    [registrationId]
+  );
+  assert.equal(withdrawals, 1);
 });

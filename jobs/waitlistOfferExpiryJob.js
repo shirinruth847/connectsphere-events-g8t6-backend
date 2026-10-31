@@ -1,12 +1,15 @@
 // SPM-163 AC7: expires place offers nobody answered in time and offers each
-// freed place to the next waitlisted attendee. The timer only triggers the
-// work. Correctness comes from the database (database time, the event lock and
+// freed place to the next waitlisted attendee, including places freed while
+// nobody's offer expired (a raised capacity, or offers a refused direct
+// registration rolled back). The timer only triggers the work. Correctness
+// comes from the database (database time, the event lock and
 // a recheck of each offer), so a late, repeated or parallel run never expires
 // an offer twice, and accept requests refuse overdue offers even before this
 // runs (Master 5.6, 8). Same shape as eventReminderJob.js.
 const waitlistModel = require("../model/waitlistModel");
 
-// Events per batch; a batch expires at least one offer per event it handles.
+// Events per batch. The function returns offers expired, so a batch that
+// expired fewer than this ends the run; the next run picks up the rest.
 const BATCH_SIZE = 50;
 const MAX_BATCHES_PER_RUN = 20;
 const DEFAULT_INTERVAL_MS = 60 * 1000;

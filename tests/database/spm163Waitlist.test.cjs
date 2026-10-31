@@ -9,6 +9,7 @@ const {
   B,
   C,
   D,
+  E,
   INACTIVE,
   OTHER_HASH,
   one,
@@ -336,6 +337,147 @@ test("[SPM-163 AC5] no place is offered while the event has no primary venue", a
   const eventId = await fullEventWithQueue([B]);
   await query("DELETE FROM public.venue_booking WHERE event_id = $1", [eventId]);
   await withdraw(A, eventId);
+  assert.deepEqual(await offersFor(eventId), []);
+  assert.equal((await placeOf(B, eventId)).registration_status, "WAITLISTED");
+});
+
+// ---------- open offers hold their places (20261031080611) ----------
+
+const registeredCount = async (eventId) =>
+  (await one("SELECT count(*)::int AS n FROM public.registration WHERE event_id = $1 AND registration_status = 'REGISTERED'", [eventId])).n;
+const setOrganiserCap = (eventId, capacity) =>
+  query("UPDATE public.event SET registration_capacity = $2 WHERE event_id = $1", [eventId, capacity]);
+
+test("[SPM-163 AC5/AC6] an open offer holds the place: direct registration is refused and the offer can still be accepted", async () => {
+  const eventId = await fullEventWithQueue([B]);
+  await withdraw(A, eventId);
+  const offer = await openOfferOf(B, eventId);
+
+  assert.equal(await availabilityOf(eventId), "FULL_WAITLIST");
+  await assert.rejects(registerDirect(C, eventId), /REGISTRATION_FULL/);
+  assert.equal(await placeOf(C, eventId), undefined);
+  assert.equal((await accept(B, eventId, offer.offer_id)).registration.registration_status, "REGISTERED");
+  assert.equal(await registeredCount(eventId), 1);
+});
+
+test("[SPM-163] an open offer takes one place under the venue and organiser limit", async () => {
+  const eventId = await createEvent({ capacity: 3, venueCapacity: 4 });
+  for (const attendeeId of [A, D, E]) await register(attendeeId, eventId);
+  await join(B, eventId);
+  await withdraw(E, eventId);
+  assert.ok(await openOfferOf(B, eventId));
+
+  // Two registered and one open offer fill the organiser's 3 of the venue's 4.
+  assert.equal(await availabilityOf(eventId), "FULL_WAITLIST");
+  await assert.rejects(registerDirect(C, eventId), /REGISTRATION_FULL/);
+  await setOrganiserCap(eventId, 10);
+  assert.equal(await availabilityOf(eventId), "OPEN");
+  assert.equal((await registerDirect(C, eventId)).registration.registration_status, "REGISTERED");
+  assert.equal(await availabilityOf(eventId), "FULL_WAITLIST");
+  assert.equal(await registeredCount(eventId), 3);
+});
+
+test("[SPM-163 AC7] after a decline the next person's offer holds the place", async () => {
+  const eventId = await fullEventWithQueue([B, C]);
+  await withdraw(A, eventId);
+  await decline(B, eventId, (await openOfferOf(B, eventId)).offer_id);
+
+  assert.equal((await placeOf(B, eventId)).registration_status, "WITHDRAWN");
+  const next = await openOfferOf(C, eventId);
+  assert.ok(next);
+  assert.equal(await availabilityOf(eventId), "FULL_WAITLIST");
+  await assert.rejects(registerDirect(D, eventId), /REGISTRATION_FULL/);
+  assert.equal((await accept(C, eventId, next.offer_id)).registration.registration_status, "REGISTERED");
+  assert.equal(await registeredCount(eventId), 1);
+});
+
+test("[SPM-163 AC7] an overdue offer holds nothing, yet its place goes to the next in the queue before any direct registrant", async () => {
+  const eventId = await fullEventWithQueue([B, C]);
+  await withdraw(A, eventId);
+  const overdue = await openOfferOf(B, eventId);
+  await makeOverdue(overdue.offer_id);
+
+  // Before the job runs, C is owed the place and B can no longer take it.
+  assert.equal(await availabilityOf(eventId), "FULL_WAITLIST");
+  await assert.rejects(registerDirect(D, eventId), /REGISTRATION_FULL/);
+  await assert.rejects(accept(B, eventId, overdue.offer_id), /OFFER_EXPIRED/);
+
+  await expireDue();
+  assert.equal((await placeOf(B, eventId)).registration_status, "WITHDRAWN");
+  const next = await openOfferOf(C, eventId);
+  assert.ok(next);
+  await assert.rejects(registerDirect(D, eventId), /REGISTRATION_FULL/);
+  await assert.rejects(accept(B, eventId, overdue.offer_id), /OFFER_EXPIRED/);
+  assert.equal(await placeOf(D, eventId), undefined);
+  assert.equal((await accept(C, eventId, next.offer_id)).registration.registration_status, "REGISTERED");
+  assert.equal(await registeredCount(eventId), 1);
+});
+
+test("[SPM-163 AC7] with nobody else queued, an overdue offer's place opens to a direct registration, which expires the offer", async () => {
+  const eventId = await fullEventWithQueue([B]);
+  await withdraw(A, eventId);
+  const overdue = await openOfferOf(B, eventId);
+  await makeOverdue(overdue.offer_id);
+
+  assert.equal(await availabilityOf(eventId), "OPEN");
+  assert.equal((await registerDirect(C, eventId)).registration.registration_status, "REGISTERED");
+  assert.equal((await placeOf(B, eventId)).registration_status, "WITHDRAWN");
+  assert.deepEqual((await offersFor(eventId)).map((offer) => offer.state), ["EXPIRED"]);
+  assert.equal(await registeredCount(eventId), 1);
+});
+
+test("[SPM-163] a direct registration offers freed places to the queue first and takes only what is left", async () => {
+  const eventId = await fullEventWithQueue([B, C]);
+  await setOrganiserCap(eventId, 4);
+
+  // Three free places, two of them owed to B and C: one is open.
+  assert.equal(await availabilityOf(eventId), "OPEN");
+  assert.equal((await registerDirect(D, eventId)).registration.registration_status, "REGISTERED");
+  assert.ok(await openOfferOf(B, eventId));
+  assert.ok(await openOfferOf(C, eventId));
+  assert.equal(await availabilityOf(eventId), "FULL_WAITLIST");
+  await assert.rejects(registerDirect(E, eventId), /REGISTRATION_FULL/);
+});
+
+test("[SPM-163] a place freed for the queue is refused to a direct registrant and offered by the job", async () => {
+  const eventId = await fullEventWithQueue([B]);
+  await setOrganiserCap(eventId, 2);
+
+  assert.equal(await availabilityOf(eventId), "FULL_WAITLIST");
+  await assert.rejects(registerDirect(C, eventId), /REGISTRATION_FULL/);
+  // The refusal rolled back the offer it made; the job makes it instead.
+  assert.equal(await openOfferOf(B, eventId), undefined);
+  await expireDue();
+  assert.ok(await openOfferOf(B, eventId));
+  assert.equal(await placeOf(C, eventId), undefined);
+  assert.equal(await expireDue(), 0);
+  assert.equal((await offersFor(eventId)).length, 1);
+});
+
+test("[SPM-163 AC5] no offer is made while SPM-134 has the event unavailable for a missing registration start or end time", async () => {
+  for (const column of ["registration_close_at", "registration_open_at"]) {
+    const eventId = await fullEventWithQueue([B]);
+    await query(`UPDATE public.event SET ${column} = NULL WHERE event_id = $1`, [eventId]);
+    assert.equal(await availabilityOf(eventId), "UNAVAILABLE");
+
+    await withdraw(A, eventId);
+    await expireDue();
+    assert.deepEqual(await offersFor(eventId), [], column);
+    assert.equal((await placeOf(B, eventId)).registration_status, "WAITLISTED", column);
+    assert.equal(await availabilityOf(eventId), "UNAVAILABLE", column);
+  }
+});
+
+// Offers end by the event start (D05), so once it has started the queue can
+// no longer be offered a place and does not hold one.
+test("[SPM-163] after the event starts, a free place is open to direct registration while registration stays open", async () => {
+  const eventId = await createEvent({ startsIn: "-30 minutes", closesIn: "1 hour" });
+  await register(A, eventId);
+  await join(B, eventId);
+  await setOrganiserCap(eventId, 2);
+
+  assert.equal(await availabilityOf(eventId), "OPEN");
+  assert.equal((await registerDirect(C, eventId)).registration.registration_status, "REGISTERED");
   assert.deepEqual(await offersFor(eventId), []);
   assert.equal((await placeOf(B, eventId)).registration_status, "WAITLISTED");
 });
