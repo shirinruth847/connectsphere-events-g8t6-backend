@@ -54,11 +54,12 @@ describe("authentication (SPM-155 TC-12)", () => {
   });
 });
 
-describe("role restriction (attendees, organisers and coordinators)", () => {
+describe("role restriction (attendees, organisers, coordinators and Technical Support)", () => {
   test.each(
     [
       ["SPM-192-AC9", "ORGANISER"],
       ["SPM-193-AC11", "COORDINATOR"],
+      ["SPM-286-AC5", "TECH_SUPPORT"],
     ].flatMap(([key, role]) => [
       [key, role, "get", "/api/notifications"],
       [key, role, "get", "/api/notifications/unread-count"],
@@ -96,7 +97,7 @@ describe("role restriction (attendees, organisers and coordinators)", () => {
   });
 
   test.each(
-    ["COORDINATOR_LEAD", "VENUE_STAFF", "TECH_SUPPORT", "SAFETY_OFFICER"].flatMap((role) => [
+    ["COORDINATOR_LEAD", "VENUE_STAFF", "SAFETY_OFFICER"].flatMap((role) => [
       [role, "get", "/api/notifications"],
       [role, "get", "/api/notifications/unread-count"],
       [role, "post", "/api/notifications/read-all"],

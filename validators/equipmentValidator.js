@@ -7,6 +7,12 @@ const {
   EQUIPMENT_STATUS,
   UNAVAILABILITY_REASONS,
   MAX_EQUIPMENT_QUANTITY,
+  TECHNICAL_REQUEST_STATUS,
+  TECHNICAL_DECISIONS,
+  MAX_TECHNICAL_REQUEST_ITEMS,
+  MAX_TECHNICAL_ITEM_QUANTITY,
+  MAX_REJECTION_REASON,
+  MAX_SCHEDULE_DAYS,
 } = require("../config/equipmentConstants");
 const { toWholeNumber, MAX_INTEGER } = require("./eventValidator");
 
@@ -56,6 +62,18 @@ const MESSAGES = Object.freeze({
   endInPast: "End must be in the future",
   noteRequired: "Note is required",
   noteTooLong: `Note must be ${LIMITS.note} characters or fewer`,
+  // Technical requests (SPM-286/287).
+  itemsRequired: `Choose between 1 and ${MAX_TECHNICAL_REQUEST_ITEMS} equipment items.`,
+  itemInvalid: "Choose a catalogue item for each line, once.",
+  itemQuantityInvalid: "Quantity must be a whole number of 1 or more.",
+  unknownEquipment: "This equipment is not in the catalogue.",
+  requestStatusInvalid: "Status must be Pending, Approved or Rejected",
+  decisionInvalid: "Decision must be APPROVE or REJECT.",
+  rejectionReasonRequired: "A reason is required to reject the request.",
+  rejectionReasonTooLong: `Reason must be ${MAX_REJECTION_REASON} characters or fewer`,
+  windowIncomplete: "Send both start and end, or neither.",
+  scheduleDateInvalid: "Enter a date as YYYY-MM-DD, for example 2026-11-04",
+  scheduleRangeInvalid: `End must be on or after the start, at most ${MAX_SCHEDULE_DAYS} days in all`,
 });
 
 // API field name -> key the database functions read.
@@ -308,6 +326,98 @@ const validateEquipmentListQuery = (query) => {
 const parseId = (value) =>
   typeof value === "string" && /^[1-9]\d{0,9}$/.test(value) && Number(value) <= MAX_INTEGER ? Number(value) : null;
 
+// ---------- technical requests (SPM-286/287) ----------
+
+const REQUEST_STATUSES = Object.values(TECHNICAL_REQUEST_STATUS);
+
+// GET /api/events/equipment-options?start&end. No window: usable stock only (SPM-286 AC2).
+const validateAvailabilityWindow = (query) => {
+  const fields = {};
+  const hasStart = !isBlank(query.start);
+  const hasEnd = !isBlank(query.end);
+  if (!hasStart && !hasEnd) return { values: { start: null, end: null }, fields };
+  if (hasStart !== hasEnd) return { values: {}, fields: { [hasStart ? "end" : "start"]: MESSAGES.windowIncomplete } };
+  const start = checkInstant(query, "start", MESSAGES.startRequired, fields);
+  const end = checkInstant(query, "end", MESSAGES.endRequired, fields);
+  if (start && end && start >= end) fields.end = MESSAGES.endBeforeStart;
+  return { values: { start, end }, fields };
+};
+
+const isItemQuantity = (value) => Number.isInteger(value) && value >= 1 && value <= MAX_TECHNICAL_ITEM_QUANTITY;
+
+// POST /api/events/:id/technical-requests: { items: [{ equipmentId, quantity }] }.
+// Field keys name the line, e.g. "items[1].quantity" (SPM-286 AC7).
+const validateTechnicalItems = (body) => {
+  const items = body && typeof body === "object" && !Array.isArray(body) ? body.items : undefined;
+  if (!Array.isArray(items) || items.length < 1 || items.length > MAX_TECHNICAL_REQUEST_ITEMS) {
+    return { values: {}, fields: { items: MESSAGES.itemsRequired } };
+  }
+  const fields = {};
+  const seen = new Set();
+  items.forEach((item, index) => {
+    const valid = item && typeof item === "object" && !Array.isArray(item)
+      && Object.keys(item).every((key) => key === "equipmentId" || key === "quantity");
+    const equipmentId = valid ? toWholeNumber(item.equipmentId) : NaN;
+    if (!Number.isInteger(equipmentId) || equipmentId < 1 || equipmentId > MAX_INTEGER || seen.has(equipmentId)) {
+      fields[`items[${index}].equipmentId`] = MESSAGES.itemInvalid;
+    } else {
+      seen.add(equipmentId);
+    }
+    if (!valid || !isItemQuantity(item.quantity)) fields[`items[${index}].quantity`] = MESSAGES.itemQuantityInvalid;
+  });
+  return {
+    values: { items: items.map((item) => ({ equipmentId: toWholeNumber(item?.equipmentId), quantity: item?.quantity })) },
+    fields,
+  };
+};
+
+// POST /api/equipment/requests/:requestId/decision: { decision, reason } (SPM-287 AC5).
+const validateTechnicalDecision = (body) => {
+  const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  const fields = {};
+  if (!TECHNICAL_DECISIONS.includes(source.decision)) fields.decision = MESSAGES.decisionInvalid;
+  const reason = readText(source.reason);
+  if (reason === undefined) fields.reason = MESSAGES.textInvalid;
+  else if (source.decision === "REJECT" && !reason) fields.reason = MESSAGES.rejectionReasonRequired;
+  else if (reason && reason.length > MAX_REJECTION_REASON) fields.reason = MESSAGES.rejectionReasonTooLong;
+  return { values: { decision: source.decision, reason: source.decision === "REJECT" ? reason : null }, fields };
+};
+
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// A real calendar date as written, or null.
+const readCalendarDate = (value) => {
+  if (typeof value !== "string" || !CALENDAR_DATE.test(value)) return null;
+  const time = Date.parse(`${value}T00:00:00Z`);
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === value ? time : null;
+};
+
+// GET /api/equipment/schedule?from&to: Singapore dates, both included.
+const validateScheduleRange = (query) => {
+  const fields = {};
+  const from = readCalendarDate(query.from);
+  const to = readCalendarDate(query.to);
+  if (from === null) fields.from = MESSAGES.scheduleDateInvalid;
+  if (to === null) fields.to = MESSAGES.scheduleDateInvalid;
+  if (from !== null && to !== null && (to < from || (to - from) / DAY_MS >= MAX_SCHEDULE_DAYS)) {
+    fields.to = MESSAGES.scheduleRangeInvalid;
+  }
+  return { values: { from: query.from, to: query.to }, fields };
+};
+
+// GET /api/equipment/requests filters (SPM-287 AC2).
+const validateTechnicalRequestListQuery = (query) => {
+  const fields = {};
+  const filters = {};
+  checkTextFilter(query, "search", { limit: LIMITS.search, tooLong: MESSAGES.searchTooLong }, filters, fields);
+  if (query.status !== undefined && query.status !== "") {
+    if (REQUEST_STATUSES.includes(query.status)) filters.status = query.status;
+    else fields.status = MESSAGES.requestStatusInvalid;
+  }
+  return { filters, fields };
+};
+
 module.exports = {
   validateEquipmentCreate,
   validateEquipmentUpdate,
@@ -316,6 +426,11 @@ module.exports = {
   validateUnavailabilityUpdate,
   validateVersionOnly,
   validateEquipmentListQuery,
+  validateAvailabilityWindow,
+  validateTechnicalItems,
+  validateTechnicalDecision,
+  validateTechnicalRequestListQuery,
+  validateScheduleRange,
   parseId,
   hasErrors,
   MESSAGES,
