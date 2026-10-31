@@ -434,7 +434,9 @@ const getAttendeeEventDetail = async (req, res, next) => {
 const getEventRequest = async (req, res, next) => {
   try {
     const { event, access } = req.visibleEvent;
-    return res.status(200).json({ event: eventModel.toEventView(event, req.user, access) });
+    const view = eventModel.toEventView(event, req.user, access);
+    if (event.status === "REJECTED") view.rejectionReason = await activityModel.findRejectionReason(event.event_id);
+    return res.status(200).json({ event: view });
   } catch (error) {
     return handleError(error, res, next);
   }
@@ -745,6 +747,35 @@ const confirmEvent = lifecycleAction("CONFIRM");
 const startPreparation = lifecycleAction("START_PREPARATION");
 const completeEvent = lifecycleAction("COMPLETE");
 
+// SPM-40: the actor comes exclusively from verified authentication.
+const rejectSubmittedEvent = async (req, res, next) => {
+  const body = req.body;
+  if (!isPlainObject(body)) return validationFailed(res, { body: "Send the request as a JSON object." });
+  const errors = toUnsupportedFieldErrors(Object.keys(body).filter(key => !["version", "reason"].includes(key)));
+  const expectedVersion = readVersion(body, true, errors);
+  const idempotencyKey = readRequestIdempotencyKey(req, true, errors);
+  const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+  if (!reason) errors.reason = "Rejection notes are required";
+  else if (Array.from(reason).length < 10) errors.reason = "Rejection notes must contain at least 10 characters.";
+  else if (Array.from(reason).length > 2000 || reason.includes("\0")) errors.reason = "Rejection notes must contain at most 2,000 characters and no null characters.";
+  if (hasErrors(errors)) return validationFailed(res, errors);
+  const { eventId } = req.visibleEvent;
+  try {
+    const result = await eventModel.rejectSubmittedEvent({ eventId, actorId: req.user.user_id, expectedVersion, reason, idempotencyKey });
+    markReplay(res, result);
+    const current = await loadEventForViewer(eventId, req.user);
+    if (!current) return eventNotFound(res);
+    return res.status(200).json({ message: "Event request rejected. The organiser has been notified.", event: eventModel.toEventView(current.event, req.user, current.access) });
+  } catch (error) {
+    if (error.name === "EventRequestError") {
+      if (error.code === "EVENT_VERSION_CONFLICT") return sendVersionConflict(req, res, eventId).catch(next);
+      if (error.code === "TRANSITION_NOT_ALLOWED") return res.status(409).json({ code: error.code, error: "Only an event request under review that has never been confirmed can be rejected here.", currentStatus: error.currentStatus });
+      if (error.code === "INVALID_REJECTION_REASON") return validationFailed(res, { reason: "Rejection notes must contain 10 to 2,000 characters and no null characters." });
+    }
+    return handleError(error, res, next);
+  }
+};
+
 // GET /api/events/:id/readiness — SPM-173 AC8: what still blocks safety review and
 // confirmation, one entry per failing condition. Read-only; the actions recheck it.
 const getEventReadiness = async (req, res, next) => {
@@ -1009,6 +1040,7 @@ module.exports = {
   assignCoordinatorAsLead,
   getEventReadiness,
   acceptFeasibility,
+  rejectSubmittedEvent,
   submitForSafetyReview,
   confirmEvent,
   startPreparation,
