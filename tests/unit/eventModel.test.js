@@ -435,8 +435,10 @@ describe("Attendee discovery and registration availability", () => {
     ...overrides,
   });
 
-  test("[SPM-44] should_query_only_published_confirmed_events_in_list_and_detail", async () => {
-    const row = discoveryRow({ status: "CONFIRMED", event_registration_availability: "OPEN" });
+  // Requirement change (attendee lifecycle rule, 31 October 2026): PREPARATION
+  // is discoverable with CONFIRMED; SPM-44's CONFIRMED-only filter is superseded.
+  test("[ATTENDEE-LIFECYCLE] should_query_only_published_confirmed_and_preparation_events_in_list_and_detail", async () => {
+    const row = discoveryRow({ status: "PREPARATION", event_registration_availability: "OPEN" });
     const list = queryReturning({ data: [row], error: null });
     const detail = queryReturning({ data: row, error: null });
     supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(detail);
@@ -445,9 +447,8 @@ describe("Attendee discovery and registration availability", () => {
     expect((await eventModel.findPublishedAttendeeEvent(7)).registrationAvailability).toBe("OPEN");
     for (const query of [list, detail]) {
       expect(query.eq).toHaveBeenCalledWith("is_published", true);
-      expect(query.eq).toHaveBeenCalledWith("status", "CONFIRMED");
-      expect(query.eq).not.toHaveBeenCalledWith("status", "PREPARATION");
-      expect(query.in).not.toHaveBeenCalledWith("status", expect.arrayContaining(["PREPARATION"]));
+      expect(query.in).toHaveBeenCalledWith("status", ["CONFIRMED", "PREPARATION"]);
+      expect(query.eq).not.toHaveBeenCalledWith("status", expect.anything());
     }
   });
 

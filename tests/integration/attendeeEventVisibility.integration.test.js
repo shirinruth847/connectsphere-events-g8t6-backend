@@ -1,9 +1,10 @@
 // SPM-44 live integration tests: which events an attendee can see on the
 // Attendee Event Dashboard (GET /api/events/discovery) and through direct detail
-// access. Visibility follows Jira SPM-44 and Master 1.5 section 5.3 and D02:
-// published events whose status is exactly CONFIRMED and that have not ended;
-// PREPARATION is hidden. State changes are made directly
-// on this run's fixture events, standing in for the lifecycle transitions.
+// access. Visibility follows Master section 5.3 and D02: published events whose
+// status is CONFIRMED or PREPARATION and that have not ended. The attendee
+// lifecycle rule of 31 October 2026 superseded SPM-44's "PREPARATION is hidden";
+// the tests that asserted it were changed deliberately. State changes are made
+// directly on this run's fixture events, standing in for the lifecycle transitions.
 const request = require("supertest");
 const app = require("../../server");
 const supabase = require("../../config/supabase");
@@ -23,7 +24,7 @@ const ALL_EVENT_STATES = [
   "DRAFT", "SUBMITTED", "UNDER_REVIEW", "AWAITING_CLARIFICATION", "APPROVED", "PLANNING",
   "SAFETY_REVIEW", "CONFIRMED", "PREPARATION", "COMPLETED", "CANCELLED", "REJECTED",
 ];
-const DISCOVERABLE_STATES = ["CONFIRMED"];
+const DISCOVERABLE_STATES = ["CONFIRMED", "PREPARATION"];
 const CARD_FIELDS = [
   "description", "endDatetime", "eventId", "location", "organisationName",
   "registrationAvailability", "startDatetime", "title",
@@ -254,8 +255,16 @@ describe("[SPM-44] Attendee Event Dashboard listing", () => {
 });
 
 describe("[SPM-44 Master 5.3] publication and timing boundaries", () => {
-  test("[SPM-44] should_hide_a_published_event_in_preparation_from_list_and_detail", async () => {
+  // Requirement change: this asserted SPM-44's "PREPARATION is hidden".
+  test("[ATTENDEE-LIFECYCLE] should_show_a_published_event_in_preparation_in_list_and_detail", async () => {
     const eventId = await insertEvent("published-preparation", { status: "PREPARATION", is_published: true });
+
+    expect((await listDiscoveryIds()).has(eventId)).toBe(true);
+    expect((await asAttendee(`/api/events/discovery/${eventId}`)).status).toBe(200);
+  });
+
+  test("[ATTENDEE-LIFECYCLE] should_hide_an_unpublished_event_in_preparation_from_list_and_detail", async () => {
+    const eventId = await insertEvent("unpublished-preparation", { status: "PREPARATION", is_published: false });
 
     expect((await listDiscoveryIds()).has(eventId)).toBe(false);
     expect((await asAttendee(`/api/events/discovery/${eventId}`)).status).toBe(404);
@@ -316,7 +325,18 @@ describe("[SPM-44] lifecycle changes reach the dashboard on the next retrieval",
     expect((await asAttendee(`/api/events/discovery/${eventId}`)).status).toBe(200);
   });
 
-  test.each(["PREPARATION", "PLANNING", "CANCELLED", "COMPLETED"])(
+  // Requirement change: PREPARATION left this list; it stays listed (below).
+  test("[ATTENDEE-LIFECYCLE] should_keep_an_event_listed_with_its_detail_after_it_moves_to_preparation", async () => {
+    const eventId = await insertEvent("stays-in-preparation");
+    expect((await listDiscoveryIds()).has(eventId)).toBe(true);
+
+    await setStatus(eventId, "PREPARATION");
+
+    expect((await listDiscoveryIds()).has(eventId)).toBe(true);
+    expect((await asAttendee(`/api/events/discovery/${eventId}`)).status).toBe(200);
+  });
+
+  test.each(["PLANNING", "SAFETY_REVIEW", "CANCELLED", "COMPLETED"])(
     "[TC-EVENT-006] should_remove_an_event_from_list_and_detail_after_it_moves_to_%s",
     async (status) => {
       const eventId = await insertEvent(`leaves-confirmed-${status.toLowerCase()}`);
