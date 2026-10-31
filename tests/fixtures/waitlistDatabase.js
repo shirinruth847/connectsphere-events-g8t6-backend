@@ -160,6 +160,8 @@ const MIGRATIONS = [
   "20261030170200_spm147_withdraw_registration.sql",
   "20261031030000_spm163_venue_capacity_places.sql",
   "20261031080611_spm163_offers_hold_places.sql",
+  // Main's correction must follow the shared waitlist function replacements.
+  "20261031100000_spm134_registration_deadline_clock.sql",
 ];
 const applyMigration = (name) => db.exec(read(name));
 
