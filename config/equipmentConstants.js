@@ -52,12 +52,20 @@ const TECHNICAL_REQUEST_STATUS = Object.freeze({
   REJECTED: "REJECTED",
 });
 
+const TECHNICAL_REQUEST_STATUS_LABELS = Object.freeze({
+  [TECHNICAL_REQUEST_STATUS.PENDING]: "Pending",
+  [TECHNICAL_REQUEST_STATUS.APPROVED]: "Approved",
+  [TECHNICAL_REQUEST_STATUS.REJECTED]: "Rejected",
+});
+
 const TECHNICAL_DECISIONS = Object.freeze(["APPROVE", "REJECT"]);
 
 // Limits the database functions also enforce.
 const MAX_TECHNICAL_REQUEST_ITEMS = 50;
 const MAX_TECHNICAL_ITEM_QUANTITY = 999999;
 const MAX_REJECTION_REASON = 1000;
+// Technical Support calendar (GET /api/equipment/schedule): days per request.
+const MAX_SCHEDULE_DAYS = 62;
 
 // SPM-286 AC2: shown with usable stock while the event has no date and time.
 const AVAILABILITY_PENDING_NOTE = "Availability is confirmed once the event's date and time are chosen.";
@@ -91,10 +99,12 @@ module.exports = {
   UNAVAILABILITY_STATUS,
   MAX_EQUIPMENT_QUANTITY,
   TECHNICAL_REQUEST_STATUS,
+  TECHNICAL_REQUEST_STATUS_LABELS,
   TECHNICAL_DECISIONS,
   MAX_TECHNICAL_REQUEST_ITEMS,
   MAX_TECHNICAL_ITEM_QUANTITY,
   MAX_REJECTION_REASON,
+  MAX_SCHEDULE_DAYS,
   AVAILABILITY_PENDING_NOTE,
   OUTBOX_STATE,
   OUTBOX,

@@ -3,6 +3,7 @@
 const supabase = require("../config/supabase");
 const { parseAccessibility, eventRequestError } = require("./eventModel");
 const { STATUS_LABELS } = require("../config/eventConstants");
+const { TECHNICAL_REQUEST_STATUS_LABELS } = require("../config/equipmentConstants");
 
 const HISTORY_SELECT = "log_id,user_id,action,details,timestamp,actor_role,changes,audience,actor:user(name)";
 const MAX_LOG_ID = 2147483647;
@@ -69,16 +70,26 @@ const toActorName = (row) => {
   return row.actor ? row.actor.name : null;
 };
 
+// Labelled changes: the event status for organisers, and a technical request's
+// status for every reader (SPM-286/287), e.g. "Technical request: Pending → Approved".
+const technicalStatusLabel = (value) => (value ? TECHNICAL_REQUEST_STATUS_LABELS[value] ?? value : null);
+const toLabelledChange = (change, organiserView) => {
+  if (organiserView && change.field === "status") {
+    return { ...change, beforeLabel: STATUS_LABELS[change.before] ?? "Unknown status", afterLabel: STATUS_LABELS[change.after] ?? "Unknown status" };
+  }
+  if (change.field === "technicalRequestStatus") {
+    return { ...change, label: "Technical request", beforeLabel: technicalStatusLabel(change.before), afterLabel: technicalStatusLabel(change.after) };
+  }
+  return change;
+};
+
 const toHistoryEntry = (row, { organiserView = false } = {}) => ({
   historyId: row.log_id,
   action: row.action,
   actor: { userId: row.user_id, name: toActorName(row), role: row.actor_role },
   occurredAt: row.timestamp,
   summary: row.details,
-  changes: toChangeList(row.changes).map((change) =>
-    organiserView && change.field === "status"
-      ? { ...change, beforeLabel: STATUS_LABELS[change.before] ?? "Unknown status", afterLabel: STATUS_LABELS[change.after] ?? "Unknown status" }
-      : change),
+  changes: toChangeList(row.changes).map((change) => toLabelledChange(change, organiserView)),
   audience: row.audience,
 });
 

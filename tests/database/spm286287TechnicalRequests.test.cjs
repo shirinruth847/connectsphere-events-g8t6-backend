@@ -125,6 +125,12 @@ before(async () => {
   await db.exec(read("20261031090000_spm286_287_technical_requests.sql"));
   await db.exec(read("20261031090100_spm286_287_idempotency_operations.sql"));
   await db.exec(read("20261031090200_spm286_temp_reset_where.sql"));
+
+  // History written in the 20261031090000 shape, which 20261031110000 leaves as it is.
+  LEGACY.history = await createEvent({ start: at(23), end: at(24) });
+  LEGACY.historyRequest = (await send(LEGACY.history, [{ equipmentId: MICS, quantity: 1 }])).technicalRequestId;
+  await decide(LEGACY.historyRequest, "REJECT", { reason: "Old shape reason" });
+  await db.exec(read("20261031110000_spm286_287_review_fixes.sql"));
 });
 
 after(async () => {
@@ -134,7 +140,10 @@ after(async () => {
 // ---------- backfill ----------
 
 test("[SPM-286-BACKFILL] mixed legacy lines get one active header and one rejected header", async () => {
-  const headers = await rows("SELECT event_id, status FROM public.technical_request ORDER BY event_id, status");
+  const headers = await rows(
+    "SELECT event_id, status FROM public.technical_request WHERE event_id = ANY($1::integer[]) ORDER BY event_id, status",
+    [[LEGACY.mixed, LEGACY.approved]]
+  );
   assert.deepEqual(headers, [
     { event_id: LEGACY.mixed, status: "PENDING" },
     { event_id: LEGACY.mixed, status: "REJECTED" },
@@ -142,10 +151,50 @@ test("[SPM-286-BACKFILL] mixed legacy lines get one active header and one reject
   ]);
   const lines = await rows(
     `SELECT line.status::text AS line, header.status AS header FROM public.equipment_request AS line
-       JOIN public.technical_request AS header USING (technical_request_id)`
+       JOIN public.technical_request AS header USING (technical_request_id)
+      WHERE line.event_id = ANY($1::integer[])`,
+    [[LEGACY.mixed, LEGACY.approved]]
   );
   assert.equal(lines.length, 5);
   for (const line of lines) assert.equal(line.line, line.header);
+});
+
+test("[SPM-287-HISTORY] earlier entries stay as written and still make up the request's history", async () => {
+  const eventEntries = await rows(
+    "SELECT action, changes FROM public.activity_log WHERE entity_name = 'event' AND entity_id = $1 ORDER BY log_id", [LEGACY.history]
+  );
+  assert.deepEqual(eventEntries, [
+    { action: "TECHNICAL_REQUEST_SENT", changes: { technicalRequestId: LEGACY.historyRequest, technicalRequest: { before: null, after: "PENDING" } } },
+    { action: "TECHNICAL_REQUEST_REJECTED", changes: { technicalRequestId: LEGACY.historyRequest, technicalRequest: { before: "PENDING", after: "REJECTED" } } },
+  ]);
+  const detail = (await one("SELECT public.get_technical_request($1) AS r", [LEGACY.historyRequest])).r;
+  assert.deepEqual(detail.history.map((entry) => [entry.action, entry.rejectionReason]), [
+    ["TECHNICAL_REQUEST_SENT", null],
+    ["TECHNICAL_REQUEST_REJECTED", null],
+    ["TECHNICAL_REQUEST_REJECTED", "Old shape reason"],
+  ]);
+});
+
+test("[SPM-287-HISTORY] new actions write a status-only event entry and one request entry", async () => {
+  const eventId = await createEvent({ start: at(24), end: at(25) });
+  const { technicalRequestId } = await send(eventId, [{ equipmentId: MICS, quantity: 1 }]);
+  await decide(technicalRequestId, "REJECT", { reason: "Mics in repair" });
+  const entries = await rows(
+    `SELECT entity_name, action, changes, audience FROM public.activity_log
+      WHERE (entity_name = 'event' AND entity_id = $1) OR (entity_name = 'technical_request' AND entity_id = $2) ORDER BY log_id`,
+    [eventId, technicalRequestId]
+  );
+  assert.deepEqual(entries, [
+    { entity_name: "event", action: "TECHNICAL_REQUEST_SENT", changes: { technicalRequestStatus: { before: null, after: "PENDING" } }, audience: "STAFF_ONLY" },
+    { entity_name: "technical_request", action: "TECHNICAL_REQUEST_SENT", changes: { status: { before: null, after: "PENDING" } }, audience: "STAFF_ONLY" },
+    { entity_name: "event", action: "TECHNICAL_REQUEST_REJECTED", changes: { technicalRequestStatus: { before: "PENDING", after: "REJECTED" } }, audience: "ORGANISER_SAFE" },
+    { entity_name: "technical_request", action: "TECHNICAL_REQUEST_REJECTED", changes: { status: { before: "PENDING", after: "REJECTED" }, rejectionReason: "Mics in repair" }, audience: "STAFF_ONLY" },
+  ]);
+  const detail = (await one("SELECT public.get_technical_request($1) AS r", [technicalRequestId])).r;
+  assert.deepEqual(detail.history.map((entry) => [entry.action, entry.rejectionReason]), [
+    ["TECHNICAL_REQUEST_SENT", null],
+    ["TECHNICAL_REQUEST_REJECTED", "Mics in repair"],
+  ]);
 });
 
 // ---------- SPM-286 availability ----------
@@ -188,7 +237,7 @@ test("[SPM-286-TC-06] PLANNING: PENDING request, quantities held, Technical Supp
   assert.deepEqual(result.items.map((item) => [item.equipmentId, item.quantity]), [[PROJECTORS, 2], [MICS, 4]]);
   assert.equal(await available(PROJECTORS, at(21), at(23)), 0);
   for (const tech of [TECH, TECH_TWO]) assert.equal((await noticesFor(tech, eventId)).length, 1);
-  const history = await one("SELECT action, audience FROM public.activity_log WHERE entity_id = $1 AND action = 'TECHNICAL_REQUEST_SENT'", [eventId]);
+  const history = await one("SELECT action, audience FROM public.activity_log WHERE entity_name = 'event' AND entity_id = $1 AND action = 'TECHNICAL_REQUEST_SENT'", [eventId]);
   assert.deepEqual(history, { action: "TECHNICAL_REQUEST_SENT", audience: "STAFF_ONLY" });
 });
 
@@ -324,4 +373,45 @@ test("[SPM-287-AC4] approval rechecks stock: unavailability recorded after sendi
   await rejects(decide(technicalRequestId, "APPROVE"), "EQUIPMENT_NOT_AVAILABLE");
   const statuses = await rows("SELECT DISTINCT status::text AS status FROM public.equipment_request WHERE technical_request_id = $1", [technicalRequestId]);
   assert.deepEqual(statuses, [{ status: "PENDING" }]);
+});
+
+// ---------- availability on the E11 pattern (review fix 4) ----------
+
+const sgt = (day, hour) => new Date(Date.UTC(2031, 0, day, hour - 8)).toISOString();
+
+test("[SPM-286-AC1] 3 of 5 approved 09:00-17:00 SGT: an overlapping window sees 2, an evening window sees 5", async () => {
+  await db.query("INSERT INTO public.equipment (equipment_id, name, category, total_quantity) VALUES (110, 'Laser Projector', 'VISUAL', 5)");
+  const e11 = await createEvent({ start: sgt(4, 9), end: sgt(4, 17) });
+  await decide((await send(e11, [{ equipmentId: 110, quantity: 3 }])).technicalRequestId, "APPROVE");
+  assert.equal(await available(110, sgt(4, 10), sgt(4, 14)), 2);
+  assert.equal(await available(110, sgt(4, 16), sgt(4, 18)), 2);
+  assert.equal(await available(110, sgt(4, 17), sgt(4, 19)), 5);
+  assert.equal(await available(110, sgt(4, 18), sgt(4, 22)), 5);
+});
+
+// ---------- Technical Support calendar ----------
+
+test("[SPM-287-SCHEDULE] per Singapore date: each event with its PENDING/APPROVED equipment; multi-day events on every day", async () => {
+  await db.query("INSERT INTO public.equipment (equipment_id, name, category, total_quantity) VALUES (120, 'Stage Light', 'LIGHTING', 10)");
+  const single = await createEvent({ start: sgt(20, 9), end: sgt(20, 12) });
+  const overnight = await createEvent({ start: sgt(20, 22), end: sgt(22, 2) });
+  const rejected = await createEvent({ start: sgt(21, 9), end: sgt(21, 10) });
+  await send(single, [{ equipmentId: 120, quantity: 2 }]);
+  await decide((await send(overnight, [{ equipmentId: 120, quantity: 4 }])).technicalRequestId, "APPROVE");
+  await decide((await send(rejected, [{ equipmentId: 120, quantity: 1 }])).technicalRequestId, "REJECT", { reason: "No" });
+
+  const schedule = (await one("SELECT public.list_equipment_schedule('2031-01-19', '2031-01-23') AS r")).r;
+  assert.deepEqual(schedule.days.map((day) => [day.date, day.events.map((event) => event.eventId)]), [
+    ["2031-01-20", [single, overnight]],
+    ["2031-01-21", [overnight]],
+    ["2031-01-22", [overnight]],
+  ]);
+  const [first] = schedule.days[0].events;
+  assert.equal(first.title.startsWith("spm286 event"), true);
+  assert.equal(first.venue.name, "Synthetic Hall");
+  assert.deepEqual(first.equipment.map(({ equipmentId, name, quantity, status }) => ({ equipmentId, name, quantity, status })), [
+    { equipmentId: 120, name: "Stage Light", quantity: 2, status: "PENDING" },
+  ]);
+  assert.equal(schedule.days[0].events[1].equipment[0].status, "APPROVED");
+  assert.equal((await one("SELECT public.list_equipment_schedule('2031-01-01', '2031-03-05') AS r")).r, null);
 });
