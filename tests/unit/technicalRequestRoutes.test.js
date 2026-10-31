@@ -132,6 +132,23 @@ describe("POST /api/events/drafts equipment quantities (SPM-286 AC3, TC-05)", ()
 
 // ---------- SPM-286 coordinator sends the technical request ----------
 
+describe("PUT /api/events/:id/draft with named saved equipment (SPM-286)", () => {
+  test("[SPM-286] saved requirements read with names still validate on the next save", async () => {
+    signInAs("ORGANISER");
+    eventModel.findVisibleEvent.mockResolvedValue({
+      event_id: 42, organiser_id: USER_ID, status: "DRAFT", title: "Gala", version: 1,
+      event_equipment_requirement: [{ equipment_id: 100, quantity_requested: 4, equipment: { name: "Wireless Mic", category: "Audio" } }],
+    });
+    eventModel.findValidationContext.mockResolvedValue({ allowedLayouts: ["NO_PREFERENCE"], venueIds: [], equipmentIds: [100] });
+    eventModel.saveDraft.mockResolvedValue({ event: { event_id: 42, organiser_id: USER_ID, status: "DRAFT", title: "Gala 2" }, replayed: false });
+
+    const res = await send("put", "/api/events/42/draft", { title: "Gala 2" });
+
+    expect(res.status).toBe(200);
+    expect(eventModel.saveDraft).toHaveBeenCalledWith(expect.objectContaining({ input: { title: "Gala 2" } }));
+  });
+});
+
 describe("POST /api/events/:id/technical-requests (SPM-286 AC5-AC7)", () => {
   const path = "/api/events/42/technical-requests";
 
