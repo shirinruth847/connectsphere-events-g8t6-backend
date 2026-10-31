@@ -33,6 +33,7 @@ const {
   completeEvent,
 } = require("../controller/eventController");
 const { getEventSafetyReviews } = require("../controller/safetyController");
+const { listEquipmentAvailability, requestTechnicalSupport } = require("../controller/equipmentController");
 const {
   getEventVenueOptions,
   getEventVenueAvailability,
@@ -59,11 +60,14 @@ const anySignedInUser = [requireAuth];
 // SPM-173 lifecycle actions: the assigned coordinator only; any other coordinator
 // gets "not found" from requireVisibleEvent.
 const assignedCoordinatorOnly = [...coordinatorOnly, requireVisibleEvent];
+// SPM-286: organisers fill the Equipment section; coordinators edit the lines before sending.
+const equipmentChoosers = [requireAuth, requireRole(USER_ROLES.ORGANISER, USER_ROLES.COORDINATOR)];
 
 // GET / is left free for event discovery (Master section 3.4).
 router.post("/", organiserOnly, createAndSubmit);
 router.post("/drafts", organiserOnly, createDraft);
 router.get("/request-options", organiserOnly, getRequestOptions);
+router.get("/equipment-options", equipmentChoosers, listEquipmentAvailability); // must stay above "/:id"
 router.get("/mine", organiserOnly, validateCursorPagination, listMyEventRequests); // must stay above "/:id"
 router.get("/discovery", attendeeOnly, validateCursorPagination, listAttendeeDiscovery);
 router.get("/discovery/:id", attendeeOnly, getAttendeeEventDetail);
@@ -80,6 +84,7 @@ router.post("/:id/submit-for-safety-review", assignedCoordinatorOnly, submitForS
 router.post("/:id/confirm", assignedCoordinatorOnly, confirmEvent);
 router.post("/:id/start-preparation", assignedCoordinatorOnly, startPreparation);
 router.post("/:id/complete", assignedCoordinatorOnly, completeEvent);
+router.post("/:id/technical-requests", assignedCoordinatorOnly, requestTechnicalSupport); // SPM-286 AC5-AC7
 // Venue section of the event (SPM-72/74): the assigned coordinator and the
 // supervising Lead browse; only the coordinator suggests a venue. Photos are
 // read through GET /api/venues/options/:venueId/photos.

@@ -44,6 +44,24 @@ const UNAVAILABILITY_STATUS = Object.freeze({
 
 const MAX_EQUIPMENT_QUANTITY = 1000000;
 
+// technical_request.status (SPM-286/287). A request is approved or rejected
+// whole (Master 5.5).
+const TECHNICAL_REQUEST_STATUS = Object.freeze({
+  PENDING: "PENDING",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+});
+
+const TECHNICAL_DECISIONS = Object.freeze(["APPROVE", "REJECT"]);
+
+// Limits the database functions also enforce.
+const MAX_TECHNICAL_REQUEST_ITEMS = 50;
+const MAX_TECHNICAL_ITEM_QUANTITY = 999999;
+const MAX_REJECTION_REASON = 1000;
+
+// SPM-286 AC2: shown with usable stock while the event has no date and time.
+const AVAILABILITY_PENDING_NOTE = "Availability is confirmed once the event's date and time are chosen.";
+
 // outbox_entries.state (Master 7.3).
 const OUTBOX_STATE = Object.freeze({
   PENDING: "PENDING",
@@ -72,6 +90,12 @@ module.exports = {
   UNAVAILABILITY_REASON_LABELS,
   UNAVAILABILITY_STATUS,
   MAX_EQUIPMENT_QUANTITY,
+  TECHNICAL_REQUEST_STATUS,
+  TECHNICAL_DECISIONS,
+  MAX_TECHNICAL_REQUEST_ITEMS,
+  MAX_TECHNICAL_ITEM_QUANTITY,
+  MAX_REJECTION_REASON,
+  AVAILABILITY_PENDING_NOTE,
   OUTBOX_STATE,
   OUTBOX,
 };

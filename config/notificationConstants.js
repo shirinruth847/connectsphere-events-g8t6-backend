@@ -19,6 +19,8 @@ const NOTIFICATION_TYPES = Object.freeze({
 const NOTIFICATION_TARGET_PAGES = Object.freeze({
   MY_EVENTS: "MY_EVENTS",
   EVENT_WORKSPACE: "EVENT_WORKSPACE",
+  // Technical Support open the request from their dashboard (SPM-287).
+  TECHNICAL_REQUESTS: "TECHNICAL_REQUESTS",
 });
 
 module.exports = { NOTIFICATION_TYPES, NOTIFICATION_TARGET_PAGES };

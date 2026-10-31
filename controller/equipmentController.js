@@ -7,11 +7,16 @@ const {
   validateUnavailabilityUpdate,
   validateVersionOnly,
   validateEquipmentListQuery,
+  validateAvailabilityWindow,
+  validateTechnicalItems,
+  validateTechnicalDecision,
+  validateTechnicalRequestListQuery,
   parseId,
   hasErrors,
   MESSAGES,
 } = require("../validators/equipmentValidator");
 const { UNAVAILABILITY_STATUS } = require("../config/equipmentConstants");
+const { parseEventId, readIdempotencyKey, IDEMPOTENCY_KEY_MESSAGE } = require("../middleware/validate");
 
 const DOMAIN_ERRORS = Object.freeze({
   // Same response as requireRole: the database re-checks the role in the write.
@@ -20,6 +25,13 @@ const DOMAIN_ERRORS = Object.freeze({
   UNAVAILABILITY_NOT_FOUND: [404, "Unavailable stock record not found."],
   UNAVAILABILITY_VERSION_CONFLICT: [409, "This unavailable stock record was changed after you loaded it. Reload it, then try again."],
   UNAVAILABILITY_ENDED: [409, "This unavailable stock record has ended and can no longer be changed."],
+  EVENT_NOT_FOUND: [404, "Event request not found."],
+  EVENT_NOT_IN_PLANNING: [409, "Technical requests are sent and decided only while the event is in Planning."],
+  EVENT_TIME_NOT_SET: [409, "Set the event's date and time before sending a technical request."],
+  TECHNICAL_REQUEST_NOT_FOUND: [404, "Technical request not found."],
+  TECHNICAL_REQUEST_EXISTS: [409, "This event already has a pending or approved technical request."],
+  IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
+  IDEMPOTENCY_IN_PROGRESS: [409, "This request is still being processed. Try again shortly."],
 });
 
 const sendError = (res, status, code, error, extra) => res.status(status).json({ error, code, ...extra });
@@ -60,6 +72,12 @@ const upcomingRequestsMessage = ({ upcomingCount }) =>
   `This equipment is requested by ${upcomingCount} upcoming event${upcomingCount === 1 ? "" : "s"}. `
   + "Confirm to deactivate it; existing requests are kept.";
 
+// SPM-286 AC6: each refused line with the quantity still available.
+const notAvailableMessage = (items) =>
+  `Not enough equipment for the event's time: ${items
+    .map(({ name, requested, available }) => `${name} (${requested} requested, ${available} available)`)
+    .join(", ")}.`;
+
 const handleError = async (error, res, next, equipmentId) => {
   if (error.name !== "EquipmentError") return next(error);
   if (error.code === "VALIDATION_FAILED") return validationFailed(res, error.fields || {});
@@ -87,6 +105,17 @@ const handleError = async (error, res, next, equipmentId) => {
   }
   if (error.code === "EQUIPMENT_HAS_UPCOMING_REQUESTS") {
     return sendError(res, 409, error.code, upcomingRequestsMessage(error.detail), error.detail);
+  }
+  if (error.code === "EQUIPMENT_NOT_AVAILABLE") {
+    const items = error.detail.items || [];
+    const message = notAvailableMessage(items);
+    return sendError(res, 409, error.code, message, { items, fields: { items: message } });
+  }
+  if (error.code === "UNKNOWN_EQUIPMENT") return validationFailed(res, { items: MESSAGES.unknownEquipment });
+  if (error.code === "TECHNICAL_REQUEST_ALREADY_DECIDED") {
+    return sendError(res, 409, error.code, "This technical request was already decided. Reload it to see the decision.", {
+      status: error.detail.status ?? null,
+    });
   }
   const [status, message] = DOMAIN_ERRORS[error.code] || [];
   return status ? sendError(res, status, error.code, message) : next(error);
@@ -221,6 +250,95 @@ const endUnavailability = async (req, res, next) => {
   }
 };
 
+// ---------- technical requests (SPM-286/287) ----------
+
+const technicalRequestNotFound = (res) =>
+  sendError(res, 404, "TECHNICAL_REQUEST_NOT_FOUND", DOMAIN_ERRORS.TECHNICAL_REQUEST_NOT_FOUND[1]);
+
+const readRequiredKey = (req, fields) => {
+  const idempotencyKey = readIdempotencyKey(req);
+  if (!idempotencyKey) fields.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
+  return idempotencyKey;
+};
+
+const sendWriteResult = (res, result, created) => {
+  const { replayed, ...body } = result;
+  if (replayed) res.set("Idempotent-Replayed", "true");
+  return res.status(created && !replayed ? 201 : 200).json(body);
+};
+
+// GET /api/events/equipment-options?start&end — SPM-286 AC1/AC2
+const listEquipmentAvailability = async (req, res, next) => {
+  const { values, fields } = validateAvailabilityWindow(req.query);
+  if (hasErrors(fields)) return validationFailed(res, fields);
+  try {
+    return res.status(200).json(await equipmentModel.listEquipmentAvailability(values));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+// POST /api/events/:id/technical-requests — SPM-286 AC5-AC7. Idempotency-Key
+// header required. 201 with the PENDING request; 200 for a replay.
+const requestTechnicalSupport = async (req, res, next) => {
+  const eventId = parseEventId(req.params.id);
+  if (!eventId) return sendError(res, 404, "EVENT_NOT_FOUND", DOMAIN_ERRORS.EVENT_NOT_FOUND[1]);
+  const { values, fields } = validateTechnicalItems(req.body);
+  const idempotencyKey = readRequiredKey(req, fields);
+  if (hasErrors(fields)) return validationFailed(res, fields);
+  try {
+    const result = await equipmentModel.requestTechnicalSupport({
+      actorId: req.user.user_id,
+      eventId,
+      items: values.items,
+      idempotencyKey,
+    });
+    return sendWriteResult(res, result, true);
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+// GET /api/equipment/requests?status&search — SPM-287 AC1/AC2
+const listTechnicalRequests = async (req, res, next) => {
+  const { filters, fields } = validateTechnicalRequestListQuery(req.query);
+  if (hasErrors(fields)) return validationFailed(res, fields);
+  try {
+    return res.status(200).json(await equipmentModel.listTechnicalRequests(filters, req.pagination));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+// GET /api/equipment/requests/:requestId — SPM-287 AC3
+const getTechnicalRequest = async (req, res, next) => {
+  const requestId = parseId(req.params.requestId);
+  if (!requestId) return technicalRequestNotFound(res);
+  try {
+    const request = await equipmentModel.getTechnicalRequest(requestId);
+    if (!request) return technicalRequestNotFound(res);
+    return res.status(200).json(request);
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+// POST /api/equipment/requests/:requestId/decision — SPM-287 AC4-AC7.
+// Idempotency-Key header required.
+const decideTechnicalRequest = async (req, res, next) => {
+  const requestId = parseId(req.params.requestId);
+  if (!requestId) return technicalRequestNotFound(res);
+  const { values, fields } = validateTechnicalDecision(req.body);
+  const idempotencyKey = readRequiredKey(req, fields);
+  if (hasErrors(fields)) return validationFailed(res, fields);
+  try {
+    const result = await equipmentModel.decideTechnicalRequest({ actorId: req.user.user_id, requestId, ...values, idempotencyKey });
+    return sendWriteResult(res, result, false);
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
 module.exports = {
   listEquipment,
   listEquipmentOptions,
@@ -231,4 +349,9 @@ module.exports = {
   recordUnavailability,
   updateUnavailability,
   endUnavailability,
+  listEquipmentAvailability,
+  requestTechnicalSupport,
+  listTechnicalRequests,
+  getTechnicalRequest,
+  decideTechnicalRequest,
 };

@@ -3,6 +3,7 @@
 // entry and, when the MongoDB document changes, its outbox entry in one
 // transaction (Master 7.1). Detail is applied to MongoDB after commit
 // (Master 7.3); quantities and selection rules read PostgreSQL only.
+const crypto = require("node:crypto");
 const supabase = require("../config/supabase");
 const outboxModel = require("./outboxModel");
 const equipmentDetailModel = require("./equipmentDetailModel");
@@ -16,6 +17,7 @@ const {
   UNAVAILABILITY_REASON_LABELS,
   UNAVAILABILITY_STATUS,
   OUTBOX_STATE,
+  AVAILABILITY_PENDING_NOTE,
 } = require("../config/equipmentConstants");
 
 const EQUIPMENT_SELECT =
@@ -37,11 +39,28 @@ const RPC_ERRORS = new Set([
   "UNAVAILABILITY_NOT_FOUND",
   "UNAVAILABILITY_VERSION_CONFLICT",
   "UNAVAILABILITY_ENDED",
+  "EVENT_NOT_FOUND",
+  "EVENT_NOT_IN_PLANNING",
+  "EVENT_TIME_NOT_SET",
+  "TECHNICAL_REQUEST_NOT_FOUND",
+  "TECHNICAL_REQUEST_EXISTS",
+  "IDEMPOTENCY_KEY_REUSED",
+  "IDEMPOTENCY_IN_PROGRESS",
 ]);
-const DETAILED_ERRORS = new Set(["EQUIPMENT_QUANTITY_COMMITTED", "EQUIPMENT_STOCK_EXCEEDED", "EQUIPMENT_HAS_UPCOMING_REQUESTS"]);
+const DETAILED_ERRORS = new Set([
+  "EQUIPMENT_QUANTITY_COMMITTED",
+  "EQUIPMENT_STOCK_EXCEEDED",
+  "EQUIPMENT_HAS_UPCOMING_REQUESTS",
+  "EQUIPMENT_NOT_AVAILABLE",
+  "UNKNOWN_EQUIPMENT",
+  "TECHNICAL_REQUEST_ALREADY_DECIDED",
+]);
 const FIELD_ERRORS = Object.freeze({
   UNAVAILABILITY_END_IN_PAST: { endsAt: MESSAGES.endInPast },
   INVALID_EQUIPMENT_CHANGES: {},
+  INVALID_TECHNICAL_REQUEST: { items: MESSAGES.itemsRequired },
+  INVALID_TECHNICAL_DECISION: { decision: MESSAGES.decisionInvalid },
+  REJECTION_REASON_INVALID: { reason: MESSAGES.rejectionReasonRequired },
 });
 const CONSTRAINT_FIELDS = Object.freeze({
   equipment_total_quantity_nonnegative_check: { totalQuantity: MESSAGES.totalQuantityInvalid },
@@ -421,6 +440,77 @@ const endUnavailability = async ({ actorId, equipmentId, unavailabilityId, versi
   return afterUnavailabilityWrite(equipmentId, data);
 };
 
+// ---------- technical requests (SPM-286/287) ----------
+
+const hashRequest = (parts) => crypto.createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+
+const toAvailabilityOption = (row) => ({
+  equipmentId: row.equipment_id,
+  name: row.name,
+  category: row.category,
+  description: row.description,
+  totalQuantity: row.total_quantity,
+  availableQuantity: row.available_quantity,
+});
+
+// SPM-286 AC1/AC2: the catalogue with the quantity free for [start, end), or
+// usable stock with a note while the event has no date and time.
+const listEquipmentAvailability = async ({ start, end }) => {
+  const rows = await callRpc("equipment_availability", { p_from: start, p_to: end, p_equipment_ids: null });
+  const windowSet = Boolean(start && end);
+  return {
+    window: windowSet ? { start, end } : null,
+    note: windowSet ? null : AVAILABILITY_PENDING_NOTE,
+    equipment: rows.map(toAvailabilityOption),
+  };
+};
+
+// Free quantity per active item among equipmentIds (SPM-286 AC3 save check).
+const findAvailableQuantities = async (equipmentIds, { start, end }) => {
+  const rows = await callRpc("equipment_availability", { p_from: start, p_to: end, p_equipment_ids: equipmentIds });
+  return new Map(rows.map((row) => [row.equipment_id, toAvailabilityOption(row)]));
+};
+
+// SPM-286 AC5-AC7: the assigned coordinator sends the request; the database
+// checks role, state, stock and the key in one transaction.
+const requestTechnicalSupport = async ({ actorId, eventId, items, idempotencyKey }) =>
+  callRpc("request_technical_support", {
+    p_actor_id: actorId,
+    p_event_id: eventId,
+    p_items: items,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest([eventId, items]),
+  });
+
+// SPM-287 AC1/AC2.
+const listTechnicalRequests = async ({ status, search }, { limit, offset }) => {
+  const data = await callRpc("list_technical_requests", {
+    p_status: status ?? null,
+    p_search: search ?? null,
+    p_limit: limit,
+    p_offset: offset,
+  });
+  return {
+    technicalRequests: data.items,
+    total: data.total,
+    nextOffset: offset + data.items.length < data.total ? offset + data.items.length : null,
+  };
+};
+
+// SPM-287 AC3. Null when no such request.
+const getTechnicalRequest = async (requestId) => callRpc("get_technical_request", { p_request_id: requestId });
+
+// SPM-287 AC4-AC7.
+const decideTechnicalRequest = async ({ actorId, requestId, decision, reason, idempotencyKey }) =>
+  callRpc("decide_technical_request", {
+    p_actor_id: actorId,
+    p_request_id: requestId,
+    p_decision: decision,
+    p_reason: reason,
+    p_idempotency_key: idempotencyKey,
+    p_request_hash: hashRequest([requestId, decision, reason]),
+  });
+
 module.exports = {
   listEquipment,
   listEquipmentOptions,
@@ -434,6 +524,12 @@ module.exports = {
   recordUnavailability,
   updateUnavailability,
   endUnavailability,
+  listEquipmentAvailability,
+  findAvailableQuantities,
+  requestTechnicalSupport,
+  listTechnicalRequests,
+  getTechnicalRequest,
+  decideTechnicalRequest,
   toEquipmentError,
   toStatus,
   toDetailStatus,
