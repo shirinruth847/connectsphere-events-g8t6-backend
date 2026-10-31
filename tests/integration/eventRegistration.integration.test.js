@@ -172,6 +172,9 @@ beforeAll(async () => {
     { key: "techSupport", role: "TECH_SUPPORT" },
     { key: "safetyOfficer", role: "SAFETY_OFFICER" },
     { key: "inactiveAttendee", role: "ATTENDEE" },
+    { key: "myEvents", role: "ATTENDEE" },
+    { key: "myEventsOther", role: "ATTENDEE" },
+    { key: "myEventsEmpty", role: "ATTENDEE" },
   ]);
   // Trusted setup on this run's own row: an attendee whose account was deactivated.
   const { error } = await supabase
@@ -745,4 +748,150 @@ test("[SPM-134] an event-lock wait across the deadline refuses registration with
     await blocker.end();
     if (pending) await pending;
   }
+});
+
+// SPM-141 My Events: the list and the event page reuse SPM-134, SPM-163 and
+// SPM-147 state. Waitlist positions and offers come from the real join,
+// withdraw and leave routes, so the database decides them.
+describe("[SPM-141] My Events", () => {
+  const places = {};
+  const getAs = async (key, path) => request(app).get(path).set("Authorization", await bearer(key));
+  const postAs = async (key, path, body = {}) => request(app).post(path).set("Authorization", await bearer(key)).send(body);
+  const listAll = async (key, limit) => {
+    const rows = [];
+    let offset = 0;
+    for (let page = 0; page < 20 && offset !== null; page += 1) {
+      const res = await getAs(key, `/api/registrations/mine?limit=${limit}&offset=${offset}`);
+      expect(res.status).toBe(200);
+      rows.push(...res.body.registrations);
+      offset = res.body.page.next_offset;
+    }
+    return rows;
+  };
+  const rowFor = (rows, eventId) => rows.find((row) => row.event.event_id === eventId);
+  const joinAs = async (key, eventId) => {
+    const res = await postAs(key, `/api/registrations/mine/${eventId}/waitlist`, answers());
+    if (res.status === 201) recordFixtureIds(runId, "registrationIds", [res.body.registration.registrationId]);
+    return res;
+  };
+
+  beforeAll(async () => {
+    places.registered = await insertEvent();
+    await insertRegistration(places.registered, "myEvents", "REGISTERED");
+    places.laterRegistered = await insertEvent();
+    await insertRegistration(places.laterRegistered, "myEvents", "REGISTERED");
+    places.withdrawn = await insertEvent();
+    await insertRegistration(places.withdrawn, "myEvents", "WITHDRAWN");
+    places.cancelled = await insertEvent({ status: "CANCELLED" }, { venueCapacity: null });
+    await insertRegistration(places.cancelled, "myEvents", "REGISTERED");
+    places.othersOnly = await insertEvent();
+    await insertRegistration(places.othersOnly, "myEventsOther", "REGISTERED");
+
+    // Full one-place events: myEventsOther queues first on the queue event.
+    places.queue = await insertEvent({ registration_capacity: 1 });
+    await insertRegistration(places.queue, "racer", "REGISTERED");
+    expect((await joinAs("myEventsOther", places.queue)).status).toBe(201);
+    expect((await joinAs("myEvents", places.queue)).status).toBe(201);
+    places.offer = await insertEvent({ registration_capacity: 1 });
+    await insertRegistration(places.offer, "racer", "REGISTERED");
+    expect((await joinAs("myEvents", places.offer)).status).toBe(201);
+    expect((await postAs("racer", `/api/registrations/mine/${places.offer}/withdraw`)).status).toBe(200);
+  });
+
+  test("[TC-MYE-001][TC-MYE-005][TC-MYE-014] registered, waitlisted and offered places each come back once with event date, venue and status", async () => {
+    const rows = await listAll("myEvents", 100);
+    expect(rows.map((row) => row.event.event_id).sort((a, b) => a - b)).toEqual(
+      [places.registered, places.laterRegistered, places.cancelled, places.queue, places.offer].sort((a, b) => a - b)
+    );
+    const registered = rowFor(rows, places.registered);
+    expect(registered).toMatchObject({ registration_status: "REGISTERED", waitlistPosition: null, offer: null });
+    expect(registered.event).toMatchObject({
+      title: expect.stringContaining(`spm134-${runId}-event-`),
+      attendee_status: "CONFIRMED",
+      venue: { name: `spm32-${runId} Venue ${places.registered}`, address: "1 Synthetic Street" },
+    });
+    expect(Date.parse(registered.event.start_datetime)).toBeGreaterThan(Date.now());
+    expect(Date.parse(registered.event.end_datetime)).toBeGreaterThan(Date.parse(registered.event.start_datetime));
+    expect(rowFor(rows, places.queue)).toMatchObject({ registration_status: "WAITLISTED", waitlistPosition: 2, offer: null });
+    const offered = rowFor(rows, places.offer);
+    expect(offered).toMatchObject({ registration_status: "WAITLISTED", waitlistPosition: 1 });
+    expect(offered.offer).toEqual({ offerId: expect.any(Number), expiresAt: expect.any(String) });
+    expect(Date.parse(offered.offer.expiresAt)).toBeGreaterThan(Date.now());
+  });
+
+  test("[TC-MYE-003] a cancelled event keeps the attendee's place status apart from the event's", async () => {
+    const row = rowFor(await listAll("myEvents", 100), places.cancelled);
+    expect(row.registration_status).toBe("REGISTERED");
+    expect(row.event.attendee_status).toBe("CANCELLED");
+    expect(row.event).not.toHaveProperty("status");
+    // Never confirmed, so no confirmed values exist to show (as on the event page).
+    expect(row.event).toMatchObject({ start_datetime: null, venue: null });
+  });
+
+  test("[TC-MYE-010] a withdrawn place is not listed", async () => {
+    expect(rowFor(await listAll("myEvents", 100), places.withdrawn)).toBeUndefined();
+  });
+
+  test("[TC-MYE-011] another attendee's places never appear", async () => {
+    const rows = await listAll("myEvents", 100);
+    expect(rowFor(rows, places.othersOnly)).toBeUndefined();
+    expect(rowFor(await listAll("myEventsOther", 100), places.othersOnly)).toBeDefined();
+  });
+
+  test("[TC-MYE-006] an attendee with no places gets an empty page", async () => {
+    const res = await getAs("myEventsEmpty", "/api/registrations/mine");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ registrations: [], page: { limit: 50, offset: 0, next_offset: null } });
+  });
+
+  test("[TC-MYE-013] walking two-place pages returns every place once, in the same order as one page", async () => {
+    const paged = await listAll("myEvents", 2);
+    const whole = await listAll("myEvents", 100);
+    expect(paged.map((row) => row.registration_id)).toEqual(whole.map((row) => row.registration_id));
+    expect(new Set(paged.map((row) => row.registration_id)).size).toBe(5);
+  });
+
+  test("[TC-MYE-012] other roles are refused", async () => {
+    for (const key of NON_ATTENDEES) {
+      const res = await getAs(key, "/api/registrations/mine");
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("FORBIDDEN");
+    }
+  });
+
+  test("[TC-MYE-004] event details load through the existing event page, and only for the attendee's own places", async () => {
+    const own = await getAs("myEvents", `/api/registrations/mine/${places.registered}`);
+    expect(own.status).toBe(200);
+    expect(own.body.event).toMatchObject({ eventId: places.registered, attendeeStatus: "CONFIRMED", detailsWithheld: false });
+    expect(own.body.myRegistration).toMatchObject({ status: "REGISTERED", waitlistPosition: null, offer: null });
+    const cancelled = await getAs("myEvents", `/api/registrations/mine/${places.cancelled}`);
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.event).toMatchObject({ attendeeStatus: "CANCELLED", detailsWithheld: true });
+    expect((await getAs("myEvents", `/api/registrations/mine/${places.othersOnly}`)).status).toBe(404);
+    expect((await getAs("myEvents", `/api/registrations/mine/${places.withdrawn}`)).status).toBe(404);
+  });
+
+  test("[TC-MYE-007] the queue position is recalculated when someone ahead leaves", async () => {
+    expect((await postAs("myEventsOther", `/api/registrations/mine/${places.queue}/waitlist/leave`)).status).toBe(200);
+    expect(rowFor(await listAll("myEvents", 100), places.queue)).toMatchObject({ registration_status: "WAITLISTED", waitlistPosition: 1 });
+  });
+
+  test("[TC-MYE-008] the listed offer ID is the one Accept takes, and the accepted place then lists as registered", async () => {
+    const { offer } = rowFor(await listAll("myEvents", 100), places.offer);
+    const accepted = await postAs("myEvents", `/api/registrations/mine/${places.offer}/offer/accept`, { offerId: offer.offerId });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.registration.status).toBe("REGISTERED");
+    expect(rowFor(await listAll("myEvents", 100), places.offer)).toMatchObject({
+      registration_status: "REGISTERED",
+      waitlistPosition: null,
+      offer: null,
+    });
+  });
+
+  test("[TC-MYE-009] a listed registered place can be withdrawn through SPM-147 and then leaves the list", async () => {
+    const res = await postAs("myEvents", `/api/registrations/mine/${places.laterRegistered}/withdraw`);
+    expect(res.status).toBe(200);
+    expect(res.body.registration.status).toBe("WITHDRAWN");
+    expect(rowFor(await listAll("myEvents", 100), places.laterRegistered)).toBeUndefined();
+  });
 });
