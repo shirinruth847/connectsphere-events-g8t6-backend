@@ -297,6 +297,9 @@ const convertHold = async ({ holdId, venueId, expectedVersion, bookingId, now, w
     {
       _id: new ObjectId(holdId), venueId: String(venueId), type: "HOLD", status: "ACTIVE",
       version: expectedVersion, holdExpiresAt: { $gt: new Date(now) },
+      // Check at the MongoDB write itself too: PostgreSQL time was read just
+      // before this call, and the hold may expire while the call is in flight.
+      $expr: { $gt: ["$holdExpiresAt", "$$NOW"] },
     },
     { $set: { status: "CONVERTED", convertedBookingId: bookingId, updatedAt: new Date(), writeToken }, $inc: { version: 1 } },
     { returnDocument: "after" }

@@ -138,6 +138,14 @@ describe("convertHold and the expiry job (SPM-188 AC10)", () => {
     expect((await stored()).status).toBe("EXPIRED");
   });
 
+  test("[SPM-188-AC10] should_not_convert_after_expiry_even_with_an_earlier_captured_time", async () => {
+    await placeHold();
+    const expiredAt = new Date(Date.now() - 60_000);
+    await db.collection("venue_calendar").updateOne({ _id: new ObjectId(HOLD_ID) }, { $set: { holdExpiresAt: expiredAt } });
+    expect(await convert(new Date(expiredAt.getTime() - 1000))).toBeNull();
+    expect((await stored()).status).toBe("ACTIVE");
+  });
+
   test("[SPM-188-AC10] should_let_exactly_one_of_a_conversion_and_an_expiry_change_the_hold", async () => {
     await placeHold();
     const [converted, expired] = await Promise.all([

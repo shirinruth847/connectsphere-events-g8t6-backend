@@ -1442,6 +1442,7 @@ const BOOKING_REQUEST_ERRORS = new Set([
   "HOLD_NOT_FOUND",
   "HOLD_ALREADY_CONVERTED",
   "HOLD_WINDOW_CHANGED",
+  "HOLD_DETAILS_CHANGED",
 ]);
 // Another transaction holds a lock this one needs (lock_timeout), or PostgreSQL
 // ended this one to break a deadlock or serialisation clash: the coordinator
@@ -1891,7 +1892,7 @@ const findHoldBooking = async (holdId) => {
 // that says CONVERTED although no booking names it lost its COMMIT after
 // MongoDB was written (Master T35); it is restored to ACTIVE and checked again,
 // so the coordinator's retry completes.
-const readConvertingHolds = async (bookings, eventId, now) => {
+const readConvertingHolds = async (client, bookings, eventId, now) => {
   const converting = [];
   for (const [index, item] of bookings.entries()) {
     if (!item.holdId) continue;
@@ -1912,6 +1913,14 @@ const readConvertingHolds = async (bookings, eventId, now) => {
     if (Date.parse(hold.start) !== Date.parse(item.start) || Date.parse(hold.end) !== Date.parse(item.end)) {
       throw venueError("HOLD_WINDOW_CHANGED", at);
     }
+    const { rows } = await client.query(
+      "SELECT label, expected_attendance FROM public.venue_hold_request WHERE calendar_hold_id = $1 AND event_id = $2 AND venue_id = $3 AND status = 'PLACED' FOR UPDATE",
+      [hold.id, eventId, item.venueId]
+    );
+    if (!rows.length) throw venueError("HOLD_NOT_FOUND", at);
+    if (item.label !== rows[0].label || (rows[0].expected_attendance !== null && item.expectedAttendance !== rows[0].expected_attendance)) {
+      throw venueError("HOLD_DETAILS_CHANGED", at);
+    }
     converting.push({ index, hold });
   }
   return converting;
@@ -1923,7 +1932,7 @@ const readConvertingHolds = async (bookings, eventId, now) => {
 // same database clock, and convertHold needs the version read here and an
 // expiry still ahead, so a hold is converted or expired, never both; a refused
 // conversion rolls everything back.
-const convertHolds = async (client, transaction, { actorId, eventId, converting, saved, now }) => {
+const convertHolds = async (client, transaction, { actorId, eventId, converting, saved }) => {
   for (const { index, hold } of converting) {
     const booking = (saved.bookings || []).find((item) => item.index === index);
     if (!booking) throw venueError("HOLD_NOT_FOUND", { index, venueId: hold.venueId });
@@ -1931,6 +1940,10 @@ const convertHolds = async (client, transaction, { actorId, eventId, converting,
       "SELECT public.record_venue_hold_conversion($1, $2, $3, $4) AS result",
       [actorId, eventId, booking.bookingId, hold.id]
     );
+    // The earlier check may have preceded slow calendar and PostgreSQL work.
+    // Use a fresh database clock immediately before the MongoDB transition.
+    const now = new Date(await selectResult(client, "SELECT clock_timestamp() AS result", []));
+    if (!venueConflictModel.isHoldActive(hold, now)) throw venueError("HOLD_EXPIRED", { index, venueId: hold.venueId });
     const writeToken = crypto.randomUUID();
     transaction.onRollback(() => venueCalendarModel.revertConvertedHold({ holdId: hold.id, venueId: hold.venueId, version: hold.version + 1, writeToken }));
     const converted = await writeCalendarHold({ holdId: hold.id, venueId: hold.venueId, writeToken }, () => venueCalendarModel.convertHold({
@@ -1966,14 +1979,14 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
       const now = bookings.some((item) => item.holdId)
         ? new Date(await selectResult(client, "SELECT clock_timestamp() AS result", []))
         : new Date();
-      const converting = await readConvertingHolds(bookings, eventId, now);
+      const converting = await readConvertingHolds(client, bookings, eventId, now);
       const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || [], { eventId });
       checkedMinutes = minutes;
       const saved = await selectResult(client,
         "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
         [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
       );
-      await convertHolds(client, transaction, { actorId, eventId, converting, saved, now });
+      await convertHolds(client, transaction, { actorId, eventId, converting, saved });
       return saved;
     });
     return toBookingRequestResult(result);

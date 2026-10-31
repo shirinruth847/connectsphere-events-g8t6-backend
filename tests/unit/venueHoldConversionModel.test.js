@@ -28,6 +28,7 @@ const EVENT_ID = 42;
 const HALL = 7;
 const HOLD_ID = "6720a1b2c3d4e5f60718293a";
 const DB_NOW = "2030-03-01T00:00:00.000Z";
+let conversionNow;
 const START = "2030-03-10T02:00:00.000Z";
 const END = "2030-03-10T04:00:00.000Z";
 
@@ -49,11 +50,13 @@ beforeEach(() => {
   jest.spyOn(console, "error").mockImplementation(() => {});
   commit = async () => ({ rows: [] });
   linkedBooking = null;
+  conversionNow = DB_NOW;
   client = Object.assign(new EventEmitter(), {
     release: jest.fn(),
     query: jest.fn(async (sql) => {
       if (sql === "COMMIT") return commit();
-      if (sql.includes("clock_timestamp")) return { rows: [{ result: DB_NOW }] };
+      if (sql.includes("clock_timestamp")) return { rows: [{ result: client.query.mock.calls.filter(([statement]) => statement.includes("clock_timestamp")).length > 1 ? conversionNow : DB_NOW }] };
+      if (sql.includes("FROM public.venue_hold_request")) return { rows: [{ label: item.label, expected_attendance: item.expectedAttendance }] };
       if (sql.includes("begin_venue_booking_request")) {
         return { rows: [{ result: { replay: null, venues: [{ venueId: HALL, name: "Hall", maxCapacity: 200, status: "ACTIVE", isActive: true, operatingHours: "08:00-22:00" }] } }] };
       }
@@ -87,12 +90,31 @@ describe("confirming a hold in the booking request transaction (SPM-188 AC9)", (
 
     expect(statements()).toEqual([
       "BEGIN", "SET LOCAL", "SELECT public.begin_venue_booking_request($1,", "SELECT clock_timestamp()",
-      "SELECT public.request_venue_bookings($1,", "SELECT public.record_venue_hold_conversion($1,", "COMMIT",
+      "SELECT label,", "SELECT public.request_venue_bookings($1,", "SELECT public.record_venue_hold_conversion($1,", "SELECT clock_timestamp()", "COMMIT",
     ]);
     expect(venueCalendarModel.convertHold).toHaveBeenCalledWith(expect.objectContaining({
       holdId: HOLD_ID, venueId: HALL, expectedVersion: 3, bookingId: 900, now: new Date(DB_NOW),
     }));
     expect(venueCalendarModel.revertConvertedHold).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { label: "Different label", expected_attendance: item.expectedAttendance },
+    { label: item.label, expected_attendance: item.expectedAttendance + 1 },
+  ])("should refuse changed hold details before saving: %p", async (details) => {
+    // Keep the normal transaction mock, but return changed hold details for the locked request read.
+    const original = client.query.getMockImplementation();
+    client.query.mockImplementation(async (sql, params) => sql.includes("FROM public.venue_hold_request")
+      ? { rows: [details] }
+      : original(sql, params));
+    await expect(confirm()).rejects.toMatchObject({ code: "HOLD_DETAILS_CHANGED" });
+    expect(venueCalendarModel.convertHold).not.toHaveBeenCalled();
+  });
+
+  test("should refuse conversion if the hold expires during booking checks", async () => {
+    conversionNow = new Date(hold().holdExpiresAt).toISOString();
+    await expect(confirm()).rejects.toMatchObject({ code: "HOLD_EXPIRED" });
+    expect(venueCalendarModel.convertHold).not.toHaveBeenCalled();
   });
 
   test("[SPM-188-AC10] should_undo_the_conversion_when_the_server_refuses_the_commit", async () => {
