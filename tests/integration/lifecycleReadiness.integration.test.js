@@ -265,6 +265,65 @@ describe("SPM-173 confirmation", () => {
     expect(recipients).toEqual(expect.arrayContaining([userId("organiserA"), userId("venueStaff"), userId("techSupport")]));
   });
 
+  // Attendee lifecycle rule (31 October 2026): confirmation publishes the event,
+  // and it stays attendee-facing and registration-capable in PREPARATION.
+  test("[ATTENDEE-LIFECYCLE] the real confirmation publishes the event, which stays discoverable and registrable in preparation", async () => {
+    const attendeeGet = (path) => call("get", path, "attendee");
+    const listed = async (eventId) => {
+      let cursor = null;
+      do {
+        const res = await attendeeGet(`/api/events/discovery?limit=100${cursor ? `&cursor=${cursor}` : ""}`);
+        if (res.status !== 200) throw new Error(`Discovery list failed with ${res.status}`);
+        const found = res.body.events.find((item) => item.eventId === eventId);
+        if (found) return found;
+        cursor = res.body.nextCursor;
+      } while (cursor);
+      return null;
+    };
+
+    const event = await approvedEvent();
+    const startsAt = new Date(event.start_datetime).getTime();
+    check(
+      await supabase.from("event").update({
+        registration_open_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        registration_close_at: new Date(startsAt - 60 * 60 * 1000).toISOString(),
+      }).eq("event_id", event.event_id).select("event_id"),
+      "registration window"
+    );
+    const { data: before } = await supabase.from("event").select("is_published,version").eq("event_id", event.event_id).single();
+    expect(before.is_published).toBe(false);
+    expect(await listed(event.event_id)).toBeNull();
+    expect((await attendeeGet(`/api/events/discovery/${event.event_id}`)).status).toBe(404);
+
+    const confirmed = await call("post", `/api/events/${event.event_id}/confirm`, "coordinator", { version: before.version });
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body.event.status).toBe("CONFIRMED");
+
+    const { data: row } = await supabase.from("event").select("is_published").eq("event_id", event.event_id).single();
+    expect(row.is_published).toBe(true);
+    const snapshots = check(await supabase.from("event_confirmation_snapshots").select("snapshot").eq("event_id", event.event_id), "snapshots");
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0].snapshot.is_published).toBe(true);
+    expect(await listed(event.event_id)).toMatchObject({ eventId: event.event_id, registrationAvailability: "OPEN" });
+
+    const preparing = await call("post", `/api/events/${event.event_id}/start-preparation`, "coordinator", { version: confirmed.body.event.version });
+    expect(preparing.status).toBe(200);
+    expect(preparing.body.event.status).toBe("PREPARATION");
+
+    expect(await listed(event.event_id)).toMatchObject({ eventId: event.event_id, registrationAvailability: "OPEN" });
+    const detail = await attendeeGet(`/api/events/discovery/${event.event_id}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.event).toMatchObject({ eventId: event.event_id, registrationAvailability: "OPEN" });
+
+    const registered = await call("post", `/api/registrations/mine/${event.event_id}`, "attendee", {
+      dietaryRestrictions: null,
+      accessibilityRequirements: null,
+    });
+    if (registered.body.registration) recordFixtureIds(runId, "registrationIds", [registered.body.registration.registrationId]);
+    expect(registered.status).toBe(201);
+    expect(registered.body.registration.status).toBe("REGISTERED");
+  });
+
   test("[SPM-173-TC-05] a failed notification leaves the event, snapshot and history unchanged", async () => {
     const event = await approvedEvent();
     await withPrivilegedDb(async (client) => {
