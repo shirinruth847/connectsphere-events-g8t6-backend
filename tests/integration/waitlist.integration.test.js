@@ -47,7 +47,7 @@ const getAs = async (key, path) => request(app).get(path).set("Authorization", a
 const NO_ANSWERS = { dietaryRestrictions: null, accessibilityRequirements: null };
 
 // One place (organiser cap 1) on its own primary venue and day.
-const insertEvent = async ({ startsInMs, closesInMs, venue = true } = {}) => {
+const insertEvent = async ({ startsInMs, closesInMs, venue = true, status = "CONFIRMED" } = {}) => {
   eventOffset += 1;
   const startsAt = Date.now() + (startsInMs ?? (20 + eventOffset) * DAY);
   const { data, error } = await supabase.from("event").insert({
@@ -55,7 +55,7 @@ const insertEvent = async ({ startsInMs, closesInMs, venue = true } = {}) => {
     description: "Synthetic waitlist event",
     organiser_id: fixtures.accounts.organiserA.userId,
     organisation_id: fixtures.organisations.A,
-    status: "CONFIRMED",
+    status,
     start_datetime: new Date(startsAt).toISOString(),
     end_datetime: new Date(startsAt + 2 * 60 * 60 * 1000).toISOString(),
     expected_attendance: 1,
@@ -278,6 +278,46 @@ describe("[SPM-163] an open offer holds its place", () => {
     expect(accepted.body.registration).toMatchObject({ registrationId, status: "REGISTERED", outcome: "ACCEPTED" });
     expect(await registeredCount(eventId)).toBe(1);
   });
+});
+
+// Attendee lifecycle rule (31 October 2026): PREPARATION keeps CONFIRMED's
+// registration, waitlist and offer rules.
+describe("[ATTENDEE-LIFECYCLE] waitlist and offers in preparation", () => {
+  test("a preparation event takes a direct registration while places are left", async () => {
+    const eventId = await insertEvent({ status: "PREPARATION" });
+    expect(await availabilityOf(eventId)).toBe("OPEN");
+    const registered = await registerAs("walkIn", eventId);
+    expect(registered.status).toBe(201);
+    expect(registered.body.registration.status).toBe("REGISTERED");
+  });
+
+  test("a full preparation event takes a waitlist join, and a withdrawal's offer can be accepted", async () => {
+    const { eventId, registrationId } = await fullEventWithWaiter({ status: "PREPARATION" });
+    expect(await availabilityOf(eventId)).toBe("FULL_WAITLIST");
+
+    expect((await withdrawAs("holder", eventId)).status).toBe(200);
+    const offer = await offerOf("waiter", eventId);
+    expect(offer).toEqual({ offerId: expect.any(Number), expiresAt: expect.any(String) });
+
+    const accepted = await acceptAs("waiter", eventId, offer.offerId);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.registration).toMatchObject({ registrationId, status: "REGISTERED", outcome: "ACCEPTED" });
+    expect(await statusOf(registrationId)).toBe("REGISTERED");
+  });
+
+  test.each(["PLANNING", "SAFETY_REVIEW", "CANCELLED", "COMPLETED"])(
+    "a %s event is not open to registration or the waitlist",
+    async (status) => {
+      const eventId = await insertEvent({ status });
+      expect(await availabilityOf(eventId)).toBe("CLOSED");
+      const registered = await registerAs("walkIn", eventId);
+      expect(registered.status).toBe(404);
+      expect(registered.body.code).toBe("EVENT_NOT_FOUND");
+      const joined = await joinAs("waiter", eventId);
+      expect(joined.status).toBe(404);
+      expect(joined.body.code).toBe("EVENT_NOT_FOUND");
+    }
+  );
 });
 
 // Two requests on two pooled connections at once, repeated. The event lock

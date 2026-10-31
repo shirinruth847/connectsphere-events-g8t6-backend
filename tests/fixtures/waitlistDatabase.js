@@ -163,6 +163,8 @@ const MIGRATIONS = [
   // Main's correction must follow the shared waitlist function replacements.
   "20261031100000_spm134_registration_deadline_clock.sql",
   "20261031130000_spm163_147_post_lock_deadlines.sql",
+  // PREPARATION is attendee-facing like CONFIRMED; confirmation publishes.
+  "20261031140000_attendee_lifecycle_preparation_publication.sql",
 ];
 const applyMigration = (name) => db.exec(read(name));
 

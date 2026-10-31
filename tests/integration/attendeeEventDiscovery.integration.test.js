@@ -399,8 +399,10 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
     expect(listItem.registrationAvailability).toBe("OPEN");
   });
 
-  // Master 1.5 / SPM-44: attendee discovery shows only CONFIRMED events.
-  test("[SPM-44] should_hide_a_published_preparation_event_from_list_and_detail", async () => {
+  // Requirement change (attendee lifecycle rule, 31 October 2026): this test
+  // asserted SPM-44's "PREPARATION is hidden". PREPARATION follows confirmation
+  // and stays attendee-facing, so a published PREPARATION event is now listed.
+  test("[ATTENDEE-LIFECYCLE] should_show_a_published_preparation_event_in_list_and_detail", async () => {
     const { data, error } = await supabase.from("event").insert({
       title: `spm34-${runId}-preparation`,
       description: "Published preparation event",
@@ -424,8 +426,9 @@ describe("[SPM-34-AC3] attendee registration availability", () => {
 
     const events = await listAllDiscoveryEvents();
     const detailResponse = await callAs("get", `/api/events/discovery/${data.event_id}`);
-    expect(events.some((event) => event.eventId === data.event_id)).toBe(false);
-    expect(detailResponse.status).toBe(404);
-    expect(detailResponse.body).toEqual({ error: "Event request not found.", code: "EVENT_NOT_FOUND" });
+    expect(events.some((event) => event.eventId === data.event_id)).toBe(true);
+    expect(detailResponse.status).toBe(200);
+    expect(detailResponse.body.event.eventId).toBe(data.event_id);
+    expect(detailResponse.body.event).not.toHaveProperty("purpose");
   });
 });
