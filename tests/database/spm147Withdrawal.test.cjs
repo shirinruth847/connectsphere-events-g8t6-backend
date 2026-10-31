@@ -74,6 +74,12 @@ test("[SPM-147 AC6] the owner hears of withdrawals within 24 hours of the start,
 
   assert.equal((await lateNotices("2 hours")).notices.length, 1);
   assert.equal((await lateNotices("25 hours")).notices.length, 0);
+  const venueOnly = await createEvent({ capacity: null, venueCapacity: 50, startsIn: "3 hours" });
+  await register(A, venueOnly);
+  await withdraw(A, venueOnly);
+  const [venueNotice] = await noticesFor(ORGANISER, venueOnly);
+  assert.match(venueNotice.message, /Registered now: 0 of 50.$/);
+
   const farFuture = await lateNotices("30 days");
   assert.equal(farFuture.result.registration.late_withdrawal, false);
   assert.equal(farFuture.notices.length, 0);

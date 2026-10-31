@@ -13,7 +13,10 @@ const {
   OTHER_HASH,
   one,
   createEvent,
+  setVenueCapacity,
   register,
+  registerDirect,
+  availabilityOf,
   join,
   leave,
   accept,
@@ -33,7 +36,7 @@ const {
 
 before(openWaitlistDatabase);
 
-test("[SPM-163 AC1] a full event takes waitlist joins; an event with places or no limit refuses them", async () => {
+test("[SPM-163 AC1] a full event takes waitlist joins; an event with places refuses them", async () => {
   const fullEvent = await fullEventWithQueue([]);
   const joined = await join(B, fullEvent);
   assert.equal(joined.registration.registration_status, "WAITLISTED");
@@ -41,8 +44,8 @@ test("[SPM-163 AC1] a full event takes waitlist joins; an event with places or n
 
   const openEvent = await createEvent({ capacity: 5 });
   await assert.rejects(join(B, openEvent), /PLACES_AVAILABLE/);
-  const unlimitedEvent = await createEvent({ capacity: null });
-  await assert.rejects(join(B, unlimitedEvent), /PLACES_AVAILABLE/);
+  const venueOnly = await createEvent({ capacity: null, venueCapacity: 5 });
+  await assert.rejects(join(B, venueOnly), /PLACES_AVAILABLE/);
 });
 
 test("[SPM-163 AC1] joining refuses duplicates, closed registration, hidden events and non-attendees", async () => {
@@ -283,4 +286,56 @@ test("[SPM-163] the database keeps one open offer per place and queue order only
   );
   await query("UPDATE public.registration SET queue_order = 999999 WHERE registration_id = $1", [offer.registration_id]);
   assert.notEqual(Number((await placeOf(B, eventId)).queue_order), 999999);
+});
+
+// ---------- SPM-134's place limit and availability (20261031030000) ----------
+
+test("[SPM-163] the place limit is the primary venue's capacity, lowered by the organiser's cap", async () => {
+  const venueOnly = await createEvent({ capacity: null, venueCapacity: 1 });
+  await register(A, venueOnly);
+  assert.equal((await join(B, venueOnly)).registration.registration_status, "WAITLISTED");
+  await withdraw(A, venueOnly);
+  assert.deepEqual((await offersFor(venueOnly)).map((offer) => [offer.attendee_id, offer.state]), [[B, "OPEN"]]);
+
+  const smallerVenue = await createEvent({ capacity: 5, venueCapacity: 2 });
+  await register(A, smallerVenue);
+  await register(B, smallerVenue);
+  assert.equal((await join(C, smallerVenue)).registration.waitlist_position, 1);
+});
+
+test("[SPM-163 AC1] exactly one of register and join works, with SPM-134's refusals", async () => {
+  const open = await createEvent({ capacity: 2 });
+  await assert.rejects(join(B, open), /PLACES_AVAILABLE/);
+  assert.equal((await registerDirect(B, open)).registration.registration_status, "REGISTERED");
+
+  const full = await fullEventWithQueue([]);
+  assert.equal(await availabilityOf(full), "FULL_WAITLIST");
+  await assert.rejects(registerDirect(B, full), /REGISTRATION_FULL/);
+  assert.equal((await join(B, full)).registration.registration_status, "WAITLISTED");
+
+  await assert.rejects(join(B, await createEvent({ opensIn: "1 day" })), /REGISTRATION_NOT_YET_OPEN/);
+  await assert.rejects(join(B, await createEvent({ venueCapacity: null })), /REGISTRATION_UNAVAILABLE/);
+});
+
+test("[SPM-163 AC6] an offer cannot be accepted once the venue limit drops below it or the venue is gone", async () => {
+  const eventId = await createEvent({ capacity: null, venueCapacity: 2 });
+  await register(A, eventId);
+  await register(D, eventId);
+  await join(B, eventId);
+  await withdraw(D, eventId);
+  const offer = await openOfferOf(B, eventId);
+
+  await setVenueCapacity(eventId, 1);
+  await assert.rejects(accept(B, eventId, offer.offer_id), /REGISTRATION_FULL/);
+  await query("DELETE FROM public.venue_booking WHERE event_id = $1", [eventId]);
+  await assert.rejects(accept(B, eventId, offer.offer_id), /REGISTRATION_UNAVAILABLE/);
+  assert.equal((await openOfferOf(B, eventId)).offer_id, offer.offer_id);
+});
+
+test("[SPM-163 AC5] no place is offered while the event has no primary venue", async () => {
+  const eventId = await fullEventWithQueue([B]);
+  await query("DELETE FROM public.venue_booking WHERE event_id = $1", [eventId]);
+  await withdraw(A, eventId);
+  assert.deepEqual(await offersFor(eventId), []);
+  assert.equal((await placeOf(B, eventId)).registration_status, "WAITLISTED");
 });

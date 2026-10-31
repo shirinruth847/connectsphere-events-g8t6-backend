@@ -10,7 +10,9 @@ const OFFER_NOT_FOUND = { error: "Place offer not found.", code: "OFFER_NOT_FOUN
 const REGISTRATION_ACTION_CONFLICTS = Object.freeze({
   ALREADY_REGISTERED: "You're already registered for this event.",
   ALREADY_WAITLISTED: "You're already on the waitlist for this event.",
+  REGISTRATION_NOT_YET_OPEN: "Registration for this event hasn't opened yet.",
   REGISTRATION_CLOSED: "Registration for this event is closed.",
+  REGISTRATION_UNAVAILABLE: "Registration isn't available for this event yet. Please try again later.",
   PLACES_AVAILABLE: "This event has places available, so register directly instead.",
   NOT_WAITLISTED: "You're not on the waitlist for this event.",
   OFFER_EXPIRED: "This place offer has expired.",

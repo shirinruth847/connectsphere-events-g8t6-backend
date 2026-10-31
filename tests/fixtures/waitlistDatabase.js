@@ -1,9 +1,9 @@
 // Shared in-memory PostgreSQL setup for the SPM-163 waitlist and SPM-147
 // withdrawal database tests. No hosted database, Auth or network.
 //
-// The migrations under test run whole. Direct registration (SPM-134
-// register_for_event) is not on this branch, so REGISTERED places are inserted
-// directly; the waitlist functions only read them.
+// The migrations under test run whole, on top of SPM-134's live
+// register_for_event and event_registration_availability. Most tests seed
+// REGISTERED places directly (register); registerDirect calls SPM-134.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -26,16 +26,53 @@ let db;
 const one = async (sql, values = []) => (await db.query(sql, values)).rows[0];
 const rows = async (sql, values = []) => (await db.query(sql, values)).rows;
 
-const createEvent = async ({ capacity = 1, startsIn = "7 days", closesIn = null, status = "CONFIRMED", title = "Synthetic Gala" } = {}) =>
-  (await one(
-    `INSERT INTO public.event (organiser_id, title, status, is_published, registration_capacity, start_datetime, end_datetime, registration_close_at)
+// Registration opens a day ago and closes at the start unless closesIn is
+// given. capacity is the organiser's cap; venueCapacity books a primary venue
+// of that size (null: no venue, so no places).
+const createEvent = async ({
+  capacity = 1,
+  venueCapacity = 1000,
+  startsIn = "7 days",
+  opensIn = "-1 day",
+  closesIn = null,
+  status = "CONFIRMED",
+  title = "Synthetic Gala",
+} = {}) => {
+  const { event_id: eventId } = await one(
+    `INSERT INTO public.event (organiser_id, title, status, is_published, registration_capacity, start_datetime, end_datetime,
+       registration_open_at, registration_close_at)
      VALUES ($1, $2, $3, true, $4, now() + $5::interval, now() + $5::interval + interval '2 hours',
-             CASE WHEN $6::interval IS NULL THEN NULL ELSE now() + $6::interval END)
+             now() + $6::interval, now() + COALESCE($7::interval, $5::interval))
      RETURNING event_id`,
-    [ORGANISER, title, status, capacity, startsIn, closesIn]
-  )).event_id;
+    [ORGANISER, title, status, capacity, startsIn, opensIn, closesIn]
+  );
+  if (venueCapacity !== null) await bookVenue(eventId, venueCapacity);
+  return eventId;
+};
 
-// Stands in for SPM-134's register_for_event.
+const bookVenue = async (eventId, capacity) => {
+  const { venue_id: venueId } = await one(
+    "INSERT INTO public.venue (name, address, max_capacity) VALUES ('Synthetic Hall', '1 Test Street', $1) RETURNING venue_id",
+    [capacity]
+  );
+  const { room_id: roomId } = await one(
+    "INSERT INTO public.room (venue_id, layout_type, capacity) VALUES ($1, 'THEATRE', $2) RETURNING room_id",
+    [venueId, capacity]
+  );
+  await db.query(
+    `INSERT INTO public.venue_booking (event_id, room_id, status, start_datetime, end_datetime)
+     SELECT event_id, $2, 'APPROVED', start_datetime, end_datetime FROM public.event WHERE event_id = $1`,
+    [eventId, roomId]
+  );
+};
+const setVenueCapacity = (eventId, capacity) =>
+  db.query(
+    `UPDATE public.venue SET max_capacity = $2
+      WHERE venue_id IN (SELECT r.venue_id FROM public.venue_booking AS b JOIN public.room AS r USING (room_id) WHERE b.event_id = $1)`,
+    [eventId, capacity]
+  );
+
+// Seeds a REGISTERED place, as if registered three days ago.
 const register = async (attendeeId, eventId) =>
   (await one(
     `INSERT INTO public.registration (attendee_id, event_id, registration_status, registration_datetime)
@@ -43,6 +80,10 @@ const register = async (attendeeId, eventId) =>
     [attendeeId, eventId]
   )).registration_id;
 
+const registerDirect = async (attendeeId, eventId) =>
+  (await one("SELECT public.register_for_event($1, $2, NULL, NULL) AS r", [attendeeId, eventId])).r;
+const availabilityOf = async (eventId) =>
+  (await one("SELECT public.event_registration_availability(e) AS a FROM public.event AS e WHERE e.event_id = $1", [eventId])).a;
 const join = async (attendeeId, eventId, key = null, hash = REQUEST_HASH) =>
   (await one("SELECT public.join_event_waitlist($1, $2, NULL, NULL, $3, $4) AS r", [attendeeId, eventId, key, key ? hash : null])).r;
 const leave = async (attendeeId, eventId) => (await one("SELECT public.leave_event_waitlist($1, $2) AS r", [attendeeId, eventId])).r;
@@ -104,10 +145,21 @@ const openWaitlistDatabase = async () => {
   await db.exec(functionSql(idempotency, "_claim_idempotency_key") + functionSql(idempotency, "_store_idempotent_response"));
   await db.exec(functionSql(foundation, "_notify_event_users") + functionSql(foundation, "_notification_key_time"));
   await db.exec(functionSql(read("20261020161912_spm155_attendee_notifications.sql"), "_attendee_datetime_text"));
-  await db.exec(read("20261030170000_spm163_waitlist_notification_types.sql"));
-  await db.exec(read("20261030170100_spm163_waitlist_offers.sql"));
-  await db.exec(read("20261030170200_spm147_withdraw_registration.sql"));
+  // The primary venue as SPM-134's PGlite test reads it, and SPM-134's live rule.
+  await db.exec(functionSql(read("20261020112025_spm173_interim_readiness.sql"), "_event_primary_venue"));
+  const spm134 = read("20261030142619_spm134_window_and_venue_capacity.sql");
+  await db.exec(functionSql(spm134, "event_registration_availability") + functionSql(spm134, "register_for_event"));
+  for (const name of MIGRATIONS) await db.exec(read(name));
 };
+
+// Applied migrations, in order. Held ones are passed to applyMigration.
+const MIGRATIONS = [
+  "20261030170000_spm163_waitlist_notification_types.sql",
+  "20261030170100_spm163_waitlist_offers.sql",
+  "20261030170200_spm147_withdraw_registration.sql",
+  "20261031030000_spm163_venue_capacity_places.sql",
+];
+const applyMigration = (name) => db.exec(read(name));
 
 module.exports = {
   openWaitlistDatabase,
@@ -122,7 +174,11 @@ module.exports = {
   one,
   rows,
   createEvent,
+  setVenueCapacity,
   register,
+  registerDirect,
+  availabilityOf,
+  applyMigration,
   join,
   leave,
   accept,
