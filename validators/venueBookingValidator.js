@@ -147,7 +147,10 @@ const BOOKING_LIMITS = Object.freeze({
 const BOOKING_ITEM_FIELDS = new Set([
   "venueId", "label", "start", "end", "expectedAttendance", "layout",
   "requiredFacilities", "accessibilityNeeds", "specialRequirements", "isPrimary",
+  // SPM-188 AC9: the event's active hold this booking confirms.
+  "holdId",
 ]);
+const HOLD_ID_PATTERN = /^[0-9a-f]{24}$/;
 const BOOKING_MESSAGES = Object.freeze({
   venueRequired: "Venue is required.",
   venueTwice: "This venue is already in the request.",
@@ -168,6 +171,7 @@ const BOOKING_MESSAGES = Object.freeze({
   specialTooLong: `Special requirements must be ${BOOKING_LIMITS.specialRequirements} characters or fewer.`,
   primaryInvalid: "Primary venue must be true or false.",
   onePrimary: "Choose one primary venue.",
+  holdInvalid: "This hold could not be found.",
 });
 
 const isMissing = (value) => value === undefined || value === null || (typeof value === "string" && !value.trim());
@@ -261,6 +265,9 @@ const validateBookingItem = (item, index, context) => {
 
   if (item.isPrimary !== undefined && typeof item.isPrimary !== "boolean") fields[at("isPrimary")] = BOOKING_MESSAGES.primaryInvalid;
 
+  const holdId = isMissing(item.holdId) ? null : item.holdId;
+  if (holdId !== null && (typeof holdId !== "string" || !HOLD_ID_PATTERN.test(holdId))) fields[at("holdId")] = BOOKING_MESSAGES.holdInvalid;
+
   return {
     venueId,
     label,
@@ -272,6 +279,7 @@ const validateBookingItem = (item, index, context) => {
     accessibilityNeeds: accessibilityNeeds || [],
     specialRequirements,
     isPrimary: item.isPrimary === true,
+    holdId,
   };
 };
 

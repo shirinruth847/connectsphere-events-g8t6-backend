@@ -226,7 +226,11 @@ describe("POST /api/events/:id/venue-bookings/check (SPM-186 AC17)", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.bookings[0]).toMatchObject({ index: 0, availability: "AVAILABLE" });
-    expect(venueModel.checkVenueBookings).toHaveBeenCalledWith([expect.objectContaining({ index: 0, booking: expect.objectContaining({ venueId: 7 }) })]);
+    // The event ID lets the check leave out the event's own hold a booking confirms (SPM-188 AC9).
+    expect(venueModel.checkVenueBookings).toHaveBeenCalledWith(
+      [expect.objectContaining({ index: 0, booking: expect.objectContaining({ venueId: 7 }) })],
+      { eventId: expect.any(Number) },
+    );
   });
 
   test("should_refuse_an_event_that_is_not_in_planning", async () => {

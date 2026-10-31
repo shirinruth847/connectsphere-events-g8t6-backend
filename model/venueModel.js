@@ -1435,6 +1435,10 @@ const BOOKING_REQUEST_ERRORS = new Set([
   "BOOKING_CONFLICT",
   "PRIMARY_VENUE_REQUIRED",
   "PRIMARY_VENUE_ALREADY_SET",
+  // record_venue_hold_conversion (SPM-188 AC9).
+  "HOLD_NOT_FOUND",
+  "HOLD_ALREADY_CONVERTED",
+  "HOLD_WINDOW_CHANGED",
 ]);
 // Another transaction holds a lock this one needs (lock_timeout), or PostgreSQL
 // ended this one to break a deadlock or serialisation clash: the coordinator
@@ -1526,9 +1530,14 @@ const bookingWarnings = (item, range, venue, document) => {
 // The MongoDB holds and blocks one booking's occupied range overlaps (Master
 // 5.4). Normal booking requests must respect every active hold, including the
 // event's own. Converting a hold is a separate workflow (SPM-188/SPM-283).
-const findCalendarConflicts = (entries, { venueId, range, now, request }) =>
+// skipHold ({ id, eventId }): the event's own hold that a booking confirms
+// (SPM-188 AC9); it is never a conflict for that booking.
+const isSkippedHold = (entry, skipHold) =>
+  Boolean(skipHold) && entry.id === skipHold.id && String(entry.eventId) === String(skipHold.eventId);
+const findCalendarConflicts = (entries, { venueId, range, now, request, skipHold = null }) =>
   entries
     .filter((entry) => entry.venueId === venueId)
+    .filter((entry) => !isSkippedHold(entry, skipHold))
     .filter((entry) => (entry.type === venueConflictModel.ENTRY_TYPES.BLOCK
       ? entry.status === "ACTIVE"
       : venueConflictModel.isHoldActive(entry, now)))
@@ -1549,7 +1558,7 @@ const findCalendarConflicts = (entries, { venueId, range, now, request }) =>
 // (Master 7.4 step 2): reads each venue's setup/turnaround minutes and its holds
 // and blocks from MongoDB, refuses overlaps with active holds and blocks, and
 // returns the minutes for the PostgreSQL booking-against-booking check.
-const checkVenueCalendar = async (bookings, venues) => {
+const checkVenueCalendar = async (bookings, venues, { eventId = null } = {}) => {
   const venueById = new Map(venues.map((venue) => [venue.venueId, venue]));
   const venueIds = [...venueById.keys()];
   const times = bookings.flatMap((item) => [Date.parse(item.start), Date.parse(item.end)]);
@@ -1585,7 +1594,8 @@ const checkVenueCalendar = async (bookings, venues) => {
     minutes[item.venueId] = { setupMinutes, turnaroundMinutes };
 
     const range = venueConflictModel.occupiedRange(item.start, item.end, setupMinutes, turnaroundMinutes);
-    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, range, now, request: item });
+    const skipHold = item.holdId ? { id: item.holdId, eventId } : null;
+    const conflicts = findCalendarConflicts(entries, { venueId: item.venueId, range, now, request: item, skipHold });
     if (conflicts.length) throw venueError("BOOKING_CONFLICT", { index, venueId: item.venueId, conflicts });
 
     const messages = bookingWarnings(item, range, venue, document);
@@ -1675,7 +1685,7 @@ const blockingCheck = (code, message) => ({ code, message });
 // One booking against its own venue and its own window: blocking problems
 // (Approve and requests are refused) and warnings (Venue Staff decide). Other
 // bookings of the same event at other venues never affect the result.
-const assessBookingFit = (item, context, { excludeBookingId = null, now = new Date() } = {}) => {
+const assessBookingFit = (item, context, { excludeBookingId = null, eventId = null, now = new Date() } = {}) => {
   const venue = context.venues.get(item.venueId);
   const blocking = [];
   const result = (availability, range = null, warnings = []) => ({
@@ -1721,7 +1731,8 @@ const assessBookingFit = (item, context, { excludeBookingId = null, now = new Da
       "VENUE_BOOKING_CONFLICT",
       `Overlaps ${booking.status === "APPROVED" ? "an approved" : "a pending"} booking for ${formatRequestId(booking.eventId)} (${formatRange(booking.range.start, booking.range.end)}).`,
     )));
-  findCalendarConflicts(context.entries, { venueId: item.venueId, range, now }).forEach((conflict) => blocking.push(
+  const skipHold = item.holdId && eventId != null ? { id: item.holdId, eventId } : null;
+  findCalendarConflicts(context.entries, { venueId: item.venueId, range, now, skipHold }).forEach((conflict) => blocking.push(
     conflict.type === venueConflictModel.ENTRY_TYPES.BLOCK
       ? blockingCheck("VENUE_BLOCKED", `Blocked${conflict.reasonLabel ? ` (${conflict.reasonLabel})` : ""} ${formatRange(conflict.occupiedStart, conflict.occupiedEnd)}.`)
       : blockingCheck("VENUE_HELD", `Held for another event ${formatRange(conflict.occupiedStart, conflict.occupiedEnd)}, until ${formatInstant(conflict.holdExpiresAt)}.`),
@@ -1733,11 +1744,11 @@ const assessBookingFit = (item, context, { excludeBookingId = null, now = new Da
 // POST /api/events/:id/venue-bookings/check (SPM-186): advisory checks for a
 // request being prepared; nothing is written and nothing is locked. The
 // request itself checks again under the venue lock (Master 7.4).
-const checkVenueBookings = async (items, { now = new Date() } = {}) => {
+const checkVenueBookings = async (items, { eventId = null, now = new Date() } = {}) => {
   const ready = items.filter((item) => item.booking);
   const context = await loadFitContext(ready.map((item) => item.booking));
   return items.map((item) => (item.booking
-    ? { index: item.index, checked: true, fields: {}, ...assessBookingFit(item.booking, context, { now }) }
+    ? { index: item.index, checked: true, fields: {}, ...assessBookingFit(item.booking, context, { eventId, now }) }
     : { index: item.index, checked: false, fields: item.fields, venueId: null, availability: "NOT_CHECKED", occupiedStart: null, occupiedEnd: null, blocking: [], warnings: [] }));
 };
 
@@ -1861,29 +1872,87 @@ const withVenueLockTransaction = async (work) => {
   }
 };
 
+// SPM-188 AC9: read, under the locks, each hold a booking confirms. It must be
+// this event's hold at this venue, still active and unexpired, and the booking
+// keeps its window (so the booking takes the hold's occupied range).
+const readConvertingHolds = async (bookings, eventId, now) => {
+  const converting = [];
+  for (const [index, item] of bookings.entries()) {
+    if (!item.holdId) continue;
+    const hold = await calendarCall(() => venueCalendarModel.findCalendarEntry(item.holdId, { readPreference: "primary", maxTimeMS: MONGO_READ_UNDER_LOCK_MS }));
+    const at = { index, venueId: item.venueId };
+    if (!hold || hold.type !== venueConflictModel.ENTRY_TYPES.HOLD || String(hold.eventId) !== String(eventId) || hold.venueId !== item.venueId) {
+      throw venueError("HOLD_NOT_FOUND", at);
+    }
+    if (hold.status === "CONVERTED") throw venueError("HOLD_ALREADY_CONVERTED", at);
+    if (hold.status !== "ACTIVE") throw venueError("HOLD_NOT_ACTIVE", at);
+    if (!venueConflictModel.isHoldActive(hold, now)) throw venueError("HOLD_EXPIRED", at);
+    if (Date.parse(hold.start) !== Date.parse(item.start) || Date.parse(hold.end) !== Date.parse(item.end)) {
+      throw venueError("HOLD_WINDOW_CHANGED", at);
+    }
+    converting.push({ index, hold });
+  }
+  return converting;
+};
+
+// SPM-188 AC9/AC10: after request_venue_bookings has saved the bookings, link
+// each to its hold in PostgreSQL and mark the MongoDB hold CONVERTED, both
+// before COMMIT. The expiry job takes the same event and venue locks and the
+// same database clock, and convertHold needs the version read here and an
+// expiry still ahead, so a hold is converted or expired, never both; a refused
+// conversion rolls everything back.
+const convertHolds = async (client, transaction, { actorId, eventId, converting, saved, now }) => {
+  for (const { index, hold } of converting) {
+    const booking = (saved.bookings || []).find((item) => item.index === index);
+    if (!booking) throw venueError("HOLD_NOT_FOUND", { index, venueId: hold.venueId });
+    await selectResult(client,
+      "SELECT public.record_venue_hold_conversion($1, $2, $3, $4) AS result",
+      [actorId, eventId, booking.bookingId, hold.id]
+    );
+    const writeToken = crypto.randomUUID();
+    transaction.onRollback(() => venueCalendarModel.revertConvertedHold({ holdId: hold.id, venueId: hold.venueId, version: hold.version + 1, writeToken }));
+    const converted = await writeCalendarHold({ holdId: hold.id, venueId: hold.venueId, writeToken }, () => venueCalendarModel.convertHold({
+      holdId: hold.id, venueId: hold.venueId, expectedVersion: hold.version, bookingId: booking.bookingId, now, writeToken,
+    }));
+    if (!converted || converted.status !== "CONVERTED") {
+      const expired = !venueConflictModel.isHoldActive(hold, now);
+      throw venueError(expired ? "HOLD_EXPIRED" : "HOLD_NOT_ACTIVE", { index, venueId: hold.venueId });
+    }
+  }
+};
+
 // Lock the event then the venues, check MongoDB holds and blocks under those
 // locks, then save the bookings, version, activity and notice, all in one
 // venue lock transaction (Master 7, 7.4). Nothing is announced before COMMIT;
-// any failure rolls everything back.
+// any failure rolls everything back. A booking with a holdId confirms that
+// hold (SPM-188 AC9): the hold is not a conflict for it and becomes CONVERTED.
 const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey }) => {
   const requestHash = hashRequest({ bookings }, {}, [eventId]);
   const venueIds = [...new Set(bookings.map((item) => item.venueId))].sort((left, right) => left - right);
 
   let checkedMinutes = {};
   try {
-    const result = await withVenueLockTransaction(async (client) => {
+    const result = await withVenueLockTransaction(async (client, transaction) => {
       const started = await selectResult(client,
         "SELECT public.begin_venue_booking_request($1, $2, $3::integer[], $4, $5) AS result",
         [actorId, eventId, venueIds, idempotencyKey, requestHash]
       );
       if (started.replay) return started.replay;
 
-      const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || []);
+      // Database time, as the hold expiry job uses under the same locks, so the
+      // two agree on whether a hold has expired (SPM-188 AC10).
+      const now = bookings.some((item) => item.holdId)
+        ? new Date(await selectResult(client, "SELECT clock_timestamp() AS result", []))
+        : new Date();
+      const converting = await readConvertingHolds(bookings, eventId, now);
+      const { minutes, warnings } = await checkVenueCalendar(bookings, started.venues || [], { eventId });
       checkedMinutes = minutes;
-      return selectResult(client,
+      const saved = await selectResult(client,
         "SELECT public.request_venue_bookings($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7) AS result",
         [actorId, eventId, JSON.stringify(bookings), JSON.stringify(minutes), JSON.stringify(warnings), idempotencyKey, requestHash]
       );
+      await convertHolds(client, transaction, { actorId, eventId, converting, saved, now });
+      return saved;
     });
     return toBookingRequestResult(result);
   } catch (error) {
@@ -2597,6 +2666,8 @@ const toHold = (hold, now) => {
     extended: Boolean(hold.extendedAt),
     occupiedStart: toIsoOrNull(hold.occupiedStart),
     occupiedEnd: toIsoOrNull(hold.occupiedEnd),
+    // The booking a confirmed hold became (SPM-188 AC9).
+    convertedBookingId: hold.convertedBookingId ?? null,
   };
 };
 

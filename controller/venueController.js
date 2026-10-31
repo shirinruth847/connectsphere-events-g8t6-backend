@@ -585,6 +585,14 @@ const BOOKING_REQUEST_ERRORS = Object.freeze({
   PRIMARY_VENUE_ALREADY_SET: [409, "This event already has a primary venue. Add the new venues as additional venues.", null],
   AVAILABILITY_UNAVAILABLE: [503, "Availability could not be checked. Try again later.", null],
   VENUE_BOOKINGS_UNAVAILABLE: [503, "Venue bookings cannot be requested right now. Try again shortly.", null],
+  // SPM-188 AC9/AC10: confirming a hold as a booking. The form has no hold
+  // field, so these are shown as the form's message rather than on a field.
+  HOLD_NOT_FOUND: [404, "This hold could not be found for this event and venue.", null],
+  HOLD_EXPIRED: [409, "This hold has expired, so it can no longer be confirmed. Request a booking instead.", null],
+  HOLD_NOT_ACTIVE: [409, "This hold is no longer active, so it cannot be confirmed.", null],
+  HOLD_ALREADY_CONVERTED: [409, "This hold has already been confirmed as a booking.", null],
+  HOLD_WINDOW_CHANGED: [409, "A confirmed hold keeps its venue and times. Request a separate booking for a different time.", "start"],
+  VENUE_CALENDAR_UNAVAILABLE: [503, "The hold could not be updated. Try again shortly.", null],
 });
 
 const handleBookingRequestError = (error, res, next) => {
@@ -640,7 +648,7 @@ const requestVenueBookings = async (req, res, next) => {
 // request. Advisory: nothing is saved, and the request checks again under the
 // venue lock.
 const checkVenueBookings = async (req, res, next) => {
-  const { event, access } = req.visibleEvent;
+  const { event, eventId, access } = req.visibleEvent;
   if (!access.canRequestVenueBookings) {
     const code = access.relationship === EVENT_RELATIONSHIP.ASSIGNED_COORDINATOR ? "EVENT_NOT_IN_PLANNING" : "FORBIDDEN";
     return sendError(res, BOOKING_REQUEST_ERRORS[code][0], code, BOOKING_REQUEST_ERRORS[code][1]);
@@ -648,7 +656,7 @@ const checkVenueBookings = async (req, res, next) => {
   const { items, fields } = validateVenueBookingCheck(req.body, { event });
   if (fields) return validationFailed(res, fields);
   try {
-    return res.status(200).json({ bookings: await venueModel.checkVenueBookings(items) });
+    return res.status(200).json({ bookings: await venueModel.checkVenueBookings(items, { eventId }) });
   } catch (err) {
     return next(err);
   }
