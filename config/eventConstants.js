@@ -58,9 +58,10 @@ const STATUS_NOTES = Object.freeze({
   RECONFIRMATION_PENDING: "Reconfirmation pending",
 });
 
-// Coordinator lifecycle actions owned by SPM-173 (Master section 5.2, T07 and
-// T10-T12), each with the database function that runs it under the event lock.
+// Coordinator lifecycle actions (Master section 5.2), each using one database
+// function under the event lock. SPM-39 adds feasibility acceptance to SPM-173.
 const LIFECYCLE_ACTIONS = Object.freeze({
+  ACCEPT_FEASIBILITY: Object.freeze({ rpc: "accept_event_feasibility", message: "Event request approved for planning." }),
   SUBMIT_FOR_SAFETY_REVIEW: Object.freeze({ rpc: "submit_event_for_safety_review", message: "Event submitted for safety review." }),
   CONFIRM: Object.freeze({ rpc: "confirm_event", message: "Event confirmed." }),
   START_PREPARATION: Object.freeze({ rpc: "start_event_preparation", message: "Event preparation started." }),

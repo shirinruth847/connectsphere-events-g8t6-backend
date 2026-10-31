@@ -101,3 +101,12 @@ test("[SPM-173-AC4][SPM-173-TC-06] should_show_job_entries_as_System", () => {
   expect(entry.actor).toEqual({ userId: null, name: "System", role: "SYSTEM" });
   expect(entry.changes).toEqual([{ field: "status", before: "PREPARATION", after: "COMPLETED" }]);
 });
+
+
+test("[SPM-39] maps stored requirement failures and uses the existing scoped hash", async () => {
+  const error = eventModel.toEventRequestError({ message: "FEASIBILITY_REQUIREMENTS_MISSING", details: "venuePreferences,contactEmail", code: "P0001" });
+  expect(error).toMatchObject({ code: "FEASIBILITY_REQUIREMENTS_MISSING", missingFields: ["venuePreferences", "contactEmail"] });
+  supabase.rpc.mockResolvedValue({ data: { event: { event_id: 42 }, replayed: false }, error: null });
+  await eventModel.runLifecycleAction({ action: "ACCEPT_FEASIBILITY", eventId: 42, actorId: 21, expectedVersion: 7, idempotencyKey: "spm39-key-0001" });
+  expect(supabase.rpc).toHaveBeenCalledWith("accept_event_feasibility", expect.objectContaining({ p_event_id: 42, p_actor_id: 21, p_expected_version: 7, p_idempotency_key: "spm39-key-0001", p_request_hash: expect.stringMatching(/^[0-9a-f]{64}$/) }));
+});
