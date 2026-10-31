@@ -30,6 +30,8 @@ async function deleteFixtureAudit(manifest) {
   const ids = manifest.userIds ?? [];
   if (!ids.length) return;
   if (ids.some(id => !Number.isSafeInteger(id) || id < 1)) throw new Error("Invalid fixture user IDs.");
+  const registrationIds = manifest.registrationIds ?? [];
+  if (registrationIds.some(id => !Number.isSafeInteger(id) || id < 1)) throw new Error("Invalid fixture registration IDs.");
   return withCleanupConnection(async client => {
     await client.query("BEGIN");
     try {
@@ -37,6 +39,9 @@ async function deleteFixtureAudit(manifest) {
       const { rows } = await client.query('SELECT user_id, email FROM public."user" WHERE user_id = ANY($1::integer[]) FOR UPDATE', [ids]);
       if (rows.some(user => ![`spm32-${manifest.runId}-`, `spm123-${manifest.runId}-`].some(prefix => user.email.startsWith(prefix)))) throw new Error("Refusing cleanup of a non-fixture profile.");
       await client.query('DELETE FROM public.activity_log AS a USING public."user" AS u WHERE a.user_id = u.user_id AND u.user_id = ANY($1::integer[]) AND (u.email LIKE $2 OR u.email LIKE $3)', [ids, `spm32-${manifest.runId}-%`, `spm123-${manifest.runId}-%`]);
+      // System entries (waitlist offers and expiry, SPM-163) have no user; they
+      // name only the fixture registration they concern.
+      if (registrationIds.length) await client.query("DELETE FROM public.activity_log WHERE user_id IS NULL AND actor_role = 'SYSTEM' AND entity_name = 'registration' AND entity_id = ANY($1::integer[])", [registrationIds]);
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
   });

@@ -561,7 +561,7 @@ An attendee joins the waitlist of a full event, sees their position, leaves it, 
 - **Errors:** `400 VALIDATION_FAILED`, `401`, `403`, `404 EVENT_NOT_FOUND` or `OFFER_NOT_FOUND`, `409` with `ALREADY_REGISTERED`, `ALREADY_WAITLISTED`, `REGISTRATION_NOT_YET_OPEN`, `REGISTRATION_CLOSED`, `REGISTRATION_UNAVAILABLE`, `PLACES_AVAILABLE` (register directly), `NOT_WAITLISTED`, `OFFER_EXPIRED`, `OFFER_NOT_OPEN`, `REGISTRATION_FULL`, `NOT_REGISTERED`, `EVENT_STARTED` ("Cannot withdraw registration for past events"), `EVENT_NOT_ACTIVE`, `IDEMPOTENCY_KEY_REUSED` or `IDEMPOTENCY_IN_PROGRESS`; `500 INTERNAL_ERROR`.
 - **Offers** (Master D05): a freed place is offered to the first in the FIFO queue for 24 hours, capped at registration close and event start. Decline or expiry withdraws that place and the offer cascades to the next person; re-joining takes the back of the queue. Places held by open offers count against SPM-134's venue capacity.
 - **Withdrawal** is allowed before the event starts. Within 24 hours of the start the owner gets an in-app "Late withdrawal" notice without the attendee's name.
-- **Tests:** `tests/database/spm163Waitlist.test.cjs` and `spm147Withdrawal.test.cjs` (PGlite), `tests/unit/waitlistRoutes.test.js`, and the live accept-vs-expiry race in `tests/integration/waitlistOfferRace.integration.test.js`.
+- **Tests:** `tests/database/spm163Waitlist.test.cjs` and `spm147Withdrawal.test.cjs` (PGlite), `tests/unit/waitlistRoutes.test.js`, and the live flow and accept-vs-expiry race in `tests/integration/waitlist.integration.test.js`.
 
 ---
 
