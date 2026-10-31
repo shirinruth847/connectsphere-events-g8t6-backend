@@ -22,8 +22,6 @@ const validRequest = () => ({
   accessibilityNeeds: ["Wheelchair access"],
   isRegistrationEnabled: true,
   registrationCapacity: 150,
-  registrationOpenAt: inHours(24),
-  registrationCloseAt: inHours(6 * 24),
 });
 
 const submit = (input) => validateSubmission(input, { now: NOW, allowedLayouts: LAYOUTS });
@@ -141,32 +139,6 @@ describe("format checks shared by drafts and submissions", () => {
       expect(draft({ title: "Gala", accessibilityNeeds })).toEqual({});
     }
   );
-});
-
-describe("[SPM-35] registration window", () => {
-  const { registrationOpenAt, registrationCloseAt, ...withoutWindow } = validRequest();
-
-  test("both times are required for a submission when registration is enabled", () => {
-    expect(submit(withoutWindow)).toEqual({
-      registrationOpenAt: MESSAGES.registrationOpenRequired,
-      registrationCloseAt: MESSAGES.registrationCloseRequired,
-    });
-    expect(submit({ ...withoutWindow, isRegistrationEnabled: false, registrationCapacity: null })).toEqual({});
-  });
-
-  test.each([
-    ["closes at the open time", { registrationCloseAt: inHours(24) }, MESSAGES.registrationCloseBeforeOpen],
-    ["closes after the event start", { registrationCloseAt: inHours(7 * 24 + 1) }, MESSAGES.registrationCloseAfterStart],
-    ["has an invalid close time", { registrationCloseAt: "soon" }, MESSAGES.invalidDate],
-  ])("rejects a window that %s, in drafts too", (_label, change, message) => {
-    expect(submit({ ...validRequest(), ...change }).registrationCloseAt).toBe(message);
-    expect(draft({ ...validRequest(), ...change }).registrationCloseAt).toBe(message);
-  });
-
-  test("accepts a window that closes exactly at the event start; drafts need no window", () => {
-    expect(submit({ ...validRequest(), registrationCloseAt: validRequest().startDatetime })).toEqual({});
-    expect(draft({ title: "Gala", isRegistrationEnabled: true })).toEqual({});
-  });
 });
 
 describe("validateDraft (SPM-37 Draft Event Requests)", () => {

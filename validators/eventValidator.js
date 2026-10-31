@@ -32,10 +32,6 @@ const MESSAGES = Object.freeze({
   registrationFlagInvalid: "Registration setting must be true or false.",
   registrationCapacityRequired: "Registration capacity is required when registration is enabled.",
   registrationCapacityInvalid: "Registration capacity must be a positive whole number.",
-  registrationOpenRequired: "Registration open date and time is required when registration is enabled.",
-  registrationCloseRequired: "Registration close date and time is required when registration is enabled.",
-  registrationCloseBeforeOpen: "Registration must close after it opens.",
-  registrationCloseAfterStart: "Registration must close no later than the event start.",
   venuePreferencesInvalid: "Choose valid venue preferences without duplicates.",
   venuePreferenceTimeInvalid: "Give each venue a start and end time in whole minutes, with the end after the start.",
   venuePreferenceOutsideEvent: "Each venue's time must be within the event's start and end.",
@@ -152,22 +148,6 @@ const checkFormats = (input, errors, allowedLayouts) => {
   if (!isBlank(input.registrationCapacity) && !isPositiveInteger(input.registrationCapacity)) {
     errors.registrationCapacity = MESSAGES.registrationCapacityInvalid;
   }
-  // SPM-35: registration runs [open, close) and closes by the event start.
-  let open = null;
-  let close = null;
-  if (!isBlank(input.registrationOpenAt)) {
-    open = parseDate(input.registrationOpenAt);
-    if (!open) errors.registrationOpenAt = MESSAGES.invalidDate;
-  }
-  if (!isBlank(input.registrationCloseAt)) {
-    close = parseDate(input.registrationCloseAt);
-    if (!close) errors.registrationCloseAt = MESSAGES.invalidDate;
-  }
-  if (open && close && close <= open) {
-    errors.registrationCloseAt = MESSAGES.registrationCloseBeforeOpen;
-  } else if (start && close && close > start) {
-    errors.registrationCloseAt = MESSAGES.registrationCloseAfterStart;
-  }
 
   return { start };
 };
@@ -270,10 +250,6 @@ const validateSubmission = (input = {}, { now = new Date(), allowedLayouts } = {
 
   if (input.isRegistrationEnabled === true && isBlank(input.registrationCapacity)) {
     errors.registrationCapacity = MESSAGES.registrationCapacityRequired;
-  }
-  if (input.isRegistrationEnabled === true) {
-    if (isBlank(input.registrationOpenAt)) errors.registrationOpenAt = MESSAGES.registrationOpenRequired;
-    if (isBlank(input.registrationCloseAt)) errors.registrationCloseAt = MESSAGES.registrationCloseRequired;
   }
 
   return errors;

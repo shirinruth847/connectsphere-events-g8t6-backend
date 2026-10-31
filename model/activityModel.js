@@ -23,8 +23,6 @@ const FIELD_ORDER = [
   "technicalSupportNeeds",
   "isRegistrationEnabled",
   "registrationCapacity",
-  "registrationOpenAt",
-  "registrationCloseAt",
 ];
 
 const encodeHistoryCursor = (row) => Buffer.from(JSON.stringify({ logId: row.log_id })).toString("base64url");
