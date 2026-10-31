@@ -356,17 +356,20 @@ const REGISTERED_SEATS_FILTER = ["registration.registration_status", "REGISTERED
 // deliberately absent; registration availability below is a separate rule.
 const ATTENDEE_DISCOVERY_STATUS = EVENT_STATUS.CONFIRMED;
 
-const attendeeLocation = (bookings = []) => {
-  // The legacy schema has no primary-venue flag. Publish only an unambiguous
-  // approved venue; never choose an arbitrary booking or reveal pending ones.
+// The legacy schema has no primary-venue flag. Publish only an unambiguous
+// approved venue; never choose an arbitrary booking or reveal pending ones.
+const attendeeVenue = (bookings = []) => {
   const venues = new Map();
   for (const booking of bookings ?? []) {
     const venue = booking.room?.venue;
     if (booking.status === "APPROVED" && venue) venues.set(venue.venue_id, venue);
   }
-  if (venues.size !== 1) return null;
-  const venue = venues.values().next().value;
-  return [venue.name, venue.address].filter(Boolean).join(", ") || null;
+  return venues.size === 1 ? venues.values().next().value : null;
+};
+
+const attendeeLocation = (bookings = []) => {
+  const venue = attendeeVenue(bookings);
+  return venue ? [venue.name, venue.address].filter(Boolean).join(", ") || null : null;
 };
 
 const toAttendeeDiscoveryItem = (row) => {
@@ -1200,6 +1203,22 @@ const findLatestConfirmationSnapshot = async (eventId) => {
   return data[0] || null;
 };
 
+// The same rows for a page of events in one read: event ID -> latest snapshot.
+const findLatestConfirmationSnapshots = async (eventIds) => {
+  const latest = new Map();
+  if (!eventIds.length) return latest;
+  const { data, error } = await supabase
+    .from("event_confirmation_snapshots")
+    .select("event_id,snapshot,confirmed_at")
+    .in("event_id", eventIds)
+    .order("snapshot_id", { ascending: false });
+  if (error) throw dbError(error);
+  for (const row of data) {
+    if (!latest.has(row.event_id)) latest.set(row.event_id, { snapshot: row.snapshot, confirmed_at: row.confirmed_at });
+  }
+  return latest;
+};
+
 const snapshotLocation = (venue) =>
   venue && typeof venue === "object" ? [venue.name, venue.address].filter(Boolean).join(", ") || null : null;
 
@@ -1386,6 +1405,10 @@ module.exports = {
   findPublishedAttendeeEvents,
   findPublishedAttendeeEvent,
   findRegisteredAttendeeEvent,
+  findLatestConfirmationSnapshots,
+  attendeeVenue,
+  CONFIRMED_DETAIL_STATUSES,
+  SNAPSHOT_DETAIL_STATUSES,
   encodeCursor,
   decodeCursor,
   encodeDiscoveryCursor,

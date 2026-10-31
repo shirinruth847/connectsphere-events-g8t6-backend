@@ -26,9 +26,10 @@ describe("[TC-LOGIN-004] toAttendeeEvent", () => {
     description: "Public description",
     start_datetime: "2026-11-01T01:00:00Z",
     end_datetime: "2026-11-01T03:00:00Z",
+    is_published: true,
     venue_booking: [
-      { status: "REJECTED", room: { venue: { name: "Old Hall", address: "1 Old Rd" } } },
-      { status: "APPROVED", room: { venue: { name: "Main Hall", address: "2 Main Rd" } } },
+      { status: "REJECTED", room: { venue: { venue_id: 1, name: "Old Hall", address: "1 Old Rd" } } },
+      { status: "APPROVED", room: { venue: { venue_id: 2, name: "Main Hall", address: "2 Main Rd" } } },
     ],
   };
 

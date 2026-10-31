@@ -553,6 +553,13 @@ Errors use one shape: `{ "error": "<safe message>", "code": "<MACHINE_CODE>" }`,
 - `roles` is a list so the contract survives multi-role users; the schema currently stores one role per user.
 - `attendee_status` is a display value: `CONFIRMED`, `COMPLETED`, `CANCELLED`, or `PENDING_CONFIRMATION` for any internal planning state. It is not an event state.
 - `next_offset` is `null` on the last page of registrations.
+- **My Events (SPM-141):** the list shows each event's values by the same rules as `GET /api/registrations/mine/:eventId`.
+  - Current values are shown only for a published `CONFIRMED`, `PREPARATION` or `COMPLETED` event.
+  - An event back in `PLANNING` or `SAFETY_REVIEW`, or `CANCELLED`, shows the last published confirmation snapshot (Master 5.3, 5.6).
+  - Otherwise only `title` and `attendee_status` are set, and `description`, the dates and `venue` are `null`.
+  - `venue` is set only when the event has exactly one approved venue.
+  - Places are ordered by registration time, newest first; to show events nearest first, follow `next_offset` through every page and sort by `start_datetime`.
+  - `waitlistPosition` and `offer` (`offerId`, `expiresAt`) come from SPM-163, and the event page is `GET /api/registrations/mine/:eventId`.
 - Roles and organisation memberships always come from the database, never from the request or token metadata.
 
 ### Sign-Up (SPM-123)
