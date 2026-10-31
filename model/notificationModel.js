@@ -44,12 +44,14 @@ const decodeCursor = (value) => {
 const TARGET_PAGE_BY_ROLE = Object.freeze({
   [USER_ROLES.ATTENDEE]: NOTIFICATION_TARGET_PAGES.MY_EVENTS,
   [USER_ROLES.TECH_SUPPORT]: NOTIFICATION_TARGET_PAGES.TECHNICAL_REQUESTS,
+  [USER_ROLES.VENUE_STAFF]: NOTIFICATION_TARGET_PAGES.VENUE_BOOKING_REQUESTS,
 });
 
 const targetPageFor = (role) => TARGET_PAGE_BY_ROLE[role] ?? NOTIFICATION_TARGET_PAGES.EVENT_WORKSPACE;
 
 // Only the reader's own copy: no other recipients, no staff-only fields.
-// A Technical Support notice also names its request, so Go to Event opens it.
+// A Technical Support notice also names its request, and a Venue Staff booking
+// request notice its booking, so Go to Event opens it.
 const toNotificationItem = (row, role) => ({
   notification_id: row.notification_id,
   type: row.type,
@@ -65,17 +67,23 @@ const toNotificationItem = (row, role) => ({
         page: targetPageFor(role),
         event_id: row.event_id,
         ...(row.technical_request_id ? { technical_request_id: row.technical_request_id } : {}),
+        ...(row.booking_id ? { booking_id: row.booking_id } : {}),
       }
     : null,
 });
 
-// The database writes a sent technical request's notice with the action key
-// "TECHNICAL_REQUEST_SENT:<technical_request_id>".
-const TECHNICAL_REQUEST_ACTION_KEY = /^TECHNICAL_REQUEST_SENT:([1-9]\d*)$/;
+// The record a role's notice opens, read from the action key the database
+// writes: "TECHNICAL_REQUEST_SENT:<technical_request_id>" for Technical Support,
+// "VENUE_BOOKINGS_REQUESTED:<event_id>:<first booking_id>" for Venue Staff (SPM-179).
+const TARGET_ACTION_KEYS = Object.freeze({
+  [USER_ROLES.TECH_SUPPORT]: { field: "technical_request_id", pattern: /^TECHNICAL_REQUEST_SENT:([1-9]\d*)$/ },
+  [USER_ROLES.VENUE_STAFF]: { field: "booking_id", pattern: /^VENUE_BOOKINGS_REQUESTED:[1-9]\d*:([1-9]\d*)$/ },
+});
 
-// notification_id -> technical_request_id for the notices that name one.
-const findTechnicalRequestIds = async (notificationIds) => {
-  if (!notificationIds.length) return new Map();
+// notification_id -> { [field]: id } for the notices that name one.
+const findTargetIds = async (role, notificationIds) => {
+  const target = TARGET_ACTION_KEYS[role];
+  if (!target || !notificationIds.length) return new Map();
   const { data, error } = await supabase
     .from("notification")
     .select("notification_id,action_key")
@@ -83,8 +91,8 @@ const findTechnicalRequestIds = async (notificationIds) => {
   if (error) throw dbError(error);
   const ids = new Map();
   for (const { notification_id: notificationId, action_key: actionKey } of data) {
-    const match = TECHNICAL_REQUEST_ACTION_KEY.exec(actionKey ?? "");
-    if (match) ids.set(notificationId, Number(match[1]));
+    const match = target.pattern.exec(actionKey ?? "");
+    if (match) ids.set(notificationId, { [target.field]: Number(match[1]) });
   }
   return ids;
 };
@@ -100,12 +108,9 @@ const findNotifications = async (user, { limit, cursor = null }) => {
   if (error) throw dbError(error);
 
   const page = data.slice(0, limit);
-  const requestIds = user.role === USER_ROLES.TECH_SUPPORT
-    ? await findTechnicalRequestIds(page.map((row) => row.notification_id))
-    : new Map();
+  const targetIds = await findTargetIds(user.role, page.map((row) => row.notification_id));
   return {
-    notifications: page.map((row) =>
-      toNotificationItem({ ...row, technical_request_id: requestIds.get(row.notification_id) ?? null }, user.role)),
+    notifications: page.map((row) => toNotificationItem({ ...row, ...targetIds.get(row.notification_id) }, user.role)),
     nextCursor: data.length > limit ? encodeCursor(page[page.length - 1]) : null,
   };
 };

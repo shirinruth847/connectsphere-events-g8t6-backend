@@ -22,6 +22,9 @@ const NOTIFICATION_TARGET_PAGES = Object.freeze({
   // Technical Support open the request itself; the target then also carries
   // technical_request_id (SPM-196).
   TECHNICAL_REQUESTS: "TECHNICAL_REQUESTS",
+  // Venue Staff open their booking requests; a new booking request's target
+  // also carries booking_id (SPM-286).
+  VENUE_BOOKING_REQUESTS: "VENUE_BOOKING_REQUESTS",
 });
 
 module.exports = { NOTIFICATION_TYPES, NOTIFICATION_TARGET_PAGES };
