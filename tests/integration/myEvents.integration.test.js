@@ -165,6 +165,7 @@ beforeAll(async () => {
   fixtures = await createRegistrationFixtures(runId, [
     { key: "attendee", role: "ATTENDEE" },
     { key: "otherAttendee", role: "ATTENDEE" },
+    { key: "nextAttendee", role: "ATTENDEE" },
     { key: "inactiveAttendee", role: "ATTENDEE" },
     { key: "organiserA", role: "ORGANISER", organisation: "A" },
     { key: "coordinator", role: "COORDINATOR" },
@@ -423,5 +424,58 @@ describe("[SPM-141] waitlist offers come from backend state", () => {
     const accept = await postAs("attendee", `/api/registrations/mine/${eventId}/offer/accept`, { offerId: offered.offer.offerId });
     expect(accept.status).toBe(409);
     expect(accept.body.code).toBe("OFFER_EXPIRED");
+  });
+
+  test("[SPM-141][TC-MYE-015][TC-MYE-017] should_hand_the_place_to_the_next_attendee_and_refuse_a_second_response_when_an_offer_is_declined", async () => {
+    const eventId = await insertEvent({ registration_capacity: 1 });
+    await insertRegistration(eventId, "otherAttendee", "REGISTERED");
+    for (const key of ["attendee", "nextAttendee"]) {
+      const joined = await postAs(key, `/api/registrations/mine/${eventId}/waitlist`, { dietaryRestrictions: null, accessibilityRequirements: null });
+      expect(joined.status).toBe(201);
+      recordFixtureIds(runId, "registrationIds", [joined.body.registration.registrationId]);
+    }
+    expect((await postAs("otherAttendee", `/api/registrations/mine/${eventId}/withdraw`)).status).toBe(200);
+    const { offer } = await rowFor("attendee", eventId);
+    expect((await rowFor("nextAttendee", eventId)).waitlistPosition).toBe(2);
+
+    const declined = await postAs("attendee", `/api/registrations/mine/${eventId}/offer/decline`, { offerId: offer.offerId });
+    expect(declined.status).toBe(200);
+    expect(declined.body.registration.status).toBe("WITHDRAWN");
+    expect(await rowFor("attendee", eventId)).toBeUndefined();
+    const next = await rowFor("nextAttendee", eventId);
+    expect(next).toMatchObject({ registration_status: "WAITLISTED", waitlistPosition: 1 });
+    expect(next.offer).toEqual({ offerId: expect.any(Number), expiresAt: expect.any(String) });
+    expect(next.offer.offerId).not.toBe(offer.offerId);
+
+    const lateAccept = await postAs("attendee", `/api/registrations/mine/${eventId}/offer/accept`, { offerId: offer.offerId });
+    expect(lateAccept.status).toBe(409);
+    expect(lateAccept.body.code).toBe("OFFER_NOT_OPEN");
+    const { data, error } = await supabase.from("registration").select("attendee_id,registration_status").eq("event_id", eventId);
+    if (error) throw error;
+    expect(data.filter((row) => row.registration_status === "REGISTERED")).toEqual([]);
+    expect(data.find((row) => row.attendee_id === fixtures.accounts.attendee.userId).registration_status).toBe("WITHDRAWN");
+  });
+});
+
+describe("[SPM-141] withdrawal stays with SPM-147", () => {
+  test("[SPM-141][TC-MYE-022] should_refuse_with_event_not_active_and_change_nothing_when_the_event_is_cancelled", async () => {
+    const eventId = await insertEvent({ status: "CANCELLED" }, { venueCapacity: null });
+    const registrationId = await insertRegistration(eventId, "otherAttendee", "REGISTERED");
+    const notices = async () => {
+      const { count, error } = await supabase.from("notification").select("notification_id", { count: "exact", head: true }).eq("event_id", eventId);
+      if (error) throw error;
+      return count;
+    };
+    const before = await notices();
+
+    const res = await postAs("otherAttendee", `/api/registrations/mine/${eventId}/withdraw`);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("EVENT_NOT_ACTIVE");
+    expect(JSON.stringify(res.body)).not.toMatch(/SQL|P0001|stack|withdraw_event_registration/i);
+    const { data, error } = await supabase.from("registration").select("registration_status,withdrawal_date").eq("registration_id", registrationId).single();
+    if (error) throw error;
+    expect(data).toEqual({ registration_status: "REGISTERED", withdrawal_date: null });
+    expect(await notices()).toBe(before);
+    expect((await rowFor("otherAttendee", eventId)).event.attendee_status).toBe("CANCELLED");
   });
 });
