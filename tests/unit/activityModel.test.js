@@ -170,6 +170,17 @@ test("[SPM-38] organiser history uses backend labels while staff retain detailed
   expect(activityModel.toHistoryEntry(row).changes[0]).not.toHaveProperty("afterLabel");
 });
 
+test("[SPM-286][SPM-287] a technical request entry shows only its labelled status change", () => {
+  const row = { log_id: 2, action: "TECHNICAL_REQUEST_APPROVED", changes: { technicalRequestStatus: { before: "PENDING", after: "APPROVED" } } };
+  for (const organiserView of [true, false]) {
+    expect(activityModel.toHistoryEntry(row, { organiserView }).changes).toEqual([
+      { field: "technicalRequestStatus", label: "Technical request", before: "PENDING", after: "APPROVED", beforeLabel: "Pending", afterLabel: "Approved" },
+    ]);
+  }
+  const sent = activityModel.toHistoryEntry({ log_id: 3, changes: { technicalRequestStatus: { before: null, after: "PENDING" } } });
+  expect(sent.changes[0]).toMatchObject({ beforeLabel: null, afterLabel: "Pending" });
+});
+
 test('[SPM-40] rejection reason reads only the latest organiser-safe rejection for this event',async()=>{
   const query=queryReturning({data:{details:'Capacity is insufficient.'},error:null});
   query.limit.mockReturnValue(query);

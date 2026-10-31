@@ -1,5 +1,6 @@
 const eventModel = require("../model/eventModel");
 const activityModel = require("../model/activityModel");
+const equipmentModel = require("../model/equipmentModel");
 const { getEventAccess, getEditDenial, loadEventForViewer, EVENT_NOT_FOUND } = require("../middleware/authorize");
 const { parseEventId, readIdempotencyKey, IDEMPOTENCY_KEY_MESSAGE } = require("../middleware/validate");
 const {
@@ -132,12 +133,38 @@ const mergeWithExisting = (existingRow, input) => ({
 const savedEquipmentIds = (existingRow) =>
   (existingRow?.event_equipment_requirement || []).map((item) => item.equipment_id);
 
+// SPM-286 AC3: once the event has a valid date and time, each quantity is at
+// most what is free in that window. Items no longer offered (kept under SPM-52
+// AC9) are not rechecked. Nothing is reserved here.
+const checkEquipmentQuantities = async (input, errors) => {
+  const requirements = input.equipmentRequirements;
+  if (errors.equipmentRequirements || !Array.isArray(requirements) || !requirements.length) return {};
+  const start = Date.parse(input.startDatetime);
+  const end = Date.parse(input.endDatetime);
+  if (errors.startDatetime || errors.endDatetime || !(start < end)) return {};
+
+  const available = await equipmentModel.findAvailableQuantities(
+    requirements.map((item) => Number(item.equipmentId)),
+    { start: new Date(start).toISOString(), end: new Date(end).toISOString() },
+  );
+  const over = requirements
+    .map((item) => ({ quantity: Number(item.quantity), option: available.get(Number(item.equipmentId)) }))
+    .filter(({ quantity, option }) => option && quantity > option.availableQuantity);
+  if (!over.length) return {};
+  return {
+    equipmentRequirements: `Not enough equipment for the event's date and time: ${over
+      .map(({ option }) => `${option.name} (${option.availableQuantity} available)`)
+      .join(", ")}.`,
+  };
+};
+
 const validateWith = async (validate, input, existingRow = null) => {
   const context = await eventModel.findValidationContext(input, savedEquipmentIds(existingRow));
-  return {
+  const errors = {
     ...validate(input, { allowedLayouts: context.allowedLayouts }),
     ...validateRequirements(input, context),
   };
+  return { ...errors, ...(await checkEquipmentQuantities(input, errors)) };
 };
 
 const markReplay = (res, result) => {

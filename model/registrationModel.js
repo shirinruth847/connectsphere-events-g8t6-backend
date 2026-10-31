@@ -1,8 +1,14 @@
 const supabase = require("../config/supabase");
-const { hashRequest } = require("./eventModel");
+const {
+  hashRequest,
+  attendeeVenue,
+  findLatestConfirmationSnapshots,
+  CONFIRMED_DETAIL_STATUSES,
+  SNAPSHOT_DETAIL_STATUSES,
+} = require("./eventModel");
 
 const ATTENDEE_REGISTRATION_COLUMNS =
-  "registration_id, registration_status, registration_datetime, event(event_id, title, description, start_datetime, end_datetime, status, venue_booking(status, room(venue(name, address))))";
+  "registration_id, registration_status, registration_datetime, event(event_id, title, description, start_datetime, end_datetime, status, is_published, venue_booking(status, room(venue(venue_id, name, address))))";
 
 // Attendees see a display status instead of the lifecycle state, so internal
 // review and planning progress never reaches them. PENDING_CONFIRMATION is a
@@ -14,23 +20,48 @@ const ATTENDEE_STATUSES = Object.freeze({
   COMPLETED: "COMPLETED",
   CANCELLED: "CANCELLED",
 });
-const VENUE_VISIBLE_STATUSES = ["CONFIRMED", "PREPARATION", "COMPLETED"];
 
-const toAttendeeEvent = (event) => {
-  const approvedBooking = VENUE_VISIBLE_STATUSES.includes(event.status)
-    ? event.venue_booking.find((booking) => booking.status === "APPROVED")
-    : undefined;
-  const venue = approvedBooking && approvedBooking.room ? approvedBooking.room.venue : null;
+const toVenue = (venue) =>
+  venue && typeof venue === "object" && (venue.name || venue.address)
+    ? { name: venue.name ?? null, address: venue.address ?? null }
+    : null;
 
-  return {
+// The same values GET /mine/:eventId shows (SPM-141, Master 5.3, 5.6): current
+// values only for a published, confirmed event; the last published
+// confirmation snapshot while an event is back in planning, in safety review
+// or cancelled; otherwise only the title and status, because current values
+// may be unconfirmed changes.
+const toAttendeeEvent = (event, latestSnapshot = null) => {
+  const view = {
     event_id: event.event_id,
     title: event.title,
-    description: event.description,
-    start_datetime: event.start_datetime,
-    end_datetime: event.end_datetime,
+    description: null,
+    start_datetime: null,
+    end_datetime: null,
     attendee_status: Object.hasOwn(ATTENDEE_STATUSES, event.status) ? ATTENDEE_STATUSES[event.status] : "PENDING_CONFIRMATION",
-    venue: venue ? { name: venue.name, address: venue.address } : null,
+    venue: null,
   };
+  if (event.is_published && CONFIRMED_DETAIL_STATUSES.includes(event.status)) {
+    return {
+      ...view,
+      description: event.description,
+      start_datetime: event.start_datetime,
+      end_datetime: event.end_datetime,
+      venue: toVenue(attendeeVenue(event.venue_booking)),
+    };
+  }
+  const snapshot = SNAPSHOT_DETAIL_STATUSES.includes(event.status) ? latestSnapshot?.snapshot : null;
+  if (snapshot && snapshot.is_published === true) {
+    return {
+      ...view,
+      title: snapshot.title ?? event.title,
+      description: snapshot.description ?? null,
+      start_datetime: snapshot.start_datetime ?? null,
+      end_datetime: snapshot.end_datetime ?? null,
+      venue: toVenue(snapshot.primary_venue),
+    };
+  }
+  return view;
 };
 
 const findAttendeeRegistrations = async (attendeeId, { limit, offset }) => {
@@ -47,11 +78,17 @@ const findAttendeeRegistrations = async (attendeeId, { limit, offset }) => {
     throw new Error(`[Supabase Error] ${error.message}`);
   }
 
-  const registrations = data.slice(0, limit).map((registration) => ({
+  const page = data.slice(0, limit);
+  const snapshots = await findLatestConfirmationSnapshots([
+    ...new Set(
+      page.filter(({ event }) => SNAPSHOT_DETAIL_STATUSES.includes(event.status)).map(({ event }) => event.event_id)
+    ),
+  ]);
+  const registrations = page.map((registration) => ({
     registration_id: registration.registration_id,
     registration_status: registration.registration_status,
     registered_at: registration.registration_datetime,
-    event: toAttendeeEvent(registration.event),
+    event: toAttendeeEvent(registration.event, snapshots.get(registration.event.event_id) || null),
   }));
 
   return { registrations, nextOffset: data.length > limit ? offset + limit : null };

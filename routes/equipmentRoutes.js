@@ -13,6 +13,10 @@ const {
   recordUnavailability,
   updateUnavailability,
   endUnavailability,
+  listTechnicalRequests,
+  getTechnicalRequest,
+  decideTechnicalRequest,
+  listEquipmentSchedule,
 } = require("../controller/equipmentController");
 
 // Equipment catalogue (SPM-52): Technical Support only, reads included.
@@ -21,6 +25,12 @@ const techSupportOnly = [requireAuth, requireRole("TECH_SUPPORT")];
 router.get("/", ...techSupportOnly, validatePagination, listEquipment);
 // Categories for the filter; declared before /:equipmentId.
 router.get("/options", ...techSupportOnly, listEquipmentOptions);
+// Technical request dashboard (SPM-287); declared before /:equipmentId.
+router.get("/requests", ...techSupportOnly, validatePagination, listTechnicalRequests);
+router.get("/requests/:requestId", ...techSupportOnly, getTechnicalRequest);
+router.post("/requests/:requestId/decision", ...techSupportOnly, decideTechnicalRequest);
+// Technical Support calendar; declared before /:equipmentId.
+router.get("/schedule", ...techSupportOnly, listEquipmentSchedule);
 router.get("/:equipmentId", ...techSupportOnly, getEquipment);
 router.post("/", ...techSupportOnly, createEquipment);
 router.put("/:equipmentId", ...techSupportOnly, updateEquipment);
