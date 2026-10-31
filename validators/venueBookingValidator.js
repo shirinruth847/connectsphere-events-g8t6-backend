@@ -279,10 +279,8 @@ const validateBookingItem = (item, index, context) => {
     accessibilityNeeds: accessibilityNeeds || [],
     specialRequirements,
     isPrimary: item.isPrimary === true,
-    // Only a booking that confirms a hold names it: an ordinary booking keeps
-    // the shape, and so the idempotency hash, it had before SPM-188, so a
-    // retry across the deployment still replays its saved result.
-    ...(holdId !== null && { holdId }),
+    // Keep ordinary bookings' pre-conversion hash stable across deployment.
+    ...(holdId !== null ? { holdId } : {}),
   };
 };
 

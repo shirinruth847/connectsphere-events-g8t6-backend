@@ -27,7 +27,7 @@ describe("venueRequirements (SPM-72 AC5)", () => {
   test("should_not_mark_unrelated_facilities_or_accessibility_as_met_from_shared_words", () => {
     const list = venueRequirements({
       venue: venue({ facilities: ["Fire alarm system"], accessibilityFeatures: ["Hearing protection available"] }),
-      event: event({ accessibility_needs: JSON.stringify(["Hearing loop"]) }),
+      event: event({ accessibility_needs: JSON.stringify(["Assistive listening system / hearing loop"]) }),
       requiredFacilities: ["PA system"],
       availability: available,
       detailsRead: true,
@@ -46,6 +46,27 @@ describe("venueRequirements (SPM-72 AC5)", () => {
     });
     expect(statuses(list)["facility-0"]).toBe("MET");
     expect(statuses(list)["accessibility-0"]).toBe("MET");
+  });
+
+  test("[SPM-200-TC3] should_match_the_form's_canonical_needs_to_recorded_capabilities", () => {
+    const list = venueRequirements({
+      venue: venue(),
+      event: event({ accessibility_needs: JSON.stringify([
+        "Wheelchair / barrier-free access", "Assistive listening system / hearing loop", "Live CART / ASL captioning space",
+      ]) }),
+      requiredFacilities: [], availability: available, detailsRead: true,
+    });
+    expect(list.filter((need) => need.key.startsWith("accessibility-")).map((need) => need.status))
+      .toEqual(["MET", "MET", "UNMET"]);
+  });
+
+  test("[SPM-200-AC6][Master M4] should_not_treat_legacy_fallbacks_as_verified_during_an_outage", () => {
+    const list = venueRequirements({
+      venue: venue({ rooms: [{ layoutType: "THEATRE" }], supportedLayouts: null, facilities: null }),
+      event: event(), requiredFacilities: ["Projector"],
+      availability: { requirementStatus: "NOT_CHECKED", detail: "Unknown" }, detailsRead: false,
+    });
+    expect(statuses(list)).toEqual({ capacity: "MET", availability: "NOT_CHECKED", layout: "NOT_CHECKED", "accessibility-0": "NOT_CHECKED", "facility-0": "NOT_CHECKED" });
   });
 
   test("[SPM-72-AC5] should_mark_every_stated_requirement_met", () => {

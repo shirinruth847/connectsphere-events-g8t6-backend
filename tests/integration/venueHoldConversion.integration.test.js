@@ -64,7 +64,7 @@ const placedHold = async (targetEventId, venue, start, end) => {
 };
 
 const bookingItem = (venue, start, end, holdId) => ({
-  venueId: venue.venueId, label: `${prefix} booking`, start, end, expectedAttendance: 50, layout: "Theatre",
+  venueId: venue.venueId, label: `${prefix} hold`, start, end, expectedAttendance: 50, layout: "Theatre",
   ...(holdId ? { holdId } : {}),
 });
 const confirm = async (targetEventId, item, key = nextKey()) => {
@@ -109,7 +109,7 @@ describeLive("SPM-188 confirming a hold as a booking (live)", () => {
       coordinator_id: fixtures.accounts.coordinatorThree.userId, start_datetime: AT("10:00"), end_datetime: AT("12:00"),
     })).event_id;
 
-    for (const label of ["Hall", "Annex", "Studio", "Lab", "Race", "Repair"]) venues[label.toLowerCase()] = await insertVenue(label, 200);
+    for (const label of ["Hall", "Annex", "Details", "Studio", "Lab", "Race", "Repair"]) venues[label.toLowerCase()] = await insertVenue(label, 200);
 
     const db = await getMongoDb();
     await applyMigrations(db);
@@ -175,6 +175,17 @@ describeLive("SPM-188 confirming a hold as a booking (live)", () => {
     expect(response.status).toBe(409);
     expect(response.body.code).toBe("HOLD_WINDOW_CHANGED");
     expect(await bookingsAt(eventId, venues.annex)).toEqual([]);
+    expect((await calendarEntry(holdId)).status).toBe("ACTIVE");
+  });
+
+  test("[SPM-188-AC9] a confirmation keeps the hold's label and attendance", async () => {
+    const holdId = await placedHold(eventId, venues.details, AT("10:00"), AT("11:00"));
+    for (const changes of [{ label: `${prefix} changed` }, { expectedAttendance: 51 }]) {
+      const response = await confirm(eventId, { ...bookingItem(venues.details, AT("10:00"), AT("11:00"), holdId), ...changes });
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("HOLD_DETAILS_CHANGED");
+    }
+    expect(await bookingsAt(eventId, venues.details)).toEqual([]);
     expect((await calendarEntry(holdId)).status).toBe("ACTIVE");
   });
 
