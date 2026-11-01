@@ -15,7 +15,7 @@ const queryReturning = (result) => {
     calls,
     then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
   };
-  for (const method of ["select", "eq", "in", "lt", "gt", "order", "limit"]) {
+  for (const method of ["select", "eq", "in", "lt", "gt", "order", "limit", "or"]) {
     query[method] = jest.fn((...args) => {
       calls.push([method, ...args]);
       return query;
@@ -76,8 +76,9 @@ describe("findVenueBookings", () => {
       event: { event_id: 442, title: "Planning", event_type: null, status: "PLANNING" },
     }));
     const list = queryReturning({ data: rows, error: null });
-    const pending = queryReturning({ count: 3, error: null });
-    const approved = queryReturning({ count: 5, error: null });
+    // Counted per event (one card per event): two pending bookings of event 442 count once.
+    const pending = queryReturning({ data: [{ event_id: 442 }, { event_id: 442 }, { event_id: 443 }, { event_id: 444 }], error: null });
+    const approved = queryReturning({ data: [1, 2, 3, 4, 5].map((event_id) => ({ event_id })), error: null });
     supabase.from.mockReturnValueOnce(list).mockReturnValueOnce(pending).mockReturnValueOnce(approved);
 
     const result = await venueModel.findVenueBookings({ status: "PENDING", venueId: 45, eventId: null, from: null, to: null, limit: 2 });
@@ -101,7 +102,8 @@ describe("findVenueBookings", () => {
       submittedAt: "2026-10-07T13:32:08+00:00",
       updatedAt: "2026-10-08T02:00:00+00:00",
       fromHold: false,
-      event: { eventId: 442, requestId: "REQ-000442", title: "Planning", status: "PLANNING", eventType: null, eventTypeLabel: null },
+      decideBy: null,
+      event: { eventId: 442, requestId: "REQ-000442", title: "Planning", status: "PLANNING", startDatetime: null, endDatetime: null, eventType: null, eventTypeLabel: null },
     });
     expect(list.calls).toEqual(expect.arrayContaining([
       ["eq", "status", "PENDING"],

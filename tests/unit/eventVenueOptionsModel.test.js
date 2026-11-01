@@ -2,7 +2,7 @@ jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), aut
 jest.mock("../../config/mongodb", () => ({ getMongoDb: jest.fn() }));
 
 const supabase = require("../../config/supabase");
-const { venueRequirements, toOptionAvailability, compareOptions, suggestEventVenue } = require("../../model/venueModel");
+const { venueRequirements, toOptionAvailability, compareOptions, suggestEventVenues } = require("../../model/venueModel");
 
 const venue = (overrides = {}) => ({
   venueId: 1,
@@ -236,32 +236,37 @@ describe("compareOptions (SPM-72 AC5)", () => {
   });
 });
 
-describe("suggestEventVenue (SPM-72 AC8)", () => {
+describe("suggestEventVenues (SPM-72 AC8)", () => {
   beforeEach(() => jest.clearAllMocks());
+  const input = { actorId: 20, eventId: 42, venueIds: [7, 9], expectedVenueIds: [9, 3], note: null, idempotencyKey: "key-12345" };
 
-  test("[SPM-72-AC8] should_call_the_rpc_with_a_request_hash_scoped_to_event_and_version", async () => {
-    supabase.rpc.mockResolvedValue({ data: { suggestion: { venueId: 7, version: 1 } }, error: null });
+  test("[SPM-72-AC8] should_call_the_rpc_and_return_the_list_and_clarification_round", async () => {
+    supabase.rpc.mockResolvedValue({ data: { suggestions: [{ venueId: 7 }], clarification: { round_number: 2 } }, error: null });
 
-    await expect(suggestEventVenue({ actorId: 20, eventId: 42, venueId: 7, expectedVersion: 0, idempotencyKey: "key-12345" }))
-      .resolves.toEqual({ venueId: 7, version: 1 });
+    await expect(suggestEventVenues(input)).resolves.toEqual({ suggestions: [{ venueId: 7 }], clarificationRound: 2 });
 
     const [name, args] = supabase.rpc.mock.calls[0];
-    expect(name).toBe("suggest_event_venue");
-    expect(args).toEqual(expect.objectContaining({ p_actor_id: 20, p_event_id: 42, p_venue_id: 7, p_expected_version: 0, p_idempotency_key: "key-12345" }));
+    expect(name).toBe("suggest_event_venues");
+    expect(args).toEqual(expect.objectContaining({ p_actor_id: 20, p_event_id: 42, p_venue_ids: [7, 9], p_expected_venue_ids: [9, 3], p_note: null, p_idempotency_key: "key-12345" }));
     expect(args.p_request_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(input.expectedVenueIds).toEqual([9, 3]);
+  });
+
+  test("[SPM-72-AC8] should_return_no_round_when_no_clarification_was_opened", async () => {
+    supabase.rpc.mockResolvedValue({ data: { suggestions: [], clarification: null }, error: null });
+
+    await expect(suggestEventVenues(input)).resolves.toEqual({ suggestions: [], clarificationRound: null });
   });
 
   test("[SPM-72-AC10] should_turn_a_known_rpc_refusal_into_a_venue_error", async () => {
     supabase.rpc.mockResolvedValue({ data: null, error: { message: "VENUE_CAPACITY_TOO_SMALL" } });
 
-    await expect(suggestEventVenue({ actorId: 20, eventId: 42, venueId: 7, expectedVersion: 0, idempotencyKey: "key-12345" }))
-      .rejects.toMatchObject({ name: "VenueError", code: "VENUE_CAPACITY_TOO_SMALL" });
+    await expect(suggestEventVenues(input)).rejects.toMatchObject({ name: "VenueError", code: "VENUE_CAPACITY_TOO_SMALL" });
   });
 
   test("should_rethrow_an_unknown_database_error", async () => {
     supabase.rpc.mockResolvedValue({ data: null, error: { message: "connection reset" } });
 
-    await expect(suggestEventVenue({ actorId: 20, eventId: 42, venueId: 7, expectedVersion: 0, idempotencyKey: "key-12345" }))
-      .rejects.toMatchObject({ message: "connection reset" });
+    await expect(suggestEventVenues(input)).rejects.toMatchObject({ message: "connection reset" });
   });
 });

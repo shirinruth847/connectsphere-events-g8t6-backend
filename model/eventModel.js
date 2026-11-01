@@ -2,7 +2,7 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
-const { VENUE_STATUS } = require("../config/venueConstants");
+const { VENUE_STATUS, layoutChoices } = require("../config/venueConstants");
 const {
   EVENT_STATUS,
   NO_LAYOUT_PREFERENCE,
@@ -31,6 +31,8 @@ const FIELD_MAP = Object.freeze({
   accessibilityNeeds: "accessibility_needs",
   isRegistrationEnabled: "is_registration_enabled",
   registrationCapacity: "registration_capacity",
+  // The organiser's registration window (SPM-35), asked for in the request
+  // form; save_event_draft and submit_event_request store it.
   registrationOpenAt: "registration_open_at",
   registrationCloseAt: "registration_close_at",
 });
@@ -39,7 +41,7 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end),event_equipment_requirement(equipment_id,quantity_requested,equipment(name,category)),venue_suggestion:event_venue_suggestion(venue_id,suggested_at,version,venue(name,address,max_capacity),suggester:user(name))";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end,venue(name)),event_equipment_requirement(equipment_id,quantity_requested,equipment(name,category)),venue_suggestions:event_suggested_venue(venue_id,suggested_at,withdrawn_at,venue(name,address,max_capacity),suggester:user(name))";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
@@ -206,11 +208,13 @@ const sortPreferences = (list) =>
 
 const toIsoOrNull = (value) => (value ? new Date(value).toISOString() : null);
 
-// Each choice's requested time (SPM-76); null times mean the whole event.
+// Each choice's venue name and requested time (SPM-76); null times mean the
+// whole event. The name is null where the row was not read with its venue.
 const toVenuePreferenceTimes = (list) =>
   Array.isArray(list)
     ? sortPreferences(list).map((item) => ({
         venueId: typeof item === "number" ? item : item.venue_id,
+        venueName: typeof item === "number" ? null : item.venue?.name ?? null,
         requestedStart: typeof item === "number" ? null : toIsoOrNull(item.requested_start),
         requestedEnd: typeof item === "number" ? null : toIsoOrNull(item.requested_end),
       }))
@@ -258,18 +262,22 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
 // enforced again on every save.
 // The coordinator's venue suggestion (SPM-72/74). Organiser-safe: it names a
 // venue the organiser could see in their own request form.
-const toVenueSuggestion = (suggestion) => {
-  const row = Array.isArray(suggestion) ? suggestion[0] : suggestion;
-  if (!row) return null;
-  return {
-    venueId: row.venue_id,
-    name: row.venue?.name ?? null,
-    address: row.venue?.address ?? null,
-    maxCapacity: row.venue?.max_capacity ?? null,
-    suggestedAt: row.suggested_at,
-    suggestedBy: row.suggester?.name ?? null,
-    version: row.version,
-  };
+// The coordinator's current venue list for the organiser: a venue from the
+// organiser's own choices is "selected", any other is "suggested".
+const toVenueSuggestions = (rows, preferences) => {
+  const chosen = new Set((Array.isArray(preferences) ? preferences : []).map((item) => item.venue_id));
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => !row.withdrawn_at)
+    .sort((left, right) => String(left.suggested_at).localeCompare(String(right.suggested_at)) || left.venue_id - right.venue_id)
+    .map((row) => ({
+      venueId: row.venue_id,
+      name: row.venue?.name ?? null,
+      address: row.venue?.address ?? null,
+      maxCapacity: row.venue?.max_capacity ?? null,
+      suggestedAt: row.suggested_at,
+      suggestedBy: row.suggester?.name ?? null,
+      fromOrganiserChoices: chosen.has(row.venue_id),
+    }));
 };
 
 // Staff see the stored status; organisers see only the label (SPM-173 AC6).
@@ -301,7 +309,7 @@ const toEventView = (row, user, access) => ({
         safetyReviewId: findOfficerReviewId(row.safety_reviews, user.user_id),
       }
     : {}),
-  ...(row.venue_suggestion === undefined ? {} : { venueSuggestion: toVenueSuggestion(row.venue_suggestion) }),
+  ...(row.venue_suggestions === undefined ? {} : { venueSuggestions: toVenueSuggestions(row.venue_suggestions, row.event_venue_preference) }),
   viewerRelationship: access.relationship,
   permissions: {
     canEdit: access.canEdit,
@@ -1336,7 +1344,8 @@ const findValidationContext = async (input, keptEquipmentIds = []) => {
   }
 
   return {
-    allowedLayouts: [NO_LAYOUT_PREFERENCE, ...layouts.data.map((room) => room.layout_type)],
+    // The offered (canonical) spellings, and the stored ones that requests saved before may carry.
+    allowedLayouts: [...new Set([NO_LAYOUT_PREFERENCE, ...layouts.data.map((room) => room.layout_type), ...layoutChoices(layouts.data.map((room) => room.layout_type))])],
     venueIds: venues.data.map(({ venue_id }) => venue_id),
     equipmentIds: equipment.data
       .filter((item) => (item.is_active && !item.details_pending) || keptEquipmentIds.includes(item.equipment_id))
@@ -1360,7 +1369,7 @@ const findRequestOptions = async () => {
   for (const result of [venues, rooms, equipment]) if (result.error) throw dbError(result.error);
   return {
     venues: venues.data.map(row => ({ venueId: row.venue_id, name: row.name })),
-    layouts: [...new Set([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)])].filter(Boolean),
+    layouts: layoutChoices([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)]),
     equipment: equipment.data.map(row => ({ equipmentId: row.equipment_id, name: row.name })),
   };
 };

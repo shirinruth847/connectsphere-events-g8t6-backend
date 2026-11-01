@@ -20,7 +20,7 @@ const FUTURE_END = "2099-11-04T04:00:00+00:00";
 // A chainable stand-in for a supabase-js query that resolves to `result`.
 const queryReturning = (result) => {
   const query = { then: (resolve, reject) => Promise.resolve(result).then(resolve, reject) };
-  for (const method of ["select", "eq", "in", "lt", "gt", "order", "limit"]) query[method] = jest.fn(() => query);
+  for (const method of ["select", "eq", "in", "lt", "gt", "order", "limit", "or"]) query[method] = jest.fn(() => query);
   query.maybeSingle = jest.fn(() => Promise.resolve(result));
   return query;
 };
@@ -86,7 +86,7 @@ describe("approveVenueBooking under the venue lock (Master 7.4, T33)", () => {
   const pgError = (message, detail, code = "P0001") => Object.assign(new Error(message), { code, detail });
   let client;
   let locked;
-  let decideError;
+  let decideError, overdue;
 
   // A pg client on the venue lock connection: begin locks event then venue,
   // decide_venue_booking commits the decision in the same transaction.
@@ -95,6 +95,7 @@ describe("approveVenueBooking under the venue lock (Master 7.4, T33)", () => {
     jest.spyOn(console, "error").mockImplementation(() => {});
     locked = { bookingId: 110, eventId: 442, venueId: 45, status: "PENDING", start: FUTURE_START, end: FUTURE_END };
     decideError = null;
+    overdue = false;
     client = Object.assign(new EventEmitter(), {
       release: jest.fn(),
       query: jest.fn(async (sql) => {
@@ -103,6 +104,7 @@ describe("approveVenueBooking under the venue lock (Master 7.4, T33)", () => {
           return { rows: [{ result: locked }] };
         }
         if (sql.includes("decide_venue_booking") && decideError) throw decideError;
+        if (sql.includes("venue_booking_hold_expired")) return { rows: [{ overdue }] };
         return { rows: [{}] };
       }),
     });
@@ -122,6 +124,8 @@ describe("approveVenueBooking under the venue lock (Master 7.4, T33)", () => {
       "BEGIN",
       "SET LOCAL",
       "SELECT public.begin_venue_booking_decision",
+      "SELECT public.venue_booking_hold_expired",
+      "SELECT public.expire_overdue_venue_bookings",
       "SELECT public.decide_venue_booking",
       "COMMIT",
     ]);
@@ -147,9 +151,18 @@ describe("approveVenueBooking under the venue lock (Master 7.4, T33)", () => {
     expect(to.toISOString()).toBe("2099-11-04T04:45:00.000Z");
     expect(options).toEqual({ maxTimeMS: 3000 });
     // The MongoDB read happens between the lock and the decision.
-    const [, , decideOrder] = client.query.mock.invocationCallOrder;
-    expect(venueCalendarModel.findCalendarEntries.mock.invocationCallOrder[0]).toBeLessThan(client.query.mock.invocationCallOrder[3]);
-    expect(decideOrder).toBeDefined();
+    const decideOrder = client.query.mock.invocationCallOrder[client.query.mock.calls.findIndex(([sql]) => sql.includes("decide_venue_booking"))];
+    expect(venueCalendarModel.findCalendarEntries.mock.invocationCallOrder[0]).toBeLessThan(decideOrder);
+  });
+
+  test("[SPM-190] should_refuse_a_request_whose_hold_has_expired_and_roll_back", async () => {
+    mockTables();
+    overdue = true;
+
+    await expect(venueModel.approveVenueBooking(7, 110, { expectedStatus: "PENDING" })).rejects.toMatchObject({ code: "BOOKING_HOLD_EXPIRED" });
+    expect(statements()).toEqual(expect.arrayContaining(["ROLLBACK"]));
+    expect(statements()).not.toContain("SELECT public.decide_venue_booking");
+    expect(venueCalendarModel.findCalendarEntries).not.toHaveBeenCalled();
   });
 
   test("[SPM-186-TC8] should_refuse_an_active_block_and_roll_back", async () => {

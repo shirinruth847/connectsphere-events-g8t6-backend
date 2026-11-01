@@ -1,5 +1,7 @@
-// SPM-190 routes: who may call each hold route, validation, Idempotency-Key
-// and the error mapping. The model is mocked; venueHoldModel.test.js covers it.
+// SPM-190 routes: who may call each hold route and the error mapping. Since
+// 1 November 2026 a booking request is the venue hold, so holds are no longer
+// requested, placed, declined or extended; earlier holds can still be listed,
+// withdrawn and released. The model is mocked; venueHoldModel.test.js covers it.
 jest.mock("../../config/supabase", () => ({ from: jest.fn(), rpc: jest.fn(), auth: {} }));
 jest.mock("../../model/userModel");
 jest.mock("../../model/eventModel", () => ({
@@ -45,83 +47,23 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
-describe("POST /api/events/:id/venue-holds (SPM-190 AC1)", () => {
-  beforeEach(() => {
-    signedInAs(COORDINATOR_ID, "COORDINATOR");
+describe("retired hold routes (developer decision of 1 November 2026)", () => {
+  test.each([
+    ["COORDINATOR", "post", "/api/events/42/venue-holds", holdBody()],
+    ["VENUE_STAFF", "post", "/api/venues/hold-requests/3/place", {}],
+    ["VENUE_STAFF", "post", "/api/venues/hold-requests/3/decline", { reason: "Exams" }],
+    ["VENUE_STAFF", "post", `/api/venues/holds/${HOLD_ID}/extend`, { days: 2 }],
+  ])("should_answer_404_to_%s_%s_%s", async (role, method, path, body) => {
+    signedInAs(role === "COORDINATOR" ? COORDINATOR_ID : VENUE_STAFF_ID, role);
     eventModel.findVisibleEvent.mockResolvedValue(eventRow());
-  });
 
-  test("[SPM-190-AC1] should_record_the_assigned_coordinator's_request", async () => {
-    const response = await send("post", "/api/events/42/venue-holds", holdBody());
+    const response = await send(method, path, body);
 
-    expect(response.status).toBe(201);
-    expect(response.body.holdRequest).toMatchObject({ holdRequestId: 3, status: "PENDING" });
-    expect(venueModel.requestVenueHold).toHaveBeenCalledWith({
-      actorId: COORDINATOR_ID,
-      eventId: 42,
-      idempotencyKey: "spm190-request-0001",
-      values: { venueId: 7, label: "Main hall", start: "2030-03-10T02:00:00.000Z", end: "2030-03-10T04:00:00.000Z", expectedAttendance: null, note: null },
-    });
-  });
-
-  test("should_require_an_idempotency_key", async () => {
-    const response = await send("post", "/api/events/42/venue-holds", holdBody(), null);
-
-    expect(response.status).toBe(400);
-    expect(response.body.fields).toHaveProperty("idempotencyKey");
+    expect(response.status).toBe(404);
     expect(venueModel.requestVenueHold).not.toHaveBeenCalled();
-  });
-
-  test("[SPM-190-TC] should_refuse_a_window_outside_the_event", async () => {
-    const response = await send("post", "/api/events/42/venue-holds", holdBody({ end: "2030-03-10T10:00:00+00:00" }));
-
-    expect(response.status).toBe(400);
-    expect(response.body.fields.start).toBe("Must be within the event's dates and times.");
-  });
-
-  test("should_refuse_an_event_that_is_not_in_planning", async () => {
-    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "UNDER_REVIEW" }));
-
-    const response = await send("post", "/api/events/42/venue-holds", holdBody());
-
-    expect(response.status).toBe(409);
-    expect(response.body.code).toBe("EVENT_NOT_IN_PLANNING");
-  });
-
-  test.each([
-    ["the supervising Lead", 10, "COORDINATOR_LEAD"],
-    ["the organiser", 5, "ORGANISER"],
-  ])("should_refuse_%s", async (_name, userId, role) => {
-    signedInAs(userId, role);
-
-    const response = await send("post", "/api/events/42/venue-holds", holdBody());
-
-    expect([403, 404]).toContain(response.status);
-    expect(venueModel.requestVenueHold).not.toHaveBeenCalled();
-  });
-
-  test.each([
-    ["HOLD_REQUEST_EXISTS", 409],
-    ["HOLD_TOO_LATE", 409],
-    ["VENUE_NOT_BOOKABLE", 409],
-    ["VENUE_NOT_FOUND", 404],
-    ["IDEMPOTENCY_KEY_REUSED", 409],
-  ])("should_map_%s_to_%i", async (code, status) => {
-    venueModel.requestVenueHold.mockRejectedValue(venueError(code));
-
-    const response = await send("post", "/api/events/42/venue-holds", holdBody());
-
-    expect(response.status).toBe(status);
-    expect(response.body.code).toBe(code);
-  });
-
-  test("should_report_a_window_outside_the_event_found_by_the_database_on_its_field", async () => {
-    venueModel.requestVenueHold.mockRejectedValue(venueError("HOLD_OUTSIDE_EVENT"));
-
-    const response = await send("post", "/api/events/42/venue-holds", holdBody());
-
-    expect(response.status).toBe(400);
-    expect(response.body.fields.start).toBe("Must be within the event's dates and times.");
+    expect(venueModel.placeVenueHold).not.toHaveBeenCalled();
+    expect(venueModel.declineVenueHoldRequest).not.toHaveBeenCalled();
+    expect(venueModel.extendVenueHold).not.toHaveBeenCalled();
   });
 });
 
@@ -145,22 +87,12 @@ describe("GET /api/events/:id/venue-holds", () => {
   });
 });
 
-describe("Venue Staff hold routes (SPM-190 AC1, AC4, AC6)", () => {
-  const staffCalls = [
-    ["get", "/api/venues/hold-requests", undefined],
-    ["post", "/api/venues/hold-requests/3/place", {}],
-    ["post", "/api/venues/hold-requests/3/decline", { reason: "Exams" }],
-    ["post", `/api/venues/holds/${HOLD_ID}/extend`, { days: 2 }],
-  ];
-
-  test.each(["ORGANISER", "COORDINATOR_LEAD", "COORDINATOR", "ATTENDEE"])("should_refuse_every_staff_route_for_%s", async (role) => {
+describe("Venue Staff hold request list (SPM-190)", () => {
+  test.each(["ORGANISER", "COORDINATOR_LEAD", "COORDINATOR", "ATTENDEE"])("should_refuse_the_list_for_%s", async (role) => {
     signedInAs(99, role);
-    for (const [method, path, body] of staffCalls) {
-      const response = await send(method, path, body);
-      expect(response.status).toBe(403);
-    }
-    expect(venueModel.placeVenueHold).not.toHaveBeenCalled();
-    expect(venueModel.extendVenueHold).not.toHaveBeenCalled();
+    const response = await send("get", "/api/venues/hold-requests", undefined);
+    expect(response.status).toBe(403);
+    expect(venueModel.listHoldRequests).not.toHaveBeenCalled();
   });
 
   test("should_list_hold_requests_and_filter_by_status", async () => {
@@ -179,106 +111,6 @@ describe("Venue Staff hold routes (SPM-190 AC1, AC4, AC6)", () => {
     expect(Object.keys(response.body.fields).sort()).toEqual(["page", "status"]);
   });
 
-  test("[SPM-190-AC1] should_place_a_hold_with_an_idempotency_key", async () => {
-    venueModel.placeVenueHold.mockResolvedValue(holdRequest({ status: "PLACED", hold: { holdId: HOLD_ID } }));
-
-    const response = await send("post", "/api/venues/hold-requests/3/place", {});
-
-    expect(response.status).toBe(200);
-    expect(venueModel.placeVenueHold).toHaveBeenCalledWith({ actorId: VENUE_STAFF_ID, requestId: 3, idempotencyKey: "spm190-request-0001" });
-  });
-
-  test("should_refuse_placing_without_an_idempotency_key", async () => {
-    const response = await send("post", "/api/venues/hold-requests/3/place", undefined, null);
-
-    expect(response.status).toBe(400);
-    expect(response.body.fields).toHaveProperty("idempotencyKey");
-  });
-
-  test.each([
-    ["VENUE_BOOKING_CONFLICT", 409],
-    ["VENUE_HELD", 409],
-    ["VENUE_BLOCKED", 409],
-    ["HOLD_TOO_LATE", 409],
-    ["VENUE_BUFFERS_NOT_SET", 409],
-    ["HOLD_REQUEST_NOT_FOUND", 404],
-    ["VENUE_CALENDAR_UNAVAILABLE", 503],
-  ])("[SPM-190-AC4] should_map_a_placement_failure_%s_to_%i", async (code, status) => {
-    venueModel.placeVenueHold.mockRejectedValue(venueError(code));
-
-    const response = await send("post", "/api/venues/hold-requests/3/place", {});
-
-    expect(response.status).toBe(status);
-    expect(response.body.code).toBe(code);
-  });
-
-  test("should_return_the_current_status_when_a_request_was_already_actioned", async () => {
-    venueModel.placeVenueHold.mockRejectedValue(venueError("HOLD_REQUEST_DECIDED", { currentStatus: "WITHDRAWN" }));
-
-    const response = await send("post", "/api/venues/hold-requests/3/place", {});
-
-    expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({ code: "HOLD_REQUEST_DECIDED", currentStatus: "WITHDRAWN" });
-  });
-
-  test("should_decline_with_a_reason", async () => {
-    const response = await send("post", "/api/venues/hold-requests/3/decline", { reason: " Reserved for exams " }, null);
-
-    expect(response.status).toBe(200);
-    expect(venueModel.declineVenueHoldRequest).toHaveBeenCalledWith({ actorId: VENUE_STAFF_ID, requestId: 3, reason: "Reserved for exams" });
-  });
-
-  test("should_refuse_a_decline_without_a_reason", async () => {
-    const response = await send("post", "/api/venues/hold-requests/3/decline", {}, null);
-
-    expect(response.status).toBe(400);
-    expect(response.body.fields).toHaveProperty("reason");
-    expect(venueModel.declineVenueHoldRequest).not.toHaveBeenCalled();
-  });
-
-  test("[SPM-190-AC6] should_extend_by_the_chosen_days", async () => {
-    const response = await send("post", `/api/venues/holds/${HOLD_ID}/extend`, { days: 3 }, null);
-
-    expect(response.status).toBe(200);
-    expect(venueModel.extendVenueHold).toHaveBeenCalledWith({ actorId: VENUE_STAFF_ID, holdId: HOLD_ID, days: 3 });
-  });
-
-  test.each([
-    ["HOLD_ALREADY_EXTENDED", 409],
-    ["HOLD_EXPIRED", 409],
-    ["HOLD_NOT_ACTIVE", 409],
-    ["HOLD_NOT_FOUND", 404],
-  ])("[SPM-190-AC6] should_map_an_extension_failure_%s_to_%i", async (code, status) => {
-    venueModel.extendVenueHold.mockRejectedValue(venueError(code));
-
-    const response = await send("post", `/api/venues/holds/${HOLD_ID}/extend`, { days: 3 }, null);
-
-    expect(response.status).toBe(status);
-    expect(response.body.code).toBe(code);
-  });
-
-  test("[SPM-190-AC6] should_report_an_extension_past_the_cutoff_on_the_days_field", async () => {
-    venueModel.extendVenueHold.mockRejectedValue(venueError("HOLD_EXTENSION_TOO_LONG"));
-
-    const response = await send("post", `/api/venues/holds/${HOLD_ID}/extend`, { days: 7 }, null);
-
-    expect(response.status).toBe(400);
-    expect(response.body.fields.days).toMatch(/24 hours before setup/);
-  });
-
-  test("should_answer_404_for_ids_that_cannot_exist", async () => {
-    expect((await send("post", "/api/venues/hold-requests/abc/place", {})).body.code).toBe("HOLD_REQUEST_NOT_FOUND");
-    expect((await send("post", "/api/venues/holds/xyz/extend", { days: 1 }, null)).body.code).toBe("HOLD_NOT_FOUND");
-  });
-
-  test("should_hide_unexpected_errors", async () => {
-    venueModel.placeVenueHold.mockRejectedValue(new Error("connection reset"));
-
-    const response = await send("post", "/api/venues/hold-requests/3/place", {});
-
-    expect(response.status).toBe(500);
-    expect(JSON.stringify(response.body)).not.toMatch(/connection reset/);
-  });
 });
 
 describe("release and withdraw (Venue Staff or the coordinator)", () => {
@@ -322,12 +154,3 @@ describe("release and withdraw (Venue Staff or the coordinator)", () => {
   });
 });
 
-
-test('placement capacity conflicts return an actionable 409 instead of an internal error', async () => {
-  venueModel.placeVenueHold.mockRejectedValue(venueError('VENUE_CAPACITY_EXCEEDED'));
-  const response = await send('post', '/api/venues/hold-requests/3/place');
-  expect(response.status).toBe(409);
-  expect(response.body.code).toBe('VENUE_CAPACITY_EXCEEDED');
-  expect(response.body.error).toMatch(/capacity/);
-  expect(response.body).not.toHaveProperty('stack');
-});

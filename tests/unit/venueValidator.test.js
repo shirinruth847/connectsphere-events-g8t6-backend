@@ -16,13 +16,16 @@ const marina = {
   contactEmail: "alex.tan@example.com",
   contactNumber: "+65 6123 4567",
   status: "ACTIVE",
+  setupMinutes: 30,
+  turnaroundMinutes: 45,
 };
 
 describe("validateVenueCreate", () => {
   test("[SPM-73-TC1] should_accept_the_marina_conference_hall_and_return_column_values", () => {
-    const { values, fields } = validateVenueCreate({ ...marina, name: "  Marina Conference Hall  ", contactEmail: "Alex.Tan@Example.com" });
+    const { values, fields, buffers } = validateVenueCreate({ ...marina, name: "  Marina Conference Hall  ", contactEmail: "Alex.Tan@Example.com" });
 
     expect(fields).toEqual({});
+    expect(buffers).toEqual({ setupMinutes: 30, turnaroundMinutes: 45 });
     expect(values).toEqual({
       name: "Marina Conference Hall",
       address: "10 Bayfront Avenue",
@@ -55,7 +58,23 @@ describe("validateVenueCreate", () => {
       maxCapacity: MESSAGES.capacityRequired,
       contactPerson: MESSAGES.contactPersonRequired,
       contactNumber: MESSAGES.contactRequired,
+      setupMinutes: "Setup time is required",
+      turnaroundMinutes: "Turnaround time is required",
     });
+  });
+
+  test("setup and turnaround are required whole minutes; 0 is allowed", () => {
+    expect(validateVenueCreate({ ...marina, setupMinutes: "", turnaroundMinutes: null }).fields).toEqual({
+      setupMinutes: "Setup time is required",
+      turnaroundMinutes: "Turnaround time is required",
+    });
+    expect(validateVenueCreate({ ...marina, setupMinutes: -5, turnaroundMinutes: 12.5 }).fields).toEqual({
+      setupMinutes: "Enter whole minutes from 0 to 1440",
+      turnaroundMinutes: "Enter whole minutes from 0 to 1440",
+    });
+    const zero = validateVenueCreate({ ...marina, setupMinutes: 0, turnaroundMinutes: "0" });
+    expect(zero.fields).toEqual({});
+    expect(zero.buffers).toEqual({ setupMinutes: 0, turnaroundMinutes: 0 });
   });
 
   test.each([0, -10, 10.5, "10.5", "abc", "-10", true, [500]])(

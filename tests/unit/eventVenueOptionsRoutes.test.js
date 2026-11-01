@@ -9,7 +9,8 @@ jest.mock("../../model/venueModel", () => ({
   getVenueAvailability: jest.fn(),
   listSelectableVenuePhotos: jest.fn(),
   getSelectableVenuePhotoImage: jest.fn(),
-  suggestEventVenue: jest.fn(),
+  suggestEventVenues: jest.fn(),
+  getEventVenueChoices: jest.fn(),
 }));
 
 const request = require("supertest");
@@ -193,51 +194,70 @@ describe("GET /api/venues/options/:venueId/photos (SPM-72 AC4)", () => {
   });
 });
 
-describe("PUT /api/events/:id/venue-suggestion (SPM-72 AC8)", () => {
-  const suggestion = { venueId: 7, name: "Grand Hall", address: "1 Road", maxCapacity: 300, suggestedAt: "2026-10-23T04:00:00Z", suggestedBy: { userId: COORDINATOR_ID, name: "C" }, version: 1 };
+describe("PUT /api/events/:id/venue-suggestions (SPM-72 AC8)", () => {
+  const suggestions = [{ venueId: 7, name: "Grand Hall", address: "1 Road", maxCapacity: 300, suggestedAt: "2026-11-01T04:00:00Z", suggestedBy: "C", fromOrganiserChoices: false }];
+  const body = { venueIds: [7], expectedVenueIds: [] };
 
-  test("[SPM-72-AC8] should_suggest_the_venue_as_the_signed_in_coordinator", async () => {
-    venueModel.suggestEventVenue.mockResolvedValue(suggestion);
+  test("[SPM-72-AC8] should_send_the_list_as_the_signed_in_coordinator_and_name_the_clarification", async () => {
+    venueModel.suggestEventVenues.mockResolvedValue({ suggestions, clarificationRound: 2 });
 
-    const response = await send("put", "/api/events/42/venue-suggestion", { venueId: 7, version: 0 });
+    const response = await send("put", "/api/events/42/venue-suggestions", { ...body, note: "  The hall has a stage.  " });
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ message: "Grand Hall was suggested to the organiser.", suggestion });
-    expect(venueModel.suggestEventVenue).toHaveBeenCalledWith({
+    expect(response.body).toEqual({
+      message: "Sent to the organiser in Clarification Request 2. They can amend their venue choices there.",
+      suggestions,
+      clarificationRound: 2,
+    });
+    expect(venueModel.suggestEventVenues).toHaveBeenCalledWith({
       actorId: COORDINATOR_ID,
       eventId: 42,
-      venueId: 7,
-      expectedVersion: 0,
+      venueIds: [7],
+      expectedVenueIds: [],
+      note: "The hall has a stage.",
       idempotencyKey: "spm72-suggest-0001",
     });
+  });
+
+  test("[SPM-72-AC8] should_say_the_organiser_was_notified_when_no_clarification_was_needed", async () => {
+    venueModel.suggestEventVenues.mockResolvedValue({ suggestions: [{ ...suggestions[0], fromOrganiserChoices: true }], clarificationRound: null });
+
+    const response = await send("put", "/api/events/42/venue-suggestions", body);
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe("The organiser has been notified.");
+    expect(venueModel.suggestEventVenues).toHaveBeenCalledWith(expect.objectContaining({ note: null }));
   });
 
   test("[SPM-72-AC2] should_refuse_the_supervising_lead", async () => {
     signedInAs(LEAD_ID, "COORDINATOR_LEAD");
 
-    const response = await send("put", "/api/events/42/venue-suggestion", { venueId: 7, version: 0 });
+    const response = await send("put", "/api/events/42/venue-suggestions", body);
 
     expect(response.status).toBe(403);
-    expect(venueModel.suggestEventVenue).not.toHaveBeenCalled();
+    expect(venueModel.suggestEventVenues).not.toHaveBeenCalled();
   });
 
   test.each([
-    [{ venueId: 7, version: 0, actorId: 1 }, "actorId"],
-    [{ venueId: 7, version: 0, status: "PLANNING" }, "status"],
-    [{ venueId: "7", version: 0 }, "venueId"],
-    [{ venueId: 0, version: 0 }, "venueId"],
-    [{ venueId: 7 }, "version"],
-    [{ venueId: 7, version: -1 }, "version"],
-  ])("[SPM-72-AC8] should_reject_%p", async (body, field) => {
-    const response = await send("put", "/api/events/42/venue-suggestion", body);
+    [{ ...body, actorId: 1 }, "actorId"],
+    [{ ...body, status: "PLANNING" }, "status"],
+    [{ venueIds: ["7"], expectedVenueIds: [] }, "venueIds"],
+    [{ venueIds: [0], expectedVenueIds: [] }, "venueIds"],
+    [{ venueIds: [7, 7], expectedVenueIds: [] }, "venueIds"],
+    [{ venueIds: Array.from({ length: 11 }, (_, index) => index + 1), expectedVenueIds: [] }, "venueIds"],
+    [{ venueIds: [7] }, "expectedVenueIds"],
+    [{ ...body, note: 5 }, "note"],
+    [{ ...body, note: "x".repeat(1001) }, "note"],
+  ])("[SPM-72-AC8] should_reject_%p", async (sent, field) => {
+    const response = await send("put", "/api/events/42/venue-suggestions", sent);
 
     expect(response.status).toBe(400);
     expect(response.body.fields).toHaveProperty(field);
-    expect(venueModel.suggestEventVenue).not.toHaveBeenCalled();
+    expect(venueModel.suggestEventVenues).not.toHaveBeenCalled();
   });
 
   test("[SPM-72-AC10] should_require_an_idempotency_key", async () => {
-    const response = await send("put", "/api/events/42/venue-suggestion", { venueId: 7, version: 0 }, null);
+    const response = await send("put", "/api/events/42/venue-suggestions", body, null);
 
     expect(response.status).toBe(400);
     expect(response.body.fields).toHaveProperty("idempotencyKey");
@@ -249,23 +269,49 @@ describe("PUT /api/events/:id/venue-suggestion (SPM-72 AC8)", () => {
     ["VENUE_NOT_SELECTABLE", 409],
     ["VENUE_CAPACITY_TOO_SMALL", 409],
     ["VENUE_SUGGESTION_VERSION_CONFLICT", 409],
+    ["CLARIFICATION_NOT_OPEN", 409],
     ["IDEMPOTENCY_KEY_REUSED", 409],
+    ["IDEMPOTENCY_IN_PROGRESS", 409],
   ])("[SPM-72-AC10] should_map_%s_to_%i", async (code, status) => {
-    venueModel.suggestEventVenue.mockRejectedValue(venueError(code));
+    venueModel.suggestEventVenues.mockRejectedValue(venueError(code));
 
-    const response = await send("put", "/api/events/42/venue-suggestion", { venueId: 7, version: 0 });
+    const response = await send("put", "/api/events/42/venue-suggestions", body);
 
     expect(response.status).toBe(status);
     expect(response.body.code).toBe(code);
   });
+});
 
-  test("[SPM-185-AC7] should_map_VENUE_BOOKING_CONFLICT_to_409", async () => {
-    venueModel.suggestEventVenue.mockRejectedValue(venueError("VENUE_BOOKING_CONFLICT"));
+describe("GET /api/events/:id/venue-choices (organiser venue cards)", () => {
+  const OWNER_ID = 5;
+  const choices = { preferredVenues: [], suggestedVenues: [], detailsAvailable: true, availabilityChecked: true };
 
-    const response = await send("put", "/api/events/42/venue-suggestion", { venueId: 7, version: 0 });
+  test("should_return_the_cards_to_the_owner", async () => {
+    signedInAs(OWNER_ID, "ORGANISER");
+    venueModel.getEventVenueChoices.mockResolvedValue(choices);
 
-    expect(response.status).toBe(409);
-    expect(response.body.code).toBe("VENUE_BOOKING_CONFLICT");
+    const response = await send("get", "/api/events/42/venue-choices");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(choices);
+    expect(venueModel.getEventVenueChoices).toHaveBeenCalledWith(expect.objectContaining({ event_id: 42 }), expect.objectContaining({ user_id: OWNER_ID }));
+  });
+
+  test("should_refuse_coordinators_who_read_venue_options_instead", async () => {
+    const response = await send("get", "/api/events/42/venue-choices");
+
+    expect(response.status).toBe(403);
+    expect(venueModel.getEventVenueChoices).not.toHaveBeenCalled();
+  });
+
+  test("should_answer_not_found_for_an_event_outside_the_organisers_scope", async () => {
+    signedInAs(77, "ORGANISER");
+    eventModel.findVisibleEvent.mockResolvedValue(null);
+
+    const response = await send("get", "/api/events/42/venue-choices");
+
+    expect(response.status).toBe(404);
+    expect(venueModel.getEventVenueChoices).not.toHaveBeenCalled();
   });
 });
 

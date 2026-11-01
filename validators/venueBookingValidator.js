@@ -4,7 +4,7 @@ const { MAX_INTEGER, parseDate } = require("./eventValidator");
 
 // Values of the live public.booking_status enum. Master section 5.4 also names
 // HELD, EXPIRED and RELEASED; they join this list when the schema adds them.
-const VENUE_BOOKING_STATUSES = Object.freeze(["PENDING", "APPROVED", "REJECTED", "CANCELLED"]);
+const VENUE_BOOKING_STATUSES = Object.freeze(["PENDING", "APPROVED", "REJECTED", "CANCELLED", "EXPIRED"]);
 
 const BOOKING_LIST_LIMIT_DEFAULT = 100;
 const BOOKING_LIST_LIMIT_MAX = 200;

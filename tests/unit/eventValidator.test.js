@@ -22,8 +22,8 @@ const validRequest = () => ({
   accessibilityNeeds: ["Wheelchair access"],
   isRegistrationEnabled: true,
   registrationCapacity: 150,
-  registrationOpenAt: inHours(0),
-  registrationCloseAt: inHours(24),
+  registrationOpenAt: inHours(24),
+  registrationCloseAt: inHours(6 * 24),
 });
 
 const submit = (input) => validateSubmission(input, { now: NOW, allowedLayouts: LAYOUTS });
@@ -259,5 +259,23 @@ describe("[SPM-38] submitted technical support needs", () => {
     for (const technicalSupportNeeds of [42, {}, [], "a".repeat(2001)]) {
       expect(validateDraft({ title: "Synthetic request", technicalSupportNeeds })).toHaveProperty("technicalSupportNeeds");
     }
+  });
+});
+
+describe("the registration window (SPM-35)", () => {
+  test("is required on submission when registration is enabled, not in a draft", () => {
+    const missing = { ...validRequest(), registrationOpenAt: null, registrationCloseAt: "" };
+    expect(submit(missing)).toEqual({
+      registrationOpenAt: "Registration start date and time is required when registration is enabled.",
+      registrationCloseAt: "Registration end date and time is required when registration is enabled.",
+    });
+    expect(draft(missing)).toEqual({});
+    expect(submit({ ...missing, isRegistrationEnabled: false, registrationCapacity: null })).toEqual({});
+  });
+
+  test("ends after it starts and no later than the event", () => {
+    expect(submit({ ...validRequest(), registrationCloseAt: inHours(12) }).registrationCloseAt).toBe("Registration must close after it opens.");
+    expect(submit({ ...validRequest(), registrationCloseAt: inHours(7 * 24 + 1) }).registrationCloseAt).toBe("Registration must close no later than the event start.");
+    expect(draft({ title: "Gala", registrationOpenAt: "tomorrow" }).registrationOpenAt).toBe("Please enter a valid date and time.");
   });
 });
