@@ -62,7 +62,7 @@ async function setup({ eventStatus = "UNDER_REVIEW" } = {}) {
   await db.exec(`INSERT INTO public.event_venue_preference (event_id,venue_id,preference_order) VALUES (${EVENT},1,1)`);
   // An SPM-72 single suggestion made before the list existed.
   await db.exec(`INSERT INTO public.event_venue_suggestion (event_id,venue_id,suggested_by) VALUES (${EVENT},1,${COORDINATOR})`);
-  await db.exec(read("20261101120000_spm72_venue_suggestion_list.sql"));
+  await db.exec(read("20261101150000_spm72_venue_suggestion_list.sql"));
   return db;
 }
 
