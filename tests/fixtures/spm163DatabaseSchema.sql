@@ -39,6 +39,7 @@ CREATE TABLE public.event (
   registration_capacity integer,
   registration_open_at timestamptz,
   registration_close_at timestamptz,
+  previously_confirmed boolean NOT NULL DEFAULT false,
   version integer NOT NULL DEFAULT 1
 );
 

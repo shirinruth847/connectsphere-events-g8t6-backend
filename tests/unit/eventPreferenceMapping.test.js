@@ -14,6 +14,8 @@ const equipmentRows = [
   { equipment_id: 4, quantity_requested: 2 },
   { equipment_id: 9, quantity_requested: 1, quantity: 7 },
 ];
+// Rows without an embedded equipment row (RPC write results) carry no name or category.
+const line = (equipmentId, quantity) => ({ equipmentId, name: null, category: null, quantity });
 
 const availabilityFor = async (eventRow) => {
   const users = {
@@ -38,7 +40,7 @@ describe("[SPM-182] venue preference and equipment mapping", () => {
     const result = eventModel.toApi({ event_id: 1, event_venue_preference: unsortedPreferences, event_equipment_requirement: equipmentRows });
 
     expect(result.venuePreferences).toEqual([3, 5, 8]);
-    expect(result.equipmentRequirements).toEqual([{ equipmentId: 4, quantity: 2 }, { equipmentId: 9, quantity: 1 }]);
+    expect(result.equipmentRequirements).toEqual([line(4, 2), line(9, 1)]);
   });
 
   test("toApi_accepts_numeric_preferences_and_the_quantity_fallback", () => {
@@ -50,7 +52,7 @@ describe("[SPM-182] venue preference and equipment mapping", () => {
     });
 
     expect(result.venuePreferences).toEqual([12, 4]);
-    expect(result.equipmentRequirements).toEqual([{ equipmentId: 6, quantity: 3 }]);
+    expect(result.equipmentRequirements).toEqual([line(6, 3)]);
   });
 
   test("toApi_returns_empty_lists_for_missing_or_non_array_values", () => {
@@ -73,7 +75,7 @@ describe("[SPM-182] venue preference and equipment mapping", () => {
     });
 
     expect(result.venuePreferences).toEqual([3, 5, 8]);
-    expect(result.equipmentRequirements).toEqual([{ equipmentId: 4, quantity: 2 }, { equipmentId: 9, quantity: 1 }]);
+    expect(result.equipmentRequirements).toEqual([line(4, 2), line(9, 1)]);
   });
 
   test("toUnassignedQueueItem_returns_empty_lists_when_relations_are_missing", () => {
@@ -87,7 +89,7 @@ describe("[SPM-182] venue preference and equipment mapping", () => {
     const event = await availabilityFor({ event_venue_preference: unsortedPreferences, event_equipment_requirement: equipmentRows });
 
     expect(event.venuePreferences).toEqual([3, 5, 8]);
-    expect(event.equipmentRequirements).toEqual([{ equipmentId: 4, quantity: 2 }, { equipmentId: 9, quantity: 1 }]);
+    expect(event.equipmentRequirements).toEqual([line(4, 2), line(9, 1)]);
     expect(event.coordinatorName).toBe("Spm182 Coordinator");
   });
 
@@ -95,7 +97,7 @@ describe("[SPM-182] venue preference and equipment mapping", () => {
     const event = await availabilityFor({ event_venue_preference: [12, 4], event_equipment_requirement: [{ equipment_id: 6, quantity: 3 }] });
 
     expect(event.venuePreferences).toEqual([12, 4]);
-    expect(event.equipmentRequirements).toEqual([{ equipmentId: 6, quantity: 3 }]);
+    expect(event.equipmentRequirements).toEqual([line(6, 3)]);
   });
 
   test("availability_events_return_empty_lists_when_relations_are_missing", async () => {
@@ -103,5 +105,22 @@ describe("[SPM-182] venue preference and equipment mapping", () => {
 
     expect(event.venuePreferences).toEqual([]);
     expect(event.equipmentRequirements).toEqual([]);
+  });
+});
+
+describe("[SPM-286] equipment requirement names", () => {
+  test("toApi_names_each_requirement_from_the_embedded_equipment_row", () => {
+    const result = eventModel.toApi({
+      event_id: 1,
+      event_equipment_requirement: [
+        { equipment_id: 42, quantity_requested: 4, equipment: { name: "Wireless Mic", category: "Audio" } },
+        { equipment_id: 9, quantity_requested: 1, equipment: null },
+      ],
+    });
+
+    expect(result.equipmentRequirements).toEqual([
+      { equipmentId: 42, name: "Wireless Mic", category: "Audio", quantity: 4 },
+      line(9, 1),
+    ]);
   });
 });

@@ -62,6 +62,24 @@ describe("findNotifications", () => {
     expect(sent.target).toEqual({ page: "TECHNICAL_REQUESTS", event_id: 8 });
   });
 
+  test("[SPM-286] a Venue Staff booking request notice opens that booking; other notices their booking requests", async () => {
+    supabase.rpc.mockResolvedValue({ data: [row({ notification_id: 41 }), row({ notification_id: 42 })], error: null });
+    const keys = [
+      { notification_id: 41, action_key: "VENUE_BOOKINGS_REQUESTED:8:7895" },
+      { notification_id: 42, action_key: "HOLD_REQUESTED:232" },
+    ];
+    const query = { select: jest.fn().mockReturnThis(), in: jest.fn().mockResolvedValue({ data: keys, error: null }) };
+    supabase.from.mockReturnValue(query);
+
+    const { notifications } = await notificationModel.findNotifications({ user_id: 5, role: "VENUE_STAFF" }, { limit: 20 });
+
+    expect(query.in).toHaveBeenCalledWith("notification_id", [41, 42]);
+    expect(notifications.map((item) => item.target)).toEqual([
+      { page: "VENUE_BOOKING_REQUESTS", event_id: 8, booking_id: 7895 },
+      { page: "VENUE_BOOKING_REQUESTS", event_id: 8 },
+    ]);
+  });
+
   test("[SPM-155-AC8] returns a cursor for the next page that keeps microseconds", async () => {
     supabase.rpc.mockResolvedValue({
       data: [row({ notification_id: 3 }), row({ notification_id: 2 }), row({ notification_id: 1 })],

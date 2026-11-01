@@ -26,7 +26,7 @@ beforeEach(() => {
   jest.spyOn(console, "error").mockImplementation(() => {});
   signedInAs(ORGANISER_ID, "ORGANISER");
   venueModel.getRequestVenueOptions.mockResolvedValue({ venues: [], detailsAvailable: true, availabilityChecked: true, filtersNotChecked: [] });
-  venueModel.getRequestVenueAvailability.mockResolvedValue({ venue: { venueId: 7, busyPeriods: [] } });
+  venueModel.getRequestVenueAvailability.mockResolvedValue({ venueId: 7, availability: { status: "AVAILABLE", label: "Available", conflicts: [], operatingHoursWarning: null } });
   venueModel.listSelectableVenuePhotos.mockResolvedValue({ photos: [] });
 });
 
@@ -83,22 +83,29 @@ describe("GET /api/venues/options (SPM-76)", () => {
 });
 
 describe("GET /api/venues/options/:venueId/availability (SPM-76)", () => {
-  const range = "from=2026-11-30T00:00:00%2B08:00&to=2026-12-07T00:00:00%2B08:00";
+  const range = "start=2026-12-01T13:00:00%2B08:00&end=2026-12-01T15:00:00%2B08:00";
 
-  test("[SPM-76-AC3] should_return_the_venue_calendar_with_the_requested_time_checked", async () => {
-    const response = await get(`/api/venues/options/7/availability?${range}&checkStart=2026-12-01T13:00:00%2B08:00&checkEnd=2026-12-01T15:00:00%2B08:00`);
+  test("[SPM-76-AC3] should_check_the_requested_time_at_the_venue", async () => {
+    const response = await get(`/api/venues/options/7/availability?${range}`);
 
     expect(response.status).toBe(200);
+    expect(response.body.availability.label).toBe("Available");
     const [venueId, query, viewer] = venueModel.getRequestVenueAvailability.mock.calls[0];
     expect(venueId).toBe(7);
-    expect(query.check).toEqual({ start: new Date("2026-12-01T05:00:00Z"), end: new Date("2026-12-01T07:00:00Z") });
+    expect(query).toEqual({ start: new Date("2026-12-01T05:00:00Z"), end: new Date("2026-12-01T07:00:00Z") });
     expect(viewer.user_id).toBe(ORGANISER_ID);
   });
 
-  test("should_refuse_a_second_venue_in_the_query", async () => {
-    const response = await get(`/api/venues/options/7/availability?${range}&venueId=8`);
+  test.each([
+    ["a calendar range", "from=2026-11-30T00:00:00%2B08:00&to=2026-12-07T00:00:00%2B08:00", "from"],
+    ["a second venue", `${range}&venueId=8`, "venueId"],
+    ["a missing end", "start=2026-12-01T13:00:00%2B08:00", "end"],
+    ["an end before the start", "start=2026-12-01T15:00:00%2B08:00&end=2026-12-01T13:00:00%2B08:00", "end"],
+  ])("[SPM-76-TC-VS-001] should_refuse_%s", async (_, query, field) => {
+    const response = await get(`/api/venues/options/7/availability?${query}`);
     expect(response.status).toBe(400);
-    expect(response.body.fields).toHaveProperty("venueId");
+    expect(response.body.fields).toHaveProperty(field);
+    expect(venueModel.getRequestVenueAvailability).not.toHaveBeenCalled();
   });
 
   test("[SPM-76-TC4] should_not_find_a_venue_that_cannot_be_chosen", async () => {
@@ -114,7 +121,7 @@ describe("GET /api/venues/options/:venueId/availability (SPM-76)", () => {
   });
 
   test.each(["COORDINATOR", "COORDINATOR_LEAD", "VENUE_STAFF", "ATTENDEE"])(
-    "[SPM-76-TC7] should_refuse_the_organiser_calendar_to_%s",
+    "[SPM-76-TC7] should_refuse_the_organiser_availability_check_to_%s",
     async (role) => {
       signedInAs(30, role);
       const response = await get(`/api/venues/options/7/availability?${range}`);

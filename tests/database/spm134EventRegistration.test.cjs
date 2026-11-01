@@ -191,6 +191,10 @@ before(async () => {
   // The deadline correction must remain last: preserve fresh post-lock time
   // together with the real waitlist offer reservations and queue priority.
   await db.exec(readBySuffix("_spm134_registration_deadline_clock.sql"));
+  // Then, as on the live database, the post-lock deadlines and the lifecycle
+  // rule that makes PREPARATION attendee-facing like CONFIRMED.
+  await db.exec(readBySuffix("_spm163_147_post_lock_deadlines.sql"));
+  await db.exec(readBySuffix("_attendee_lifecycle_preparation_publication.sql"));
 });
 after(async () => { if (db) await db.close(); });
 beforeEach(async () => {
@@ -403,8 +407,10 @@ test("[SPM-134] should_refuse_each_state_discovery_shows_with_its_own_code_and_r
   assert.equal((await register(ATTENDEE, open)).registration.registration_status, "REGISTERED");
 });
 
-test("[SPM-134] should_show_closed_for_every_state_but_confirmed_whatever_the_window_and_capacity", async () => {
-  for (const status of ["PREPARATION", "PLANNING", "SAFETY_REVIEW", "COMPLETED", "CANCELLED"]) {
+// Requirement change (attendee lifecycle rule, 31 October 2026): PREPARATION is
+// attendee-facing like CONFIRMED, so it left this list; its states are below.
+test("[SPM-134] should_show_closed_for_every_state_but_confirmed_and_preparation_whatever_the_window_and_capacity", async () => {
+  for (const status of ["PLANNING", "SAFETY_REVIEW", "COMPLETED", "CANCELLED"]) {
     assert.equal(await availabilityOf(await createEvent({ status })), "CLOSED");
   }
 });
@@ -424,22 +430,50 @@ test("[SPM-134] should_register_when_the_event_is_confirmed_open_before_the_dead
   assert.equal((await register(ATTENDEE, eventId)).registration.registration_status, "REGISTERED");
 });
 
-test("[SPM-134] should_refuse_with_event_not_found_and_write_nothing_when_the_event_is_in_preparation", async () => {
-  for (const previouslyConfirmed of [false, true]) {
-    const eventId = await createEvent({ status: "PREPARATION", previously_confirmed: previouslyConfirmed });
-    await refusesWithoutWriting(() => register(ATTENDEE, eventId), eventId, "EVENT_NOT_FOUND");
+// Requirement change (attendee lifecycle rule, 31 October 2026): this replaces
+// "refuse with EVENT_NOT_FOUND when the event is in preparation". PREPARATION
+// follows CONFIRMED: each availability state, its refusal code, and a
+// registration when OPEN, the same for both statuses.
+test("[ATTENDEE-LIFECYCLE] should_give_preparation_the_same_availability_states_and_outcomes_as_confirmed", async () => {
+  const cases = [
+    [{ open: "1 day" }, "NOT_YET_OPEN", "REGISTRATION_NOT_YET_OPEN"],
+    [{ close: "-1 second" }, "CLOSED", "REGISTRATION_CLOSED"],
+    [{ venue_capacity: 1, full: true }, "FULL_WAITLIST", "REGISTRATION_FULL"],
+    [{ venue_capacity: null }, "UNAVAILABLE", "REGISTRATION_UNAVAILABLE"],
+    [{ open: null }, "UNAVAILABLE", "REGISTRATION_UNAVAILABLE"],
+  ];
+  for (const status of ["CONFIRMED", "PREPARATION"]) {
+    for (const [{ full, ...overrides }, availability, code] of cases) {
+      const eventId = await createEvent({ status, previously_confirmed: true, ...overrides });
+      if (full) await seed(OTHER_ATTENDEE, eventId, "REGISTERED");
+      assert.equal(await availabilityOf(eventId), availability, `${status} ${availability}`);
+      await refusesWithoutWriting(() => register(ATTENDEE, eventId), eventId, code);
+    }
+    const open = await createEvent({ status, previously_confirmed: true });
+    assert.equal(await availabilityOf(open), "OPEN", `${status} OPEN`);
+    assert.equal((await register(ATTENDEE, open)).registration.registration_status, "REGISTERED");
   }
 });
 
-// Every lifecycle state except CONFIRMED, read from the enum so a new state is
-// covered too, both for never-confirmed events and for confirmed events that
-// went back to an earlier state. The open window and free places show the
-// refusal comes from the state alone.
-test("[SPM-134] should_refuse_with_event_not_found_and_write_nothing_when_the_event_is_in_any_state_other_than_confirmed", async () => {
+// An unpublished PREPARATION event stays hidden, as an unpublished CONFIRMED one does.
+test("[ATTENDEE-LIFECYCLE] should_refuse_with_event_not_found_when_a_preparation_event_is_unpublished_or_ended", async () => {
+  const unpublished = await createEvent({ status: "PREPARATION", previously_confirmed: true, is_published: false });
+  await refusesWithoutWriting(() => register(ATTENDEE, unpublished), unpublished, "EVENT_NOT_FOUND");
+  // Starts three hours ago, so its two hours ended an hour ago.
+  const ended = await createEvent({ status: "PREPARATION", previously_confirmed: true, start: "-3 hours", open: "-5 days", close: "-4 hours" });
+  await refusesWithoutWriting(() => register(ATTENDEE, ended), ended, "EVENT_NOT_FOUND");
+});
+
+// Every lifecycle state except CONFIRMED and PREPARATION, read from the enum so
+// a new state is covered too, both for never-confirmed events and for confirmed
+// events that went back to an earlier state. The open window and free places
+// show the refusal comes from the state alone. PREPARATION left this list as a
+// deliberate requirement change (attendee lifecycle rule, 31 October 2026).
+test("[SPM-134] should_refuse_with_event_not_found_and_write_nothing_when_the_event_is_in_any_state_other_than_confirmed_or_preparation", async () => {
   const states = (await db.query(
-    "SELECT enumlabel FROM pg_enum WHERE enumtypid = 'public.event_status'::regtype AND enumlabel <> 'CONFIRMED' ORDER BY enumsortorder"
+    "SELECT enumlabel FROM pg_enum WHERE enumtypid = 'public.event_status'::regtype AND enumlabel NOT IN ('CONFIRMED', 'PREPARATION') ORDER BY enumsortorder"
   )).rows.map((row) => row.enumlabel);
-  for (const expected of ["PREPARATION", "PLANNING", "SAFETY_REVIEW", "DRAFT", "SUBMITTED", "UNDER_REVIEW",
+  for (const expected of ["PLANNING", "SAFETY_REVIEW", "DRAFT", "SUBMITTED", "UNDER_REVIEW",
     "AWAITING_CLARIFICATION", "COMPLETED", "REJECTED", "CANCELLED"]) {
     assert.ok(states.includes(expected), `${expected} must be an event state`);
   }

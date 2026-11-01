@@ -37,7 +37,7 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end,venue(name)),event_equipment_requirement(equipment_id,quantity_requested),venue_suggestions:event_suggested_venue(venue_id,suggested_at,withdrawn_at,venue(name,address,max_capacity),suggester:user(name))";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end,venue(name)),event_equipment_requirement(equipment_id,quantity_requested,equipment(name,category)),venue_suggestions:event_suggested_venue(venue_id,suggested_at,withdrawn_at,venue(name,address,max_capacity),suggester:user(name))";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
@@ -77,11 +77,11 @@ const CLOSED_EVENT_STATUS_FILTER = `(${CLOSED_EVENT_STATUSES.map((status) => `"$
 const LIST_SELECT =
   "event_id,title,status,previously_confirmed,start_datetime,end_datetime,expected_attendance,organiser_id,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name)";
 const UNASSIGNED_QUEUE_SELECT =
-  "event_id,title,purpose,status,start_datetime,end_datetime,expected_attendance,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "event_id,title,purpose,status,start_datetime,end_datetime,expected_attendance,coordinator_id,submitted_at,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested,equipment(name,category))";
 
 // Calendar events include richer details for coordinators' schedule view.
 const CALENDAR_SELECT =
-  "event_id,title,status,start_datetime,end_datetime,expected_attendance,purpose,description,accessibility_needs,preferred_layout_type,is_registration_enabled,registration_capacity,coordinator_id,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested)";
+  "event_id,title,status,start_datetime,end_datetime,expected_attendance,purpose,description,accessibility_needs,preferred_layout_type,is_registration_enabled,registration_capacity,coordinator_id,created_at,updated_at,organisation(organisation_id,name),event_venue_preference(venue_id,preference_order),event_equipment_requirement(equipment_id,quantity_requested,equipment(name,category))";
 
 const MAX_LOOKUP_IDS = 50;
 
@@ -187,10 +187,14 @@ const toVenuePreferenceIds = (preferences) =>
         .map((item) => (typeof item === "number" ? item : item.venue_id))
     : [];
 
+// SPM-286: name and category come from the embedded equipment row, as on the
+// technical request lines; RPC write results carry IDs only, so they are null there.
 const toEquipmentRequirements = (requirements) =>
   Array.isArray(requirements)
     ? requirements.map((item) => ({
         equipmentId: item.equipment_id,
+        name: item.equipment?.name ?? null,
+        category: item.equipment?.category ?? null,
         quantity: item.quantity_requested ?? item.quantity,
       }))
     : [];
@@ -231,17 +235,8 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
     preferredLayoutType: row.preferred_layout_type,
     accessibilityNeeds: parseAccessibility(row.accessibility_needs),
     venuePreferences: toVenuePreferenceIds(venuePreferences),
-    equipmentRequirements: toEquipmentRequirements(equipmentRequirements),
-    venuePreferences: Array.isArray(venuePreferences)
-      ? sortPreferences(venuePreferences).map((item) => (typeof item === "number" ? item : item.venue_id))
-      : [],
     venuePreferenceTimes: toVenuePreferenceTimes(venuePreferences),
-    equipmentRequirements: Array.isArray(equipmentRequirements)
-      ? equipmentRequirements.map((item) => ({
-          equipmentId: item.equipment_id,
-          quantity: item.quantity_requested ?? item.quantity,
-        }))
-      : [],
+    equipmentRequirements: toEquipmentRequirements(equipmentRequirements),
     isRegistrationEnabled: row.is_registration_enabled,
     registrationCapacity: row.registration_capacity,
     createdAt: row.created_at,
@@ -358,9 +353,10 @@ const LIST_ATTENDEE_DISCOVERY_SELECT =
   "event_id,title,description,start_datetime,end_datetime,registration_open_at,registration_close_at,status,event_registration_availability,organisation(organisation_id,name),venue_booking(status,room(venue(venue_id,name,address)))";
 const REGISTERED_SEATS_FILTER = ["registration.registration_status", "REGISTERED"];
 
-// Attendees discover only confirmed events (SPM-44, Master 5.3). PREPARATION is
-// deliberately absent; registration availability below is a separate rule.
-const ATTENDEE_DISCOVERY_STATUS = EVENT_STATUS.CONFIRMED;
+// Attendees discover published CONFIRMED and PREPARATION events (Master 5.3;
+// supersedes SPM-44's CONFIRMED only). Registration availability is a separate
+// rule and never hides an event.
+const ATTENDEE_DISCOVERY_STATUSES = [EVENT_STATUS.CONFIRMED, EVENT_STATUS.PREPARATION];
 
 // The legacy schema has no primary-venue flag. Publish only an unambiguous
 // approved venue; never choose an arbitrary booking or reveal pending ones.
@@ -1132,7 +1128,7 @@ const attendeeDiscoveryQuery = () =>
     .from("event")
     .select(LIST_ATTENDEE_DISCOVERY_SELECT)
     .eq("is_published", true)
-    .eq("status", ATTENDEE_DISCOVERY_STATUS)
+    .in("status", ATTENDEE_DISCOVERY_STATUSES)
     .gt("end_datetime", new Date().toISOString());
 
 // Soonest start first; event_id breaks ties between equal start times.

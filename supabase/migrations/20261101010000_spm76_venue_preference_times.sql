@@ -1,10 +1,50 @@
--- SPM-76 follow-up: put back the two removals that were left commented out
--- when 20261031140000_spm76_venue_preference_times.sql was applied. Without
--- them a venue or equipment line the organiser takes off the list stays saved.
--- Each DELETE touches only the one event being saved, and only the venues or
--- equipment missing from the list the organiser just sent, inside that save's
--- transaction. Applying this file changes no row; it replaces one function.
--- Checked before writing: no event had a left-over choice.
+-- SPM-76: each venue the organiser chooses may carry the time they want it
+-- for. A choice is still a preference: it never holds or books the venue. NULL
+-- times mean the whole event, so a choice the organiser never narrowed follows
+-- the event when its dates change. (Per-venue times are not yet recorded in the
+-- Master; see the SPM-76 review of 1 November 2026.)
+--
+-- This one migration replaces 20261031140000_spm76_venue_preference_times and
+-- 20261031150000_spm76_restore_choice_removal. Version 20261031140000 was
+-- already taken in the shared migration history by
+-- attendee_lifecycle_preparation_publication, and neither SPM-76 file has a
+-- history row. The development database already holds everything below
+-- (columns, check constraint and both function bodies, verified 1 November
+-- 2026), so every statement is safe to run again: the columns and constraint
+-- are added only when missing and the functions are replaced with the same
+-- bodies. Applying this file changes no row.
+--
+-- _replace_event_requirements accepts a bare venue ID (the whole event) or
+-- {"venue_id", "requested_start", "requested_end"}. It updates the event's
+-- venue choices and equipment lines in place and removes only the venues or
+-- equipment the organiser took off the list. Duplicates are refused as before.
+-- Every caller updates the event row first, so each stored time is checked
+-- against the event's saved start and end, including when only the dates
+-- changed. A time equal to the whole event is stored as NULL.
+--
+-- _event_response keeps a whole-event choice as a bare venue ID and returns a
+-- narrowed one as an object, so edit history compares the same values as
+-- before and still records a change of time.
+
+ALTER TABLE public.event_venue_preference
+  ADD COLUMN IF NOT EXISTS requested_start timestamptz,
+  ADD COLUMN IF NOT EXISTS requested_end timestamptz;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'event_venue_preference_requested_window_check'
+       AND conrelid = 'public.event_venue_preference'::regclass
+  ) THEN
+    ALTER TABLE public.event_venue_preference
+      ADD CONSTRAINT event_venue_preference_requested_window_check CHECK (
+        (requested_start IS NULL AND requested_end IS NULL)
+        OR (requested_start IS NOT NULL AND requested_end IS NOT NULL AND requested_start < requested_end)
+      );
+  END IF;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION public._replace_event_requirements(
   p_event_id integer,
@@ -154,4 +194,34 @@ BEGIN
        AND NOT (equipment_id = ANY (v_equipment_ids));
   END IF;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION public._event_response(p_event public.event)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  SELECT jsonb_build_object(
+    'event', to_jsonb(p_event),
+    'venue_preferences', COALESCE((
+      SELECT jsonb_agg(
+        CASE WHEN requested_start IS NULL THEN to_jsonb(venue_id)
+             ELSE jsonb_build_object('venue_id', venue_id, 'requested_start', requested_start, 'requested_end', requested_end)
+        END
+        ORDER BY preference_order
+      )
+        FROM public.event_venue_preference
+       WHERE event_id = p_event.event_id
+    ), '[]'::jsonb),
+    'equipment_requirements', COALESCE((
+      SELECT jsonb_agg(
+        jsonb_build_object('equipment_id', equipment_id, 'quantity', quantity_requested)
+        ORDER BY equipment_id
+      )
+        FROM public.event_equipment_requirement
+       WHERE event_id = p_event.event_id
+    ), '[]'::jsonb)
+  );
 $$;

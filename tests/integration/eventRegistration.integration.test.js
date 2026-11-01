@@ -298,10 +298,20 @@ describe("[SPM-134] successful registration", () => {
     expect((await registrationsFor(eventId))[0]).toMatchObject({ dietary_restrictions: "素食 🌾, café — no peanuts", accessibility_requirements: "Ramp ♿" });
   });
 
-  // Only CONFIRMED events take registrations, as only they are discoverable
-  // (SPM-44); a confirmed event moved back to planning is hidden too.
+  // Only CONFIRMED and PREPARATION events take registrations, as only they are
+  // discoverable; a confirmed event moved back to planning is hidden too.
+  // Requirement change (attendee lifecycle rule, 31 October 2026): PREPARATION
+  // left this list and registers like CONFIRMED (test below).
+  test("[ATTENDEE-LIFECYCLE] should_register_when_the_event_is_in_preparation_inside_its_window_with_places_left", async () => {
+    const eventId = await insertEvent({ status: "PREPARATION", previously_confirmed: true });
+    const res = await registerAs("racer", eventId);
+    recordRegistrations([res]);
+    expect(res.status).toBe(201);
+    expect(res.body.registration.status).toBe("REGISTERED");
+    expect(res.body.registration.event.eventId).toBe(eventId);
+  });
+
   test.each([
-    ["PREPARATION", false],
     ["PLANNING", false],
     ["PLANNING", true],
     ["SAFETY_REVIEW", true],
