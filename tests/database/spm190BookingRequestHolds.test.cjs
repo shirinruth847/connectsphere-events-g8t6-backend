@@ -45,6 +45,7 @@ async function setup() {
   `);
   await db.exec(read("20261101140000_spm190_booking_request_hold_columns.sql"));
   await db.exec(read("20261101140100_spm190_booking_request_holds.sql"));
+  await db.exec(read("20261101140200_spm190_approval_expiry_guard.sql"));
   await db.exec(`INSERT INTO public.venue (venue_id,name,address,max_capacity,is_active) VALUES
     (1,'SPM-190 Hall','1 Synthetic Road',300,true),(2,'SPM-190 Annex','1 Synthetic Road',80,true)`);
   await db.exec(`INSERT INTO public."user" (user_id,email,name,role,is_active) VALUES
