@@ -29,6 +29,42 @@ const validRequest = () => ({
 const submit = (input) => validateSubmission(input, { now: NOW, allowedLayouts: LAYOUTS });
 const draft = (input) => validateDraft(input, { allowedLayouts: LAYOUTS });
 
+describe("organiser registration dates", () => {
+  test("accepts the reported November window before a November 4–5 event", () => {
+    expect(validateSubmission({ ...validRequest(),
+      startDatetime: "2026-11-04T09:00:00+08:00",
+      endDatetime: "2026-11-05T17:00:00+08:00",
+      registrationOpenAt: "2026-11-01T20:04:00+08:00",
+      registrationCloseAt: "2026-11-02T22:04:00+08:00",
+    }, { now: new Date("2026-11-01T20:00:00+08:00") })).toEqual({});
+  });
+
+  test.each(["registrationOpenAt", "registrationCloseAt"])("requires %s only for enabled submissions", (field) => {
+    const input = { ...validRequest(), [field]: null };
+    expect(submit(input)[field]).toBe(field === "registrationOpenAt" ? MESSAGES.registrationOpenRequired : MESSAGES.registrationCloseRequired);
+    expect(draft(input)).toEqual({});
+    expect(submit({ ...input, isRegistrationEnabled: false })).toEqual({});
+  });
+
+  test.each(["registrationOpenAt", "registrationCloseAt"])("checks %s using explicit time zones and real calendar dates", (field) => {
+    for (const value of ["2026-11-01T20:04", "2026-02-30T20:04:00+08:00", "invalid", 42, true, {}]) {
+      expect(draft({ title: "Draft", [field]: value })[field]).toBe(MESSAGES.invalidDate);
+    }
+  });
+
+  test.each([0, -1])("rejects close at or before open (%s hours)", (offset) => {
+    const input = { ...validRequest(), registrationCloseAt: inHours(offset) };
+    expect(submit(input).registrationCloseAt).toBe(MESSAGES.registrationCloseBeforeOpen);
+    expect(draft(input).registrationCloseAt).toBe(MESSAGES.registrationCloseBeforeOpen);
+  });
+
+  test("allows closing exactly at event start and compares different offsets as instants", () => {
+    expect(submit({ ...validRequest(), registrationCloseAt: "2026-10-08T01:00:00Z" })).toEqual({});
+    expect(submit({ ...validRequest(), registrationCloseAt: inHours(7 * 24 + 1) }).registrationCloseAt)
+      .toBe(MESSAGES.registrationCloseAfterEventStart);
+  });
+});
+
 describe("validateSubmission (SPM-35 Event Request Creation)", () => {
   test("[SPM-35-TC-001] should_accept_the_request_when_every_field_is_valid", () => {
     expect(submit(validRequest())).toEqual({});
@@ -238,9 +274,8 @@ describe("the registration window (SPM-35)", () => {
   });
 
   test("ends after it starts and no later than the event", () => {
-    expect(submit({ ...validRequest(), registrationCloseAt: inHours(12) }).registrationCloseAt).toBe("Registration must end after it starts.");
-    expect(submit({ ...validRequest(), registrationCloseAt: inHours(7 * 24 + 1) }).registrationCloseAt).toBe("Registration must end no later than the event starts.");
+    expect(submit({ ...validRequest(), registrationCloseAt: inHours(12) }).registrationCloseAt).toBe("Registration must close after it opens.");
+    expect(submit({ ...validRequest(), registrationCloseAt: inHours(7 * 24 + 1) }).registrationCloseAt).toBe("Registration must close no later than the event start.");
     expect(draft({ title: "Gala", registrationOpenAt: "tomorrow" }).registrationOpenAt).toBe("Please enter a valid date and time.");
   });
 });
-

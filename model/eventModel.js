@@ -472,6 +472,10 @@ const SUBMISSION_FAILURES = Object.freeze({
   "preferredLayoutType:INVALID": MESSAGES.layoutInvalid,
   "registrationCapacity:REQUIRED": MESSAGES.registrationCapacityRequired,
   "registrationCapacity:INVALID": MESSAGES.registrationCapacityInvalid,
+  "registrationOpenAt:REQUIRED": MESSAGES.registrationOpenRequired,
+  "registrationCloseAt:REQUIRED": MESSAGES.registrationCloseRequired,
+  "registrationCloseAt:END_BEFORE_START": MESSAGES.registrationCloseBeforeOpen,
+  "registrationCloseAt:AFTER_EVENT_START": MESSAGES.registrationCloseAfterEventStart,
 });
 
 // update_event_details reports the same "<field>:<reason>" pairs.
@@ -513,6 +517,7 @@ const CLARIFICATION_FAILURES = Object.freeze({
 
 // Constraints are the final check (e.g. a stale draft merge); report them against the field.
 const CONSTRAINT_FIELD_ERRORS = Object.freeze({
+  event_registration_window_check: { registrationCloseAt: MESSAGES.registrationCloseBeforeOpen },
   event_expected_attendance_positive_check: { expectedAttendance: MESSAGES.attendanceInvalid },
   event_registration_capacity_positive_check: { registrationCapacity: MESSAGES.registrationCapacityInvalid },
   event_registration_enabled_capacity_check: { registrationCapacity: MESSAGES.registrationCapacityRequired },

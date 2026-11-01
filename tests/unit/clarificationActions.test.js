@@ -388,6 +388,34 @@ describe("POST /api/events/:id/amendments (SPM-41 v2 AC3)", () => {
     eventModel.saveClarificationAmendments.mockResolvedValue({ replayed: false });
   });
 
+  test.each([
+    [undefined, undefined],
+    [null, null],
+    [inDays(1), null],
+    [null, inDays(10)],
+  ])("allows legacy registration dates %p / %p when amending ordinary details", async (open, close) => {
+    eventModel.findVisibleEvent.mockResolvedValue(awaiting({
+      is_registration_enabled: true, registration_capacity: 120,
+      registration_open_at: open, registration_close_at: close,
+    }));
+    const res = await post("/api/events/42/amendments", { changes: { title: "Updated alumni gala" }, version: 4 });
+    expect(res.status).toBe(200);
+    expect(eventModel.saveClarificationAmendments).toHaveBeenCalledWith(expect.objectContaining({
+      input: { title: "Updated alumni gala" },
+    }));
+  });
+
+  test("still rejects moving the event before its existing registration close", async () => {
+    eventModel.findVisibleEvent.mockResolvedValue(awaiting({
+      is_registration_enabled: true, registration_capacity: 120,
+      registration_open_at: inDays(1), registration_close_at: inDays(10),
+    }));
+    const res = await post("/api/events/42/amendments", { changes: { startDatetime: inDays(5) }, version: 4 });
+    expect(res.status).toBe(400);
+    expect(res.body.fields.registrationCloseAt).toBe("Registration must close no later than the event start.");
+    expect(eventModel.saveClarificationAmendments).not.toHaveBeenCalled();
+  });
+
   test("[SPM-41-TC-04] should_save_amendments_and_keep_the_event_returned", async () => {
     eventModel.findVisibleEvent.mockResolvedValueOnce(awaiting()).mockResolvedValueOnce(awaiting({ version: 5, expected_attendance: 150 }));
 
