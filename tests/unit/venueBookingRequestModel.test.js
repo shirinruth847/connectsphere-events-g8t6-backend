@@ -301,4 +301,9 @@ describe("listEventVenueBookings (SPM-179)", () => {
     ]);
     expect(bookings.every((booking) => booking.isPrimary === false)).toBe(true);
   });
+
+  test("[SPM-190] should_expose_an_overdue_pending_request_as_expired_before_the_worker_runs", async () => {
+    const bookings = await listWith([{ booking_id: 1, status: "PENDING", hold_expires_at: "2000-01-01T00:00:00+00:00" }]);
+    expect(bookings[0]).toMatchObject({ status: "EXPIRED", statusLabel: "Expired", decideBy: null, isPrimary: false });
+  });
 });

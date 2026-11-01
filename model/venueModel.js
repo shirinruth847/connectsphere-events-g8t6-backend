@@ -2174,13 +2174,20 @@ const parseOccupiedRange = (text) => {
     : { occupiedStart: null, occupiedEnd: null };
 };
 
-const toEventVenueBooking = (row) => ({
+const effectiveEventBookingStatus = (row, now = Date.now()) =>
+  row.status === "PENDING" && row.hold_expires_at && new Date(row.hold_expires_at).getTime() <= now
+    ? "EXPIRED"
+    : row.status;
+
+const toEventVenueBooking = (row, now) => {
+  const status = effectiveEventBookingStatus(row, now);
+  return {
   bookingId: row.booking_id,
   venueId: row.venue_id,
   venueName: row.venue?.name ?? null,
   label: row.label,
-  status: row.status,
-  statusLabel: VENUE_BOOKING_STATUS_LABELS[row.status] || row.status,
+  status,
+  statusLabel: VENUE_BOOKING_STATUS_LABELS[status] || status,
   isPrimary: row.is_primary,
   start: row.start_datetime,
   end: row.end_datetime,
@@ -2193,8 +2200,9 @@ const toEventVenueBooking = (row) => ({
   rejectionReason: row.rejection_reason,
   requestedAt: row.created_at,
   // A pending request holds the venue until then (SPM-190).
-  decideBy: row.status === "PENDING" ? row.hold_expires_at ?? null : null,
-});
+  decideBy: status === "PENDING" ? row.hold_expires_at ?? null : null,
+  };
+};
 
 // Every booking of one event, for its assigned coordinator and supervising Lead
 // (requireVisibleEvent has already checked the relationship).
@@ -2206,7 +2214,8 @@ const listEventVenueBookings = async (eventId) => {
     .order("start_datetime", { ascending: true })
     .order("booking_id", { ascending: true });
   if (error) throw error;
-  const bookings = (data || []).map(toEventVenueBooking);
+  const now = Date.now();
+  const bookings = (data || []).map((row) => toEventVenueBooking(row, now));
   // The primary venue as _event_primary_venue reads it: a booking written
   // outside the request flow carries no flag, but as the event's only active
   // booking it is the primary venue (Master 5.4.2). Showing the stored flag
