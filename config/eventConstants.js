@@ -152,7 +152,9 @@ const OWNER_DRAFT_FIELDS = Object.freeze([
 // coordinator, and there is no APPROVED state.
 // Where the assigned coordinator may suggest a venue to the organiser (SPM-72/74);
 // suggest_event_venue checks the same list.
-const VENUE_SUGGESTION_STATUSES = Object.freeze(["UNDER_REVIEW", "PLANNING"]);
+// The organiser can still amend their venue choices (SPM-41); in planning the
+// coordinator books venues directly (SPM-179).
+const VENUE_SUGGESTION_STATUSES = Object.freeze(["UNDER_REVIEW", "AWAITING_CLARIFICATION"]);
 
 const COORDINATOR_EDITABLE_STATUSES = Object.freeze([
   "UNDER_REVIEW",

@@ -972,7 +972,7 @@ const findVenueNames = async (venueIds) => {
 const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities, sort, order }) => {
   const catalogue = await getVenueCatalogue(filters);
   const choices = preferredVenues(event);
-  const preferredIds = choices.map((choice) => choice.venueId);
+  const preferredIds = [...new Set([...choices.map((choice) => choice.venueId), ...suggestedVenues(event)])];
   const listedIds = new Set(catalogue.venues.map((venue) => venue.venueId));
   const unlistedIds = preferredIds.filter((venueId) => !listedIds.has(venueId));
   const extra = unlistedIds.length ? (await getVenueCatalogue({ venueIds: unlistedIds })).venues : [];
@@ -1010,9 +1010,58 @@ const getEventVenueOptions = async (event, viewer, { filters, requiredFacilities
       // Over the organiser's requested time; null when the choice covers the whole event.
       requestedAvailability: requestedAvailability.get(venueId) ?? null,
     })),
+    suggestedVenues: toSuggestedVenues(event, byId, names),
     detailsAvailable: catalogue.detailsAvailable,
     availabilityChecked,
     filtersNotChecked: catalogue.filtersNotChecked,
+  };
+};
+
+// The venues the coordinator put on the organiser's list, in the order added.
+const suggestedVenues = (event) =>
+  (Array.isArray(event.venue_suggestions) ? event.venue_suggestions : [])
+    .filter((row) => !row.withdrawn_at)
+    .sort((left, right) => String(left.suggested_at).localeCompare(String(right.suggested_at)) || left.venue_id - right.venue_id)
+    .map((row) => row.venue_id);
+
+// The coordinator's list as cards: option null when the venue is no longer available.
+const toSuggestedVenues = (event, byId, names) => {
+  const chosen = new Set(preferredVenues(event).map((choice) => choice.venueId));
+  return suggestedVenues(event).map((venueId) => ({
+    venueId,
+    name: byId.get(venueId)?.name ?? names.get(venueId) ?? null,
+    option: byId.get(venueId) ?? null,
+    fromOrganiserChoices: chosen.has(venueId),
+  }));
+};
+
+// GET /api/events/:id/venue-choices: the organiser's own choices and the
+// coordinator's selected and suggested venues as cards, checked against the
+// saved request. Busy periods show only their kind (SPM-76 AC3).
+const getEventVenueChoices = async (event, viewer) => {
+  const choices = preferredVenues(event);
+  const ids = [...new Set([...choices.map((choice) => choice.venueId), ...suggestedVenues(event)])];
+  const catalogue = ids.length ? await getVenueCatalogue({ venueIds: ids }) : { venues: [], detailsAvailable: true };
+  const { options, availabilityChecked } = await buildVenueOptions(catalogue.venues, event, viewer, { requiredFacilities: [], excludeEventId: event.event_id });
+  const byId = new Map(options.map((option) => [option.venueId, { ...option, availability: toOrganiserAvailability(option.availability) }]));
+  const names = await findVenueNames(ids.filter((venueId) => !byId.has(venueId)));
+  const requestedAvailability = await findRequestedTimeAvailability(choices.filter((choice) => byId.has(choice.venueId)), viewer, event.event_id);
+  return {
+    preferredVenues: choices.map(({ venueId, requestedStart, requestedEnd }, index) => {
+      const availability = requestedAvailability.get(venueId);
+      return {
+        rank: index + 1,
+        venueId,
+        name: byId.get(venueId)?.name ?? names.get(venueId) ?? null,
+        option: byId.get(venueId) ?? null,
+        requestedStart,
+        requestedEnd,
+        requestedAvailability: availability ? toOrganiserAvailability(availability) : null,
+      };
+    }),
+    suggestedVenues: toSuggestedVenues(event, byId, names),
+    detailsAvailable: catalogue.detailsAvailable,
+    availabilityChecked,
   };
 };
 
@@ -1091,26 +1140,34 @@ const SUGGESTION_ERRORS = new Set([
   "VENUE_NOT_SELECTABLE",
   "VENUE_CAPACITY_TOO_SMALL",
   "VENUE_SUGGESTION_VERSION_CONFLICT",
+  "CLARIFICATION_NOT_OPEN",
   "IDEMPOTENCY_KEY_REUSED",
+  "IDEMPOTENCY_IN_PROGRESS",
 ]);
 
-// One transaction in suggest_event_venue: suggestion, activity_log entry and the
-// organiser's notification commit together or not at all.
-const suggestEventVenue = async ({ actorId, eventId, venueId, expectedVersion, idempotencyKey }) => {
-  const { data, error } = await supabase.rpc("suggest_event_venue", {
+// One transaction in suggest_event_venues: the list, its activity_log entry and
+// the clarification or notification commit together or not at all. Venues
+// outside the organiser's choices open a clarification (or add a message to the
+// open one), so the organiser can amend their choices.
+const suggestEventVenues = async ({ actorId, eventId, venueIds, expectedVenueIds, note, idempotencyKey }) => {
+  const { data, error } = await supabase.rpc("suggest_event_venues", {
     p_actor_id: actorId,
     p_event_id: eventId,
-    p_venue_id: venueId,
-    p_expected_version: expectedVersion,
+    p_venue_ids: venueIds,
+    p_expected_venue_ids: expectedVenueIds,
+    p_note: note,
     p_idempotency_key: idempotencyKey,
-    p_request_hash: hashRequest({ venueId }, {}, [eventId, expectedVersion]),
+    p_request_hash: hashRequest({ venueIds, note }, {}, [eventId, ...[...expectedVenueIds].sort((a, b) => a - b)]),
   });
   if (error) {
     if (SUGGESTION_ERRORS.has(error.message)) throw venueError(error.message);
     throw error;
   }
-  if (!data || !data.suggestion) throw new Error("suggest_event_venue returned no suggestion.");
-  return data.suggestion;
+  if (!data || !Array.isArray(data.suggestions)) throw new Error("suggest_event_venues returned no suggestions.");
+  return {
+    suggestions: data.suggestions,
+    clarificationRound: data.clarification?.round_number ?? null,
+  };
 };
 
 // Photos of a venue organisers, coordinators and Leads can choose: only
@@ -3277,7 +3334,8 @@ module.exports = {
   getEventVenueOptions,
   getRequestVenueOptions,
   getRequestVenueAvailability,
-  suggestEventVenue,
+  suggestEventVenues,
+  getEventVenueChoices,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,
   venueRequirements,

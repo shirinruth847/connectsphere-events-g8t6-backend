@@ -37,7 +37,7 @@ const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
 const REQUIREMENT_FIELDS = ["venuePreferences", "equipmentRequirements"];
 const INPUT_FIELDS = new Set([...Object.keys(FIELD_MAP), ...REQUIREMENT_FIELDS]);
 const EVENT_SELECT =
-  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end,venue(name)),event_equipment_requirement(equipment_id,quantity_requested),venue_suggestion:event_venue_suggestion(venue_id,suggested_at,version,venue(name,address,max_capacity),suggester:user(name))";
+  "*,organisation(organisation_id,name),coordinator:user!event_coordinator_id_fkey(name),event_venue_preference(venue_id,preference_order,requested_start,requested_end,venue(name)),event_equipment_requirement(equipment_id,quantity_requested),venue_suggestions:event_suggested_venue(venue_id,suggested_at,withdrawn_at,venue(name,address,max_capacity),suggester:user(name))";
 // List rows leave out purpose, requirements and other people's IDs (TC-AUTH-015).
 // The assigned coordinator's view also names the organiser they are working with.
 const COORDINATION_SELECT = `${EVENT_SELECT},organiser:user!event_organiser_id_fkey(user_id,name)`;
@@ -261,18 +261,22 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
 // enforced again on every save.
 // The coordinator's venue suggestion (SPM-72/74). Organiser-safe: it names a
 // venue the organiser could see in their own request form.
-const toVenueSuggestion = (suggestion) => {
-  const row = Array.isArray(suggestion) ? suggestion[0] : suggestion;
-  if (!row) return null;
-  return {
-    venueId: row.venue_id,
-    name: row.venue?.name ?? null,
-    address: row.venue?.address ?? null,
-    maxCapacity: row.venue?.max_capacity ?? null,
-    suggestedAt: row.suggested_at,
-    suggestedBy: row.suggester?.name ?? null,
-    version: row.version,
-  };
+// The coordinator's current venue list for the organiser: a venue from the
+// organiser's own choices is "selected", any other is "suggested".
+const toVenueSuggestions = (rows, preferences) => {
+  const chosen = new Set((Array.isArray(preferences) ? preferences : []).map((item) => item.venue_id));
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => !row.withdrawn_at)
+    .sort((left, right) => String(left.suggested_at).localeCompare(String(right.suggested_at)) || left.venue_id - right.venue_id)
+    .map((row) => ({
+      venueId: row.venue_id,
+      name: row.venue?.name ?? null,
+      address: row.venue?.address ?? null,
+      maxCapacity: row.venue?.max_capacity ?? null,
+      suggestedAt: row.suggested_at,
+      suggestedBy: row.suggester?.name ?? null,
+      fromOrganiserChoices: chosen.has(row.venue_id),
+    }));
 };
 
 // Staff see the stored status; organisers see only the label (SPM-173 AC6).
@@ -304,7 +308,7 @@ const toEventView = (row, user, access) => ({
         safetyReviewId: findOfficerReviewId(row.safety_reviews, user.user_id),
       }
     : {}),
-  ...(row.venue_suggestion === undefined ? {} : { venueSuggestion: toVenueSuggestion(row.venue_suggestion) }),
+  ...(row.venue_suggestions === undefined ? {} : { venueSuggestions: toVenueSuggestions(row.venue_suggestions, row.event_venue_preference) }),
   viewerRelationship: access.relationship,
   permissions: {
     canEdit: access.canEdit,

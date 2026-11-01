@@ -88,3 +88,61 @@ describe("getRequestVenueAvailability (SPM-76)", () => {
     await expect(venueModel.getRequestVenueAvailability(45, range, ORGANISER)).rejects.toMatchObject({ code: "AVAILABILITY_UNAVAILABLE" });
   });
 });
+
+describe("getEventVenueChoices (organiser venue cards, 1 November 2026)", () => {
+  const event = {
+    event_id: 42,
+    start_datetime: at("11:00").toISOString(),
+    end_datetime: at("13:00").toISOString(),
+    expected_attendance: 100,
+    preferred_layout_type: null,
+    accessibility_needs: null,
+    event_venue_preference: [
+      { venue_id: 46, preference_order: 2, requested_start: null, requested_end: null },
+      { venue_id: 45, preference_order: 1, requested_start: at("11:00").toISOString(), requested_end: at("12:00").toISOString() },
+    ],
+    venue_suggestions: [
+      { venue_id: 47, suggested_at: "2026-11-01T02:00:00Z", withdrawn_at: null },
+      { venue_id: 46, suggested_at: "2026-11-01T01:00:00Z", withdrawn_at: null },
+      { venue_id: 48, suggested_at: "2026-11-01T00:00:00Z", withdrawn_at: "2026-11-01T03:00:00Z" },
+    ],
+  };
+  const venueRow = (venue_id, name) => ({ venue_id, name, address: "1 Road", max_capacity: 300, operating_hours: "08:00-22:00", accessibility_features: null, setup_turnaround_min: null, rooms: [], status: "ACTIVE" });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    supabase.from.mockReset();
+    supabase.from.mockImplementation((table) => {
+      if (table === "venue") return queryReturning({ data: [venueRow(45, "Grand Hall"), venueRow(46, "Annex"), venueRow(47, "Rooftop")], error: null });
+      if (table === "venue_booking") {
+        return queryReturning({
+          data: [{
+            booking_id: 110, status: "APPROVED", event_id: 442,
+            start_datetime: at("11:30").toISOString(), end_datetime: at("12:30").toISOString(),
+            room: { venue_id: 45 }, event: { event_id: 442, title: "Private board meeting", coordinator_id: 98 },
+          }],
+          error: null,
+        });
+      }
+      return queryReturning({ data: [{ event_id: 442, title: "Private board meeting", coordinator_id: 98 }], error: null });
+    });
+    venueDetailModel.getVenueDetailsByIds.mockResolvedValue(new Map(["45", "46", "47"].map((id) => [id, { setupMinutes: 30, turnaroundMinutes: 45 }])));
+    venueCalendarModel.findCalendarEntries.mockResolvedValue([]);
+    // Cover photos are read from MongoDB; none here.
+    jest.spyOn(require("../../model/venuePhotoModel"), "findCoverPhotoIds").mockResolvedValue(new Map());
+  });
+
+  test("should_list_the_choices_in_rank_and_the_coordinators_current_venues_by_kind_only", async () => {
+    const result = await venueModel.getEventVenueChoices(event, ORGANISER);
+
+    expect(result.preferredVenues.map((choice) => [choice.rank, choice.venueId])).toEqual([[1, 45], [2, 46]]);
+    // Withdrawn venues are left out; the organiser's own choice is "selected".
+    expect(result.suggestedVenues.map((item) => [item.venueId, item.fromOrganiserChoices])).toEqual([[46, true], [47, false]]);
+    expect(result.suggestedVenues[1].option).toEqual(expect.objectContaining({ venueId: 47, name: "Rooftop" }));
+    const grandHall = result.preferredVenues[0];
+    expect(grandHall.requestedAvailability).toEqual(expect.objectContaining({ status: "UNAVAILABLE_BOOKING" }));
+    expect(grandHall.requestedAvailability.conflicts).toEqual([expect.objectContaining({ type: "BOOKING", label: "Unavailable – booking" })]);
+    const shown = JSON.stringify(result);
+    for (const secret of ["Private board meeting", "REQ-", "holdExpiresAt", "reasonLabel"]) expect(shown).not.toContain(secret);
+  });
+});

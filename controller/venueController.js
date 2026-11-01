@@ -56,10 +56,12 @@ const DOMAIN_ERRORS = Object.freeze({
   PHOTO_LIMIT_REACHED: [409, "This venue already has 20 photos. Delete one before adding another."],
   // Venue suggestion (SPM-72/74).
   EVENT_NOT_FOUND: [404, "Event request not found."],
-  VENUE_SUGGESTION_NOT_ALLOWED_IN_STATUS: [409, "A venue can be suggested only while the event is under review or in planning."],
+  VENUE_SUGGESTION_NOT_ALLOWED_IN_STATUS: [409, "Venues can be suggested only while the event is under review or awaiting clarification."],
+  CLARIFICATION_NOT_OPEN: [409, "This request has no open clarification. Refresh to see its current status."],
+  IDEMPOTENCY_IN_PROGRESS: [409, "This request is still being processed. Try again shortly."],
   VENUE_NOT_SELECTABLE: [409, "This venue is no longer available for new requests. Reload the venue list."],
   VENUE_CAPACITY_TOO_SMALL: [409, "This venue cannot hold the event's expected attendance."],
-  VENUE_SUGGESTION_VERSION_CONFLICT: [409, "The suggested venue was changed after you loaded it. Reload the event, then try again."],
+  VENUE_SUGGESTION_VERSION_CONFLICT: [409, "The venues for the organiser were changed after you loaded them. Reload the event, then try again."],
   IDEMPOTENCY_KEY_REUSED: [409, "This Idempotency-Key was already used for a different request."],
   // Booking decisions (SPM-186, SPM-189): business conflicts the user can act on.
   EVENT_NOT_IN_PLANNING: [409, "Bookings can be approved only while the event is in planning."],
@@ -529,39 +531,58 @@ const getSelectableVenuePhotoImage = async (req, res, next) => {
   }
 };
 
-const SUGGESTION_FIELDS = new Set(["venueId", "version"]);
-
-// PUT /api/events/:id/venue-suggestion — body { venueId, version }, where version
-// is the suggestion version the coordinator loaded (0 when there was none).
-const suggestEventVenue = async (req, res, next) => {
-  const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : null;
-  const fields = {};
-  if (!body) {
-    return validationFailed(res, { body: "Send a JSON object with venueId and version." });
+// GET /api/events/:id/venue-choices — the owner or a same-organisation organiser:
+// their venue choices and the coordinator's selected and suggested venues as cards.
+const getEventVenueChoices = async (req, res, next) => {
+  const { event, access } = req.visibleEvent;
+  if (![EVENT_RELATIONSHIP.OWNER, EVENT_RELATIONSHIP.ORGANISATION_MEMBER].includes(access.relationship)) {
+    return sendError(res, 404, "EVENT_NOT_FOUND", "Event request not found.");
   }
+  try {
+    return res.status(200).json(await venueModel.getEventVenueChoices(event, req.user));
+  } catch (err) {
+    return handleError(err, res, next);
+  }
+};
+
+const SUGGESTION_FIELDS = new Set(["venueIds", "expectedVenueIds", "note"]);
+const MAX_SUGGESTED_VENUES = 10;
+const isVenueIdList = (value, max) =>
+  Array.isArray(value) && value.length <= max && value.every((id) => Number.isInteger(id) && id > 0 && id <= MAX_INTEGER);
+
+// PUT /api/events/:id/venue-suggestions — body { venueIds, expectedVenueIds, note? }:
+// the whole list the coordinator wants for the organiser, the list they loaded,
+// and an optional note added to the clarification message.
+const suggestEventVenues = async (req, res, next) => {
+  const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return validationFailed(res, { body: "Send a JSON object with venueIds and expectedVenueIds." });
+  const fields = {};
   for (const key of Object.keys(body)) {
     if (!SUGGESTION_FIELDS.has(key)) fields[key.slice(0, 60)] = "This field cannot be set.";
   }
-  const venueId = Number.isInteger(body.venueId) && body.venueId > 0 && body.venueId <= MAX_INTEGER ? body.venueId : null;
-  if (!venueId) fields.venueId = "Choose a venue.";
-  const version = Number.isInteger(body.version) && body.version >= 0 && body.version <= MAX_INTEGER ? body.version : null;
-  if (version === null) fields.version = "Send the suggestion version you loaded (0 when there was none).";
+  if (!isVenueIdList(body.venueIds, MAX_SUGGESTED_VENUES)) fields.venueIds = `Choose up to ${MAX_SUGGESTED_VENUES} venues.`;
+  else if (new Set(body.venueIds).size !== body.venueIds.length) fields.venueIds = "Each venue can be listed once.";
+  if (!isVenueIdList(body.expectedVenueIds, MAX_INTEGER)) fields.expectedVenueIds = "Send the venues you loaded (an empty list when there were none).";
+  const note = typeof body.note === "string" ? body.note.trim() : body.note == null ? "" : null;
+  if (note === null) fields.note = "Send the note as text.";
+  else if (note.length > 1000) fields.note = "Use 1,000 characters or fewer.";
   const idempotencyKey = readIdempotencyKey(req);
   if (!idempotencyKey) fields.idempotencyKey = IDEMPOTENCY_KEY_MESSAGE;
   if (hasErrors(fields)) return validationFailed(res, fields);
 
   try {
-    const suggestion = await venueModel.suggestEventVenue({
+    const result = await venueModel.suggestEventVenues({
       actorId: req.user.user_id,
       eventId: req.visibleEvent.eventId,
-      venueId,
-      expectedVersion: version,
+      venueIds: body.venueIds,
+      expectedVenueIds: body.expectedVenueIds,
+      note: note || null,
       idempotencyKey,
     });
-    return res.status(200).json({
-      message: `${suggestion.name} was suggested to the organiser.`,
-      suggestion,
-    });
+    const message = result.clarificationRound
+      ? `Sent to the organiser in Clarification Request ${result.clarificationRound}. They can amend their venue choices there.`
+      : "The organiser has been notified.";
+    return res.status(200).json({ message, ...result });
   } catch (err) {
     return handleError(err, res, next);
   }
@@ -1045,7 +1066,8 @@ module.exports = {
   getRequestVenueAvailability,
   listSelectableVenuePhotos,
   getSelectableVenuePhotoImage,
-  suggestEventVenue,
+  suggestEventVenues,
+  getEventVenueChoices,
   listVenuePhotos,
   getVenuePhotoImage,
   addVenuePhoto,

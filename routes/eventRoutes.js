@@ -39,7 +39,8 @@ const { listEquipmentAvailability, requestTechnicalSupport } = require("../contr
 const {
   getEventVenueOptions,
   getEventVenueAvailability,
-  suggestEventVenue,
+  suggestEventVenues,
+  getEventVenueChoices,
   requestVenueBookings,
   listEventVenueBookings,
   checkVenueBookings,
@@ -97,7 +98,10 @@ router.post("/:id/technical-requests", assignedCoordinatorOnly, requestTechnical
 const eventVenueReaders = [requireAuth, requireRole(USER_ROLES.COORDINATOR, USER_ROLES.COORDINATOR_LEAD), requireVisibleEvent];
 router.get("/:id/venue-availability", ...assignedCoordinatorOnly, getEventVenueAvailability);
 router.get("/:id/venue-options", ...eventVenueReaders, getEventVenueOptions);
-router.put("/:id/venue-suggestion", ...coordinatorOnly, requireVisibleEvent, suggestEventVenue);
+router.put("/:id/venue-suggestions", ...coordinatorOnly, requireVisibleEvent, suggestEventVenues);
+// The organiser's choices and the coordinator's venues as cards; the handler
+// answers "not found" to anyone but the owner and same-organisation organisers.
+router.get("/:id/venue-choices", requireAuth, requireRole(USER_ROLES.ORGANISER), requireVisibleEvent, getEventVenueChoices);
 // SPM-179: anyone outside the event gets "not found"; the handler refuses
 // related users who are not the assigned coordinator of a PLANNING event.
 router.get("/:id/venue-bookings", ...eventVenueReaders, listEventVenueBookings);
