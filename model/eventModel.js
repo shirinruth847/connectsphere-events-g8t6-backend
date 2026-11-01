@@ -2,7 +2,7 @@
 // names (camelCase) and database column names (snake_case).
 const crypto = require("crypto");
 const supabase = require("../config/supabase");
-const { VENUE_STATUS } = require("../config/venueConstants");
+const { VENUE_STATUS, layoutChoices } = require("../config/venueConstants");
 const {
   EVENT_STATUS,
   NO_LAYOUT_PREFERENCE,
@@ -31,6 +31,10 @@ const FIELD_MAP = Object.freeze({
   accessibilityNeeds: "accessibility_needs",
   isRegistrationEnabled: "is_registration_enabled",
   registrationCapacity: "registration_capacity",
+  // The organiser's registration window (SPM-35), asked for in the request
+  // form; save_event_draft and submit_event_request store it.
+  registrationOpenAt: "registration_open_at",
+  registrationCloseAt: "registration_close_at",
 });
 
 const NUMERIC_FIELDS = ["expectedAttendance", "registrationCapacity"];
@@ -239,6 +243,8 @@ const toApi = (row, viewerUserId, { includeStoredStatus = false } = {}) => {
     equipmentRequirements: toEquipmentRequirements(equipmentRequirements),
     isRegistrationEnabled: row.is_registration_enabled,
     registrationCapacity: row.registration_capacity,
+    registrationOpenAt: row.registration_open_at ?? null,
+    registrationCloseAt: row.registration_close_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     submittedAt: row.submitted_at ?? null,
@@ -1333,7 +1339,8 @@ const findValidationContext = async (input, keptEquipmentIds = []) => {
   }
 
   return {
-    allowedLayouts: [NO_LAYOUT_PREFERENCE, ...layouts.data.map((room) => room.layout_type)],
+    // The offered (canonical) spellings, and the stored ones that requests saved before may carry.
+    allowedLayouts: [...new Set([NO_LAYOUT_PREFERENCE, ...layouts.data.map((room) => room.layout_type), ...layoutChoices(layouts.data.map((room) => room.layout_type))])],
     venueIds: venues.data.map(({ venue_id }) => venue_id),
     equipmentIds: equipment.data
       .filter((item) => (item.is_active && !item.details_pending) || keptEquipmentIds.includes(item.equipment_id))
@@ -1357,7 +1364,7 @@ const findRequestOptions = async () => {
   for (const result of [venues, rooms, equipment]) if (result.error) throw dbError(result.error);
   return {
     venues: venues.data.map(row => ({ venueId: row.venue_id, name: row.name })),
-    layouts: [...new Set([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)])].filter(Boolean),
+    layouts: layoutChoices([NO_LAYOUT_PREFERENCE, ...rooms.data.map(row => row.layout_type)]),
     equipment: equipment.data.map(row => ({ equipmentId: row.equipment_id, name: row.name })),
   };
 };

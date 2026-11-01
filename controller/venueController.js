@@ -74,6 +74,7 @@ const DOMAIN_ERRORS = Object.freeze({
   VENUE_HELD: [409, "The venue is held for another event during part of this booking's time."],
   VENUE_LOCK_TIMEOUT: [409, "Another change to this venue is in progress. Try again."],
   VENUE_BOOKINGS_UNAVAILABLE: [503, "Venue bookings cannot be decided right now. Try again shortly."],
+  BOOKING_HOLD_EXPIRED: [409, "This request was not decided in time, so the venue was released. The coordinator can send a new request."],
   BOOKING_ALREADY_STARTED: [409, "This booking has already started, so it can no longer be rejected here. Coordinate changes on the day directly."],
   // Never answer with partial availability (SPM-74 TC13, Master 7.4 step 5).
   AVAILABILITY_UNAVAILABLE: [503, "Venue availability cannot be loaded right now, so no venue is shown as available. Try again shortly."],
@@ -285,14 +286,28 @@ const updateVenueDetails = async (req, res, next) => {
   }
 };
 
+// Setup and turnaround are required (developer request of 1 November 2026).
+// They live in MongoDB, so they are saved right after the venue; if that
+// fails, the venue still exists and the reply says to add them on its page.
 const createVenue = async (req, res, next) => {
-  const { values, fields } = validateVenueCreate(req.body);
+  const { values, fields, buffers } = validateVenueCreate(req.body);
   if (hasErrors(fields)) return validationFailed(res, fields);
+  let venue;
   try {
-    const { venue } = await venueModel.createVenue(req.user.user_id, values);
-    return res.status(201).json({ message: "Venue created.", venue });
+    ({ venue } = await venueModel.createVenue(req.user.user_id, values));
   } catch (err) {
     return handleError(err, res, next);
+  }
+  try {
+    await venueModel.updateVenueDetails(req.user.user_id, venue.venueId, 0, buffers);
+    return res.status(201).json({ message: "Venue created.", venue });
+  } catch (err) {
+    console.warn("[venues] setup and turnaround not saved after create", { venueId: venue.venueId, code: err.code });
+    return res.status(201).json({
+      message: "Venue created.",
+      venue,
+      warning: "The venue was created, but its setup and turnaround times could not be saved. Add them on the venue page.",
+    });
   }
 };
 

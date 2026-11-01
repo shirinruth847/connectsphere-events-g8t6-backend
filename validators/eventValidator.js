@@ -32,6 +32,11 @@ const MESSAGES = Object.freeze({
   registrationFlagInvalid: "Registration setting must be true or false.",
   registrationCapacityRequired: "Registration capacity is required when registration is enabled.",
   registrationCapacityInvalid: "Registration capacity must be a positive whole number.",
+  registrationTimeInvalid: "Please enter a valid date and time.",
+  registrationOpenRequired: "Registration start date and time is required when registration is enabled.",
+  registrationCloseRequired: "Registration end date and time is required when registration is enabled.",
+  registrationCloseBeforeOpen: "Registration must end after it starts.",
+  registrationCloseAfterStart: "Registration must end no later than the event starts.",
   venuePreferencesInvalid: "Choose valid venue preferences without duplicates.",
   venuePreferenceTimeInvalid: "Give each venue a start and end time in whole minutes, with the end after the start.",
   venuePreferenceOutsideEvent: "Each venue's time must be within the event's start and end.",
@@ -148,6 +153,13 @@ const checkFormats = (input, errors, allowedLayouts) => {
   if (!isBlank(input.registrationCapacity) && !isPositiveInteger(input.registrationCapacity)) {
     errors.registrationCapacity = MESSAGES.registrationCapacityInvalid;
   }
+  // The registration window (SPM-35): ends after it starts, and no later than the event.
+  const open = isBlank(input.registrationOpenAt) ? null : parseDate(input.registrationOpenAt);
+  const close = isBlank(input.registrationCloseAt) ? null : parseDate(input.registrationCloseAt);
+  if (!isBlank(input.registrationOpenAt) && !open) errors.registrationOpenAt = MESSAGES.registrationTimeInvalid;
+  if (!isBlank(input.registrationCloseAt) && !close) errors.registrationCloseAt = MESSAGES.registrationTimeInvalid;
+  if (open && close && close <= open) errors.registrationCloseAt = MESSAGES.registrationCloseBeforeOpen;
+  else if (close && start && close > start) errors.registrationCloseAt = MESSAGES.registrationCloseAfterStart;
 
   return { start };
 };
@@ -250,6 +262,12 @@ const validateSubmission = (input = {}, { now = new Date(), allowedLayouts } = {
 
   if (input.isRegistrationEnabled === true && isBlank(input.registrationCapacity)) {
     errors.registrationCapacity = MESSAGES.registrationCapacityRequired;
+  }
+  if (input.isRegistrationEnabled === true && isBlank(input.registrationOpenAt) && !errors.registrationOpenAt) {
+    errors.registrationOpenAt = MESSAGES.registrationOpenRequired;
+  }
+  if (input.isRegistrationEnabled === true && isBlank(input.registrationCloseAt) && !errors.registrationCloseAt) {
+    errors.registrationCloseAt = MESSAGES.registrationCloseRequired;
   }
 
   return errors;

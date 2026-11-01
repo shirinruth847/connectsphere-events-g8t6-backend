@@ -194,6 +194,22 @@ describe("PUT /api/events/:id as an organiser (AC2, AC3)", () => {
     });
   });
 
+  // The request form sends the registration window with every save (SPM-35);
+  // refusing it made every draft save a 403 FIELD_NOT_EDITABLE.
+  test("[SPM-35] should_save_the_registration_window_with_a_draft", async () => {
+    asOwner();
+    eventModel.findVisibleEvent.mockResolvedValue(draftRow());
+    eventModel.saveDraft.mockResolvedValue({ event: draftRow({ version: 4 }), replayed: false });
+    const window = { registrationOpenAt: "2030-01-01T01:00:00+08:00", registrationCloseAt: "2030-01-05T01:00:00+08:00" };
+
+    const res = await send("put", "/api/events/42/draft", { title: "Gala", isRegistrationEnabled: true, registrationCapacity: 100, ...window });
+
+    expect(res.status).toBe(200);
+    expect(eventModel.saveDraft).toHaveBeenCalledWith(expect.objectContaining({
+      input: expect.objectContaining(window),
+    }));
+  });
+
   test("[SPM-33-TC-09] should_return_403_pointing_to_a_change_request_when_the_owner_edits_a_submitted_event", async () => {
     asOwner();
     eventModel.findVisibleEvent.mockResolvedValue(eventRow({ status: "SUBMITTED" }));

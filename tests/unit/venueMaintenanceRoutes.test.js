@@ -10,6 +10,7 @@ jest.mock("../../model/venueModel", () => ({
   createVenue: jest.fn(),
   updateVenue: jest.fn(),
   setVenueStatus: jest.fn(),
+  updateVenueDetails: jest.fn(),
 }));
 
 const request = require("supertest");
@@ -29,8 +30,11 @@ const marina = {
   contactEmail: "alex.tan@example.com",
   contactNumber: "+65 6123 4567",
   status: "ACTIVE",
+  setupMinutes: 30,
+  turnaroundMinutes: 45,
 };
-const savedVenue = { venueId: 7, ...marina, statusReason: null, version: 1 };
+const { setupMinutes: _setup, turnaroundMinutes: _turnaround, ...marinaRecord } = marina;
+const savedVenue = { venueId: 7, ...marinaRecord, statusReason: null, version: 1 };
 
 const as = (method, path) => request(app)[method](path).set("Authorization", "Bearer token");
 
@@ -100,6 +104,28 @@ describe("POST /api/venues", () => {
       status: "ACTIVE",
       status_reason: null,
     });
+    // The required setup and turnaround times are saved with the new venue.
+    expect(venueModel.updateVenueDetails).toHaveBeenCalledWith(STAFF_ID, 7, 0, { setupMinutes: 30, turnaroundMinutes: 45 });
+  });
+
+  test("should_create_the_venue_and_warn_when_its_setup_and_turnaround_cannot_be_saved", async () => {
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+    venueModel.createVenue.mockResolvedValue({ venue: savedVenue, changed: true });
+    venueModel.updateVenueDetails.mockRejectedValue(venueError("VENUE_DETAILS_UNAVAILABLE"));
+
+    const response = await as("post", "/api/venues").send(marina);
+
+    expect(response.status).toBe(201);
+    expect(response.body.venue).toEqual(savedVenue);
+    expect(response.body.warning).toMatch(/setup and turnaround times could not be saved/);
+  });
+
+  test("should_require_setup_and_turnaround_and_create_nothing", async () => {
+    const response = await as("post", "/api/venues").send({ ...marina, setupMinutes: undefined, turnaroundMinutes: "" });
+
+    expect(response.status).toBe(400);
+    expect(response.body.fields).toEqual({ setupMinutes: "Setup time is required", turnaroundMinutes: "Turnaround time is required" });
+    expect(venueModel.createVenue).not.toHaveBeenCalled();
   });
 
   test("[SPM-73-TC2] should_block_a_venue_without_name_and_capacity_and_create_nothing", async () => {

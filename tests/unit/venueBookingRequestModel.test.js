@@ -73,11 +73,13 @@ describe("requestVenueBookings (SPM-179)", () => {
   test("[SPM-179-TC-01] should_lock_check_and_save_in_one_transaction_on_one_client", async () => {
     const result = await requestBookings();
 
-    expect(statements()).toEqual(["BEGIN", "SET LOCAL", "SELECT public.begin_venue_booking_request($1,", "SELECT public.request_venue_bookings($1,", "COMMIT"]);
+    // Overdue requests at the venue expire first, under the locks (SPM-190).
+    expect(statements()).toEqual(["BEGIN", "SET LOCAL", "SELECT public.begin_venue_booking_request($1,", "SELECT public.expire_overdue_venue_bookings($1::integer[],", "SELECT public.request_venue_bookings($1,", "COMMIT"]);
     const [, beginArgs] = client.query.mock.calls[2];
     expect(beginArgs.slice(0, 4)).toEqual([20, EVENT_ID, [HALL], KEY]);
     expect(beginArgs[4]).toMatch(/^[0-9a-f]{64}$/);
-    const [, requestArgs] = client.query.mock.calls[3];
+    expect(client.query.mock.calls[3][1]).toEqual([[HALL]]);
+    const [, requestArgs] = client.query.mock.calls[4];
     expect(JSON.parse(requestArgs[3])).toEqual({ [HALL]: { setupMinutes: 30, turnaroundMinutes: 45 } });
     expect(result.bookings).toEqual([{ bookingId: 900, status: "PENDING", statusLabel: "Pending" }]);
     expect(client.release).toHaveBeenCalledWith(false);
@@ -134,7 +136,7 @@ describe("requestVenueBookings (SPM-179)", () => {
     });
     // The first venue is valid, but the whole request must stop before the SQL
     // writer can create bookings, activity, notifications or a replay result.
-    expect(statements()).toEqual(["BEGIN", "SET LOCAL", "SELECT public.begin_venue_booking_request($1,", "ROLLBACK"]);
+    expect(statements()).toEqual(["BEGIN", "SET LOCAL", "SELECT public.begin_venue_booking_request($1,", "SELECT public.expire_overdue_venue_bookings($1::integer[],", "ROLLBACK"]);
     expect(client.release).toHaveBeenCalledWith(false);
   });
 
@@ -151,7 +153,7 @@ describe("requestVenueBookings (SPM-179)", () => {
       start: "2030-03-10T13:30:00.000Z", end: "2030-03-10T14:00:00.000Z", layout: "Banquet",
       requiredFacilities: ["Stage", "Projector"], accessibilityNeeds: ["Wheelchair accessible"],
     })]);
-    const [, requestArgs] = client.query.mock.calls[3];
+    const [, requestArgs] = client.query.mock.calls[4];
     const warnings = JSON.parse(requestArgs[4]);
     expect(warnings).toEqual([{ index: 0, venueId: HALL, messages: [
       expect.stringMatching(/outside operating hours/),

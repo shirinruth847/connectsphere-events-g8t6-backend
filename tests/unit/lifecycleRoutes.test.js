@@ -160,6 +160,18 @@ describe("SPM-173 coordinator lifecycle actions", () => {
     ]);
   });
 
+  test("[SPM-173-AC8][SPM-173-TC-14] should_tell_the_coordinator_how_to_fix_registration_above_the_primary_venue", async () => {
+    eventModel.runLifecycleAction.mockRejectedValue(
+      domainError("READINESS_BLOCKED", { failures: ["REGISTRATION_EXCEEDS_PRIMARY_CAPACITY"] })
+    );
+    const res = await send("post", "/api/events/42/submit-for-safety-review", { version: 7 });
+    expect(res.status).toBe(409);
+    expect(res.body.failures).toEqual([{
+      code: "REGISTRATION_EXCEEDS_PRIMARY_CAPACITY",
+      message: expect.stringMatching(/Lower it to the venue's capacity or less; .*waitlist/),
+    }]);
+  });
+
   test.each([
     ["/api/events/42/confirm", "SAFETY_APPROVAL_REQUIRED"],
     ["/api/events/42/complete", "EVENT_NOT_ENDED"],

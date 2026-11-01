@@ -335,7 +335,8 @@ describe("reads", () => {
     expect(supabase.from).toHaveBeenCalledTimes(2);
     expect(queries.room.eq).toHaveBeenCalledWith("layout_type", "THEATRE");
     expect(queries.venue.in).toHaveBeenCalledWith("venue_id", [2]);
-    expect(context).toEqual({ allowedLayouts: ["NO_PREFERENCE", "THEATRE"], venueIds: [2], equipmentIds: [] });
+    // The stored spelling and the canonical "Theatre" both pass.
+    expect(context).toEqual({ allowedLayouts: ["NO_PREFERENCE", "THEATRE", "Theatre"], venueIds: [2], equipmentIds: [] });
   });
 
   test("[SPM-73] should_accept_only_available_venues_as_preferences", async () => {

@@ -423,6 +423,12 @@ const getManagedVenueDetails = async (venueId) => {
 };
 
 const ACTIVE_BOOKING_STATUSES = ["PENDING", "APPROVED"];
+// A PENDING request is the venue's hold until its hold_expires_at (SPM-190,
+// developer decision of 1 November 2026). The expiry job and the booking
+// request path mark overdue ones EXPIRED; until then reads leave them out, so
+// an overdue request never shows the venue as taken.
+const stillHolding = (query, now = new Date()) =>
+  query.in("status", ACTIVE_BOOKING_STATUSES).or(`hold_expires_at.is.null,hold_expires_at.gt.${now.toISOString()}`);
 const BUFFER_FIELDS = ["setupMinutes", "turnaroundMinutes"];
 
 const mongoUnavailable = (error) => {
@@ -612,11 +618,11 @@ const getVenueAvailability = async ({ from, to, venueIds = [], check = null, exc
   if (!venues.length) return { from: from.toISOString(), to: to.toISOString(), venues: [] };
   const ids = venues.map((venue) => venue.venue_id);
 
-  const { data: bookingRows, error: bookingError } = await supabase
+  const bookingQuery = supabase
     .from("venue_booking")
     .select("booking_id,status,start_datetime,end_datetime,event_id,room:room!inner(venue_id),event:event!inner(event_id,title,coordinator_id)")
-    .in("room.venue_id", ids)
-    .in("status", ACTIVE_BOOKING_STATUSES)
+    .in("room.venue_id", ids);
+  const { data: bookingRows, error: bookingError } = await stillHolding(bookingQuery)
     .lt("start_datetime", new Date(to.getTime() + BUFFER_MARGIN_MS).toISOString())
     .gt("end_datetime", new Date(from.getTime() - BUFFER_MARGIN_MS).toISOString());
   if (bookingError) throw bookingError;
@@ -1177,8 +1183,8 @@ const getSelectableVenuePhotoImage = async (venueId, photoId) => {
 const BOOKING_VENUE_SELECT =
   "room:room!inner(room_id,layout_type,capacity,venue:venue!inner(venue_id,name,address,max_capacity,operating_hours))";
 const BOOKING_FIELDS =
-  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,calendar_hold_id,reviewer:user!venue_booking_reviewed_by_fkey(name)";
-const BOOKING_LIST_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT},event:event!inner(event_id,title,event_type,status)`;
+  "booking_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,reviewed_at,created_at,updated_at,event_id,calendar_hold_id,hold_expires_at,reviewer:user!venue_booking_reviewed_by_fkey(name)";
+const BOOKING_LIST_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT},event:event!inner(event_id,title,event_type,status,start_datetime,end_datetime)`;
 const BOOKING_DETAIL_SELECT = `${BOOKING_FIELDS},${BOOKING_VENUE_SELECT}`;
 // Venue Staff see the event's venue-relevant details and the coordinator's
 // name, never participant data, organiser contact details or internal notes
@@ -1226,6 +1232,8 @@ const toBookingSummary = (row) => ({
   updatedAt: row.updated_at,
   // Requested by confirming a tentative hold (SPM-188 AC9).
   fromHold: Boolean(row.calendar_hold_id),
+  // A pending request must be decided by then, or the venue is released.
+  decideBy: row.status === "PENDING" ? row.hold_expires_at ?? null : null,
 });
 
 const toBookingListItem = (row) => ({
@@ -1235,6 +1243,8 @@ const toBookingListItem = (row) => ({
     requestId: formatRequestId(row.event.event_id),
     title: row.event.title,
     status: row.event.status,
+    startDatetime: row.event.start_datetime ?? null,
+    endDatetime: row.event.end_datetime ?? null,
     ...toEventType(row.event.event_type),
   },
 });
@@ -1245,8 +1255,9 @@ const DECISION_CLOSED_EVENT_STATUSES = new Set([EVENT_STATUS.COMPLETED, EVENT_ST
 // the database re-checks every rule when the decision is submitted.
 const toDecisionActions = (row, eventStatus, now) => {
   const eventOpen = !DECISION_CLOSED_EVENT_STATUSES.has(eventStatus);
+  const holdExpired = row.status === "PENDING" && row.hold_expires_at && new Date(row.hold_expires_at).getTime() <= now;
   return {
-    canApprove: row.status === "PENDING" && eventStatus === EVENT_STATUS.PLANNING,
+    canApprove: row.status === "PENDING" && !holdExpired && eventStatus === EVENT_STATUS.PLANNING,
     canReject:
       eventOpen
       && (row.status === "PENDING" || (row.status === "APPROVED" && new Date(row.start_datetime).getTime() > now)),
@@ -1346,20 +1357,23 @@ const findVenueBookings = async ({ status, venueId, eventId, from, to, limit, q 
   if (q) query = query.or(await bookingSearchFilter(q));
   query = applyBookingSort(query, sort, order).limit(limit + 1);
 
-  // The dashboard counts cover every booking, whatever the search or filters.
-  const countWithStatus = (bookingStatus) =>
-    supabase.from("venue_booking").select("booking_id", { count: "exact", head: true }).eq("status", bookingStatus);
-  const [list, pending, approved] = await Promise.all([query, countWithStatus("PENDING"), countWithStatus("APPROVED")]);
+  // The dashboard counts cover every booking, whatever the search or filters,
+  // and count events: My Requests shows one card per event (developer request
+  // of 1 November 2026), so three venues for one event are one request.
+  const eventsWithStatus = (bookingStatus) =>
+    supabase.from("venue_booking").select("event_id").eq("status", bookingStatus);
+  const [list, pending, approved] = await Promise.all([query, eventsWithStatus("PENDING"), eventsWithStatus("APPROVED")]);
   if (list.error) throw list.error;
   if (pending.error) throw pending.error;
   if (approved.error) throw approved.error;
+  const distinctEvents = (rows) => new Set((rows || []).map((row) => row.event_id)).size;
 
   const rows = list.data || [];
   return {
     bookings: rows.slice(0, limit).map(toBookingListItem),
     hasMore: rows.length > limit,
-    pendingCount: pending.count ?? 0,
-    approvedCount: approved.count ?? 0,
+    pendingCount: distinctEvents(pending.data),
+    approvedCount: distinctEvents(approved.data),
   };
 };
 
@@ -1515,6 +1529,16 @@ const approveUnderVenueLock = (actorId, bookingId, expectedStatus) => withVenueL
     [actorId, bookingId],
   )).rows[0].result;
 
+  if (locked.status === "PENDING") {
+    // A function call: the lock connection's role reads no tables directly.
+    const { overdue } = (await client.query(
+      "SELECT public.venue_booking_hold_expired($1) AS overdue",
+      [bookingId],
+    )).rows[0] ?? {};
+    if (overdue) throw venueError("BOOKING_HOLD_EXPIRED");
+    // Other overdue requests at the venue no longer hold it (SPM-190).
+    await client.query("SELECT public.expire_overdue_venue_bookings($1::integer[], 500)", [[locked.venueId]]);
+  }
   let calendar = { setupMinutes: null, turnaroundMinutes: null };
   if (locked.status === "PENDING") {
     calendar = await readApprovalCalendar(
@@ -1782,11 +1806,10 @@ const loadFitContext = async (items) => {
 
   const [venueResult, bookingResult] = await Promise.all([
     supabase.from("venue").select(FIT_VENUE_SELECT).in("venue_id", venueIds),
-    supabase
+    stillHolding(supabase
       .from("venue_booking")
       .select(FIT_BOOKING_SELECT)
-      .in("venue_id", venueIds)
-      .in("status", ACTIVE_BOOKING_STATUSES)
+      .in("venue_id", venueIds))
       .lt("start_datetime", to.toISOString())
       .gt("end_datetime", from.toISOString()),
   ]);
@@ -2108,6 +2131,9 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
         [actorId, eventId, venueIds, idempotencyKey, requestHash]
       );
       if (started.replay) return started.replay;
+      // Overdue requests at these venues expire first, under the venue locks,
+      // so they never block this request (SPM-190).
+      await client.query("SELECT public.expire_overdue_venue_bookings($1::integer[], 500)", [venueIds]);
 
       // Database time, as the hold expiry job uses under the same locks, so the
       // two agree on whether a hold has expired (SPM-188 AC10).
@@ -2131,7 +2157,7 @@ const requestVenueBookings = async ({ actorId, eventId, bookings, idempotencyKey
 };
 
 const EVENT_BOOKING_SELECT =
-  "booking_id,venue_id,label,status,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,is_primary,occupied_range,created_at,venue:venue!venue_booking_venue_id_fkey(name)";
+  "booking_id,venue_id,label,status,hold_expires_at,start_datetime,end_datetime,expected_attendance,layout_type,required_facilities,accessibility_requirements,special_requirements,rejection_reason,is_primary,occupied_range,created_at,venue:venue!venue_booking_venue_id_fkey(name)";
 
 // PostgREST returns a tstzrange as text, for example
 // ["2030-01-01 09:30:00+00","2030-01-01 12:45:00+00").
@@ -2166,6 +2192,8 @@ const toEventVenueBooking = (row) => ({
   specialRequirements: row.special_requirements,
   rejectionReason: row.rejection_reason,
   requestedAt: row.created_at,
+  // A pending request holds the venue until then (SPM-190).
+  decideBy: row.status === "PENDING" ? row.hold_expires_at ?? null : null,
 });
 
 // Every booking of one event, for its assigned coordinator and supervising Lead
@@ -3232,6 +3260,18 @@ const releaseVenueHold = ({ actorId, holdId }) => changeVenueHold({ actorId, hol
 // MongoDB acknowledgement follows COMMIT and is guarded by version + expiry.
 // If it fails (or the process stops), a retry sees the durable claim, sends no
 // duplicate notice, and repairs the marker. No marker can hide rolled-back work.
+// Pending booking requests are the venue holds (SPM-190): the 24-hour
+// reminder, then expiry. Both are idempotent database functions.
+const processDueBookingHolds = async ({ limit = 100 } = {}) => {
+  const [reminded, expired] = await Promise.all([
+    supabase.rpc("remind_expiring_venue_bookings", { p_limit: limit }),
+    supabase.rpc("expire_overdue_venue_bookings", { p_venue_ids: null, p_limit: limit }),
+  ]);
+  if (reminded.error) throw reminded.error;
+  if (expired.error) throw expired.error;
+  return { reminded: Number(reminded.data) || 0, expired: Number(expired.data) || 0 };
+};
+
 const processDueHolds = async ({ limit = 100 } = {}) => {
   const now = new Date(await callHoldRpc("venue_hold_clock", {}));
   const due = await venueCalendarModel.findHoldsExpiringBy(new Date(now.getTime() + venueConflictModel.HOLD_CUTOFF_MS), { limit, now });
@@ -3280,6 +3320,7 @@ module.exports = {
   extendVenueHold,
   releaseVenueHold,
   processDueHolds,
+  processDueBookingHolds,
   createVenueBlock,
   changeVenueBlock,
   restoreVenueIncident,

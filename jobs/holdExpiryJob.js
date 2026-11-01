@@ -3,13 +3,19 @@
 // overdue holds as EXPIRED. Reads already treat an overdue hold as expired, so
 // a late run changes no availability. Notifications use a unique key per hold
 // and kind, so a repeated or parallel run never sends one twice.
+// Pending booking requests are the venue holds now (SPM-190, developer
+// decision of 1 November 2026): the same run reminds and expires them.
 // Same shape as eventReminderJob.js.
 const venueModel = require("../model/venueModel");
 
 const BATCH_SIZE = 100;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 
-const runHoldExpiry = async () => venueModel.processDueHolds({ limit: BATCH_SIZE });
+const runHoldExpiry = async () => {
+  const requests = await venueModel.processDueBookingHolds({ limit: BATCH_SIZE });
+  const holds = await venueModel.processDueHolds({ limit: BATCH_SIZE });
+  return { ...holds, reminded: holds.reminded + requests.reminded, expired: holds.expired + requests.expired };
+};
 
 // HOLD_EXPIRY_INTERVAL_MS sets the period; 0 turns the job off.
 const readIntervalMs = () => {

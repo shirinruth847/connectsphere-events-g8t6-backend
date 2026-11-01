@@ -79,7 +79,10 @@ const READINESS_MESSAGES = Object.freeze({
   NO_PRIMARY_VENUE: "Keep exactly one active venue booking: it becomes the primary venue. Events at several venues cannot be submitted until a primary venue can be chosen.",
   TECHNICAL_NOT_APPROVED: "The technical request must be approved, or marked as not required.",
   REGISTRATION_INVALID: "Registration is enabled without a valid capacity.",
-  REGISTRATION_EXCEEDS_PRIMARY_CAPACITY: "Registration capacity is larger than the primary venue's capacity.",
+  // SPM-173 AC8 and Master T18 keep this a readiness block; the places offered
+  // never exceed the venue anyway, so the fix is to lower the number.
+  REGISTRATION_EXCEEDS_PRIMARY_CAPACITY:
+    "Registration capacity is larger than the primary venue's capacity. Lower it to the venue's capacity or less; once the venue is full, further attendees join the waitlist.",
   OPEN_BLOCKING_INCIDENT: "A venue or equipment incident is still open.",
   READINESS_DATA_PENDING: "Incident readiness data is unavailable; try again after the resource schema is deployed.",
   OPEN_CHANGE_REQUEST: "A change request is still open.",
@@ -138,13 +141,12 @@ const EVENT_FIELD_GROUPS = Object.freeze({
   ]),
 });
 
-// What the owner may change while the request is a draft: the fields the
-// draft API accepts (registration open and close times are not accepted yet).
+// What the owner may change while the request is a draft: every field the
+// request form sends, the registration window included (SPM-35).
 const OWNER_DRAFT_FIELDS = Object.freeze([
   ...EVENT_FIELD_GROUPS.ORDINARY,
   ...EVENT_FIELD_GROUPS.SIGNIFICANT,
-  "isRegistrationEnabled",
-  "registrationCapacity",
+  ...EVENT_FIELD_GROUPS.REGISTRATION,
 ]);
 
 // Statuses in which the assigned coordinator may edit ordinary fields, in Master

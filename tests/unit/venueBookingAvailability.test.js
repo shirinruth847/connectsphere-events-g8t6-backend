@@ -18,7 +18,7 @@ const signInAs = (role) => {
 };
 const queryReturning = (result) => {
   const query = { then: (resolve, reject) => Promise.resolve(result).then(resolve, reject) };
-  for (const method of ["select", "eq", "in", "order", "lt", "gt"]) query[method] = jest.fn(() => query);
+  for (const method of ["select", "eq", "in", "order", "lt", "gt", "or"]) query[method] = jest.fn(() => query);
   query.maybeSingle = jest.fn(() => Promise.resolve(result));
   return query;
 };

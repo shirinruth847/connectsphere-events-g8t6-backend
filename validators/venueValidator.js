@@ -58,7 +58,7 @@ const DETAIL_COLUMNS = Object.freeze({
   contactEmail: "contact_email",
   contactNumber: "contact_number",
 });
-const CREATE_FIELDS = new Set([...Object.keys(DETAIL_COLUMNS), "status", "statusReason"]);
+const CREATE_FIELDS = new Set([...Object.keys(DETAIL_COLUMNS), "status", "statusReason", "setupMinutes", "turnaroundMinutes"]);
 const UPDATE_FIELDS = new Set([...Object.keys(DETAIL_COLUMNS), "version"]);
 const STATUS_FIELDS = new Set(["status", "reason", "version", "confirmUpcomingBookings"]);
 
@@ -184,7 +184,17 @@ const validateVenueCreate = (body) => {
   values.status = body.status === undefined ? VENUE_STATUS.ACTIVE : body.status;
   checkStatus(values.status, fields);
   values.status_reason = checkReason(body, "statusReason", values.status, fields);
-  return { values, fields };
+
+  // Setup and turnaround are required when a venue is created (developer
+  // request of 1 November 2026); they are MongoDB details, set once.
+  const buffers = {};
+  for (const [key, label] of [["setupMinutes", "Setup time"], ["turnaroundMinutes", "Turnaround time"]]) {
+    const minutes = body[key] === undefined || body[key] === null || body[key] === "" ? undefined : toWholeNumber(body[key]);
+    if (minutes === undefined) fields[key] = `${label} is required`;
+    else if (!Number.isInteger(minutes) || minutes < 0 || minutes > DETAIL_LIMITS.maxBufferMinutes) fields[key] = DETAIL_MESSAGES.minutesInvalid;
+    else buffers[key] = minutes;
+  }
+  return { values, fields, buffers };
 };
 
 // Update: only the details sent are checked and changed. current is the loaded

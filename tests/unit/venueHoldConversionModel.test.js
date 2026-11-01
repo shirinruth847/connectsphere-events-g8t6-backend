@@ -88,7 +88,7 @@ describe("confirming a hold in the booking request transaction (SPM-188 AC9)", (
     await confirm();
 
     expect(statements()).toEqual([
-      "BEGIN", "SET LOCAL", "SELECT public.begin_venue_booking_request($1,", "SELECT clock_timestamp()",
+      "BEGIN", "SET LOCAL", "SELECT public.begin_venue_booking_request($1,", "SELECT public.expire_overdue_venue_bookings($1::integer[],", "SELECT clock_timestamp()",
       "SELECT public.request_venue_bookings($1,", "SELECT public.record_venue_hold_conversion($1,", "SELECT clock_timestamp()", "COMMIT",
     ]);
     expect(venueCalendarModel.convertHold).toHaveBeenCalledWith(expect.objectContaining({

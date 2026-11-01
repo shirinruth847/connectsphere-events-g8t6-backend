@@ -47,6 +47,9 @@ const validRequest = () => ({
   accessibilityNeeds: ["Wheelchair access"],
   isRegistrationEnabled: true,
   registrationCapacity: 150,
+  // The registration window (SPM-35): required when registration is enabled.
+  registrationOpenAt: inDays(3),
+  registrationCloseAt: inDays(6),
 });
 
 const eventRow = (overrides = {}) => ({

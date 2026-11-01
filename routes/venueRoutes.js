@@ -25,10 +25,7 @@ const {
   getVenueHistory,
   getBookingAvailability,
   listHoldRequests,
-  placeVenueHold,
-  declineHoldRequest,
   withdrawHoldRequest,
-  extendVenueHold,
   releaseVenueHold,
   approveVenueBooking,
   rejectVenueBooking,
@@ -78,13 +75,13 @@ router.get("/bookings/events/:eventId", ...venueStaffOnly, getEventVenueBookings
 // The venue-relevant part of the event's history (SPM-186).
 router.get("/bookings/events/:eventId/history", ...venueStaffOnly, validateCursorPagination, getEventBookingHistory);
 router.get("/bookings/:bookingId", ...venueStaffOnly, getVenueBooking);
-// Tentative holds (SPM-190); declared before /:venueId.
+// Tentative holds (SPM-190); declared before /:venueId. A booking request is
+// the venue hold since 1 November 2026, so holds are no longer requested,
+// placed or extended; earlier ones can still be listed, withdrawn or released
+// until they expire.
 router.get("/hold-requests", ...venueStaffOnly, listHoldRequests);
-router.post("/hold-requests/:requestId/place", ...venueStaffOnly, placeVenueHold);
-router.post("/hold-requests/:requestId/decline", ...venueStaffOnly, declineHoldRequest);
 // The coordinator withdraws their own request; the database checks the relationship.
 router.post("/hold-requests/:requestId/withdraw", requireAuth, requireRole(USER_ROLES.COORDINATOR), withdrawHoldRequest);
-router.post("/holds/:holdId/extend", ...venueStaffOnly, extendVenueHold);
 // Venue Staff, or the event's assigned coordinator (checked by the database).
 router.post("/holds/:holdId/release", requireAuth, requireRole(USER_ROLES.VENUE_STAFF, USER_ROLES.COORDINATOR), releaseVenueHold);
 
