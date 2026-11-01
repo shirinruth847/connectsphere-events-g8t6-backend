@@ -138,13 +138,11 @@ const EVENT_FIELD_GROUPS = Object.freeze({
   ]),
 });
 
-// What the owner may change while the request is a draft: the fields the
-// draft API accepts (registration open and close times are not accepted yet).
+// What the owner may change while the request is a draft.
 const OWNER_DRAFT_FIELDS = Object.freeze([
   ...EVENT_FIELD_GROUPS.ORDINARY,
   ...EVENT_FIELD_GROUPS.SIGNIFICANT,
-  "isRegistrationEnabled",
-  "registrationCapacity",
+  ...EVENT_FIELD_GROUPS.REGISTRATION,
 ]);
 
 // Statuses in which the assigned coordinator may edit ordinary fields, in Master

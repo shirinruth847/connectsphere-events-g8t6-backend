@@ -75,6 +75,8 @@ const validRequest = (label) => ({
   accessibilityNeeds: ["Wheelchair access"],
   isRegistrationEnabled: true,
   registrationCapacity: 150,
+  registrationOpenAt: inDays(-1),
+  registrationCloseAt: inDays(0),
 });
 
 const rows = async (query, step) => {

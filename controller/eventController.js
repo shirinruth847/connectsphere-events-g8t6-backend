@@ -946,7 +946,10 @@ const checkAmendments = async (existing, changes) => {
 
   const input = eventModel.pickEventInput(changes);
   if (Object.keys(input).length === 0) return { errors: { changes: MESSAGES.amendmentEmpty } };
-  const errors = await validateWith(validateSubmission, mergeWithExisting(existing, input), existing);
+  // Older submitted requests may have no registration window, and these dates
+  // cannot be amended here. Still validate any stored dates and their ordering.
+  const validateAmendment = (values, context) => validateSubmission(values, { ...context, requireRegistrationDates: false });
+  const errors = await validateWith(validateAmendment, mergeWithExisting(existing, input), existing);
   // The 48-hour lead time applies only to a newly chosen start (team decision, 2026-10-24).
   if (input.startDatetime === undefined && errors.startDatetime === MESSAGES.leadTime) delete errors.startDatetime;
   return { input, errors };

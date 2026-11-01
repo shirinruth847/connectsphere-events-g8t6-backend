@@ -47,6 +47,8 @@ const validRequest = () => ({
   accessibilityNeeds: ["Wheelchair access"],
   isRegistrationEnabled: true,
   registrationCapacity: 150,
+  registrationOpenAt: inDays(-1),
+  registrationCloseAt: inDays(0),
 });
 
 const eventRow = (overrides = {}) => ({
@@ -100,6 +102,77 @@ const ROUTES = [
   ["put", "/api/events/42/draft"],
   ["put", "/api/events/42/submit"],
 ];
+
+describe("organiser registration dates across request routes", () => {
+  test.each([
+    ["post", "/api/events"],
+    ["put", "/api/events/42/submit"],
+  ])("%s %s still requires both dates for enabled registration", async (method, path) => {
+    eventModel.findOwnEvent.mockResolvedValue(eventRow());
+    const res = await send(method, path, {
+      ...validRequest(), registrationOpenAt: null, registrationCloseAt: null,
+    }, { "Idempotency-Key": KEY });
+    expect(res.status).toBe(400);
+    expect(res.body.fields).toEqual({
+      registrationOpenAt: MESSAGES.registrationOpenRequired,
+      registrationCloseAt: MESSAGES.registrationCloseRequired,
+    });
+    expect(eventModel.submitEvent).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["post", "/api/events", "submitEvent", 201],
+    ["post", "/api/events/drafts", "saveDraft", 201],
+    ["put", "/api/events/42/draft", "saveDraft", 200],
+    ["put", "/api/events/42", "saveDraft", 200],
+    ["put", "/api/events/42/submit", "submitEvent", 200],
+  ])("%s %s accepts and returns the dates", async (method, path, writer, status) => {
+    const input = validRequest();
+    const row = eventRow({ version: 1, is_registration_enabled: true, registration_capacity: 150,
+      registration_open_at: input.registrationOpenAt, registration_close_at: input.registrationCloseAt });
+    eventModel.findVisibleEvent.mockResolvedValue(row);
+    eventModel.findOwnEvent.mockResolvedValue(row);
+    eventModel[writer].mockResolvedValue({ event: row, replayed: false });
+    const body = path === "/api/events/42" ? { ...input, version: 1 } : input;
+    const res = await send(method, path, body, { "Idempotency-Key": KEY });
+    expect(res.status).toBe(status);
+    expect(eventModel[writer]).toHaveBeenCalledWith(expect.objectContaining({ input: expect.objectContaining({
+      registrationOpenAt: input.registrationOpenAt, registrationCloseAt: input.registrationCloseAt,
+    }) }));
+    expect(res.body.event).toMatchObject({ registrationOpenAt: input.registrationOpenAt, registrationCloseAt: input.registrationCloseAt });
+  });
+
+  test("autosave validates new dates against the saved event start", async () => {
+    const input = validRequest();
+    eventModel.findVisibleEvent.mockResolvedValue(eventRow({ start_datetime: input.startDatetime }));
+    eventModel.saveDraft.mockResolvedValue({ event: eventRow(), replayed: false });
+    const res = await send("put", "/api/events/42/draft", {
+      registrationOpenAt: input.registrationOpenAt, registrationCloseAt: input.registrationCloseAt, isAutoSave: true,
+    });
+    expect(res.status).toBe(200);
+    expect(eventModel.saveDraft).toHaveBeenCalledWith(expect.objectContaining({ isAutoSave: true }));
+
+    eventModel.saveDraft.mockClear();
+    const rejected = await send("put", "/api/events/42/draft", { registrationCloseAt: inDays(8), isAutoSave: true });
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.fields.registrationCloseAt).toBe(MESSAGES.registrationCloseAfterEventStart);
+    expect(eventModel.saveDraft).not.toHaveBeenCalled();
+  });
+
+  test("submitting a saved draft preserves and validates its stored dates", async () => {
+    const input = validRequest();
+    const row = eventRow({ purpose: input.purpose, description: input.description,
+      start_datetime: input.startDatetime, end_datetime: input.endDatetime, expected_attendance: 150,
+      preferred_layout_type: "THEATRE", is_registration_enabled: true, registration_capacity: 150,
+      registration_open_at: input.registrationOpenAt, registration_close_at: input.registrationCloseAt });
+    eventModel.findOwnEvent.mockResolvedValue(row);
+    eventModel.submitEvent.mockResolvedValue({ event: { ...row, status: "SUBMITTED" } });
+    const res = await send("put", "/api/events/42/submit", {});
+    expect(res.status).toBe(200);
+    expect(eventModel.submitEvent).toHaveBeenCalledWith(expect.objectContaining({ input: {} }));
+    expect(res.body.event.registrationCloseAt).toBe(input.registrationCloseAt);
+  });
+});
 
 describe("authentication and role checks", () => {
   test.each(ROUTES)(

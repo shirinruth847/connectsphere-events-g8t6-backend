@@ -23,6 +23,48 @@ const queryReturning = (result) => {
 
 beforeEach(() => jest.clearAllMocks());
 
+describe("organiser registration date mapping", () => {
+  const dates = { registrationOpenAt: "2026-11-01T20:04:00+08:00", registrationCloseAt: "2026-11-02T22:04:00+08:00" };
+  const columns = { registration_open_at: dates.registrationOpenAt, registration_close_at: dates.registrationCloseAt };
+
+  test.each(["saveDraft", "submitEvent"])("%s sends and returns both dates", async (method) => {
+    supabase.rpc.mockResolvedValue({ data: { event: { event_id: 7, ...columns } }, error: null });
+    const saved = await eventModel[method]({ organiserId: 9, input: { title: "Forum", ...dates }, idempotencyKey: "dates-12345678" });
+    expect(supabase.rpc.mock.calls[0][1].p_event).toEqual({ title: "Forum", ...columns });
+    expect(eventModel.toApi(saved.event)).toMatchObject(dates);
+  });
+
+  test("omitted dates stay omitted in patches and explicit nulls clear them", () => {
+    expect(eventModel.toRow({ title: "Forum" })).not.toHaveProperty("registration_open_at");
+    expect(eventModel.toRow({ registrationOpenAt: null, registrationCloseAt: null }))
+      .toEqual({ registration_open_at: null, registration_close_at: null });
+    expect(eventModel.toApi({ event_id: 7 })).toMatchObject({ registrationOpenAt: null, registrationCloseAt: null });
+    expect(eventModel.hashRequest(eventModel.toRow(dates), {}))
+      .not.toBe(eventModel.hashRequest(eventModel.toRow({ ...dates, registrationCloseAt: null }), {}));
+  });
+
+  test.each([
+    ["registrationOpenAt:REQUIRED", "registrationOpenAt", MESSAGES.registrationOpenRequired],
+    ["registrationCloseAt:REQUIRED", "registrationCloseAt", MESSAGES.registrationCloseRequired],
+    ["registrationCloseAt:END_BEFORE_START", "registrationCloseAt", MESSAGES.registrationCloseBeforeOpen],
+    ["registrationCloseAt:AFTER_EVENT_START", "registrationCloseAt", MESSAGES.registrationCloseAfterEventStart],
+  ])("maps database rejection %s to the form", async (details, field, message) => {
+    supabase.rpc.mockResolvedValue({ data: null, error: { message: "INVALID_EVENT_SUBMISSION", details } });
+    await expect(eventModel.submitEvent({ organiserId: 9, input: dates })).rejects.toMatchObject({
+      code: "VALIDATION_FAILED", fields: { [field]: message },
+    });
+  });
+
+  test("maps the existing database window constraint to the closing field", async () => {
+    supabase.rpc.mockResolvedValue({ data: null, error: {
+      code: "23514", message: 'new row violates check constraint "event_registration_window_check"',
+    } });
+    await expect(eventModel.saveDraft({ organiserId: 9, input: dates })).rejects.toMatchObject({
+      code: "VALIDATION_FAILED", fields: { registrationCloseAt: MESSAGES.registrationCloseBeforeOpen },
+    });
+  });
+});
+
 describe("submitEvent / saveDraft", () => {
   test("[SPM-35-AC3] should_send_normalized_fields_and_numeric_requirements_to_the_atomic_rpc", async () => {
     supabase.rpc.mockResolvedValue({

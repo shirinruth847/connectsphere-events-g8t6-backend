@@ -358,6 +358,7 @@ describe("PUT /api/events/:id as the assigned coordinator (AC4, AC6, AC7)", () =
 
   test.each([
     ["registrationCapacity", 10, "This field can only be changed through a change request."],
+    ["registrationOpenAt", "2027-01-01T08:00:00+08:00", "This field can only be changed through a change request."],
     ["registrationCloseAt", "2027-01-01T09:00:00+08:00", "This field can only be changed through a change request."],
     ["status", "CONFIRMED", "This field is set by the system."],
     ["coordinatorId", 99, "This field is set by the system."],
